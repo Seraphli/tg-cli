@@ -17,7 +17,12 @@ type PairingAllow struct {
 	DefaultChatID string   `json:"defaultChatId"`
 }
 
+var ConfigDir string // Set by root command PersistentPreRun
+
 func GetConfigDir() string {
+	if ConfigDir != "" {
+		return ConfigDir
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".tg-cli")
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Seraphli/tg-cli/internal/config"
 )
 
 var debugMode bool
@@ -18,8 +20,7 @@ func IsDebugMode() bool {
 }
 
 func getLogPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".tg-cli", "bot.log")
+	return filepath.Join(config.GetConfigDir(), "bot.log")
 }
 
 func ensureLogDir() error {

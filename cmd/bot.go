@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -109,7 +112,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		return nil
 	})
-	http.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.NotFound(w, r)
 			return
@@ -157,10 +161,21 @@ func runBot(cmd *cobra.Command, args []string) {
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 	go func() {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		<-ctx.Done()
+		logger.Info("Received shutdown signal, stopping...")
+		bot.Stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
 		logger.Info(fmt.Sprintf("Hook HTTP server listening on %s", addr))
-		if err := http.ListenAndServe(addr, nil); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error(fmt.Sprintf("HTTP server error: %v", err))
 		}
 	}()

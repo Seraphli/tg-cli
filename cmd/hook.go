@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +19,12 @@ var HookCmd = &cobra.Command{
 	Use:   "hook",
 	Short: "Hook command called by Claude Code (reads stdin payload)",
 	Run:   runHook,
+}
+
+var hookPortFlag int
+
+func init() {
+	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
 }
 
 // extractAssistantBody reads a JSONL transcript and returns the last assistant message text.
@@ -114,11 +120,13 @@ func runHook(cmd *cobra.Command, args []string) {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	port := 12500
-	if portStr := os.Getenv("TG_CLI_PORT"); portStr != "" {
-		if p, err := strconv.Atoi(portStr); err == nil {
-			port = p
-		}
+	port := hookPortFlag
+	if port == 0 {
+		creds, _ := config.LoadCredentials()
+		port = creds.Port
+	}
+	if port == 0 {
+		port = 12500
 	}
 	hookData := map[string]string{
 		"event":     event,

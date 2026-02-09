@@ -41,7 +41,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to get executable path: %v\n", err)
 		os.Exit(1)
 	}
-	hookCommand := fmt.Sprintf("TG_CLI_PORT=%d %s hook", port, exePath)
+	hookCommand := fmt.Sprintf("%s hook --port %d", exePath, port)
+	if config.ConfigDir != "" {
+		hookCommand = fmt.Sprintf("%s --config-dir %s hook --port %d", exePath, config.ConfigDir, port)
+	}
 	home, _ := os.UserHomeDir()
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	var settings map[string]interface{}

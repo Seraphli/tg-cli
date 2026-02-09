@@ -4,8 +4,10 @@ set -euo pipefail
 # Config
 BOT_SESSION="tg-cli-e2e-bot"
 CLAUDE_SESSION="tg-cli-e2e-claude"
-LOG_FILE="$HOME/.tg-cli/bot.log"
-CREDENTIALS="$HOME/.tg-cli/credentials.json"
+TEST_CONFIG_DIR="$HOME/.tg-cli-test"
+TEST_PORT=12501
+LOG_FILE="$TEST_CONFIG_DIR/bot.log"
+CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
 TIMEOUT=60
 
 # Prerequisite: check pairing is done
@@ -34,9 +36,9 @@ echo "=== tg-cli E2E Test ==="
 touch "$LOG_FILE"
 LOG_BEFORE=$(wc -l < "$LOG_FILE")
 
-# 2. Start bot in tmux with --debug
+# 2. Start bot in tmux with --debug and isolated config
 tmux new-session -d -s "$BOT_SESSION"
-tmux send-keys -t "$BOT_SESSION" "cd $(pwd) && ./tg-cli bot --debug" Enter
+tmux send-keys -t "$BOT_SESSION" "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --debug" Enter
 echo "Waiting for bot to start..."
 sleep 5
 
@@ -44,8 +46,8 @@ sleep 5
 go build -o tg-cli
 echo "Project built."
 
-# 4. Setup hooks
-./tg-cli setup
+# 4. Setup hooks with isolated config and port
+./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT"
 echo "Hooks installed."
 
 # 5. Start Claude in tmux (--allow-dangerously-skip-permissions enables bypass option without forcing it)
