@@ -18,9 +18,11 @@ var SetupCmd = &cobra.Command{
 }
 
 var setupPortFlag int
+var setupUninstallFlag bool
 
 func init() {
 	SetupCmd.Flags().IntVar(&setupPortFlag, "port", 0, "HTTP server port (overrides config)")
+	SetupCmd.Flags().BoolVar(&setupUninstallFlag, "uninstall", false, "Remove hooks for this instance")
 }
 
 func runSetup(cmd *cobra.Command, args []string) {
@@ -77,14 +79,29 @@ func runSetup(cmd *cobra.Command, args []string) {
 		if !ok {
 			existing = []interface{}{}
 		}
-		var filtered []interface{}
+		filtered := []interface{}{}
 		for _, h := range existing {
 			hJSON, _ := json.Marshal(h)
-			if !strings.Contains(string(hJSON), "tg-cli") {
+			hStr := string(hJSON)
+			if !strings.Contains(hStr, "tg-cli") {
 				filtered = append(filtered, h)
+				continue
 			}
+			// Only remove hooks matching the same instance (by config-dir)
+			if config.ConfigDir != "" {
+				if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
+					continue
+				}
+			} else {
+				if !strings.Contains(hStr, "--config-dir") {
+					continue
+				}
+			}
+			filtered = append(filtered, h)
 		}
-		filtered = append(filtered, hookEntry)
+		if !setupUninstallFlag {
+			filtered = append(filtered, hookEntry)
+		}
 		hooks[event] = filtered
 	}
 	settings["hooks"] = hooks
@@ -97,6 +114,15 @@ func runSetup(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to write settings: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Hooks installed to ~/.claude/settings.json")
-	fmt.Printf("Hook command: %s\n", hookCommand)
+	instanceDesc := "default"
+	if config.ConfigDir != "" {
+		instanceDesc = config.ConfigDir
+	}
+	if setupUninstallFlag {
+		fmt.Println("Hooks uninstalled from ~/.claude/settings.json")
+		fmt.Printf("Removed hooks for instance: %s\n", instanceDesc)
+	} else {
+		fmt.Println("Hooks installed to ~/.claude/settings.json")
+		fmt.Printf("Hook command: %s\n", hookCommand)
+	}
 }
