@@ -31,6 +31,7 @@ echo "Paired chat ID: $DEFAULT_CHAT_ID"
 cleanup() {
   echo ""
   echo "Cleaning up..."
+  ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --uninstall 2>/dev/null || true
   tmux kill-session -t "$BOT_SESSION" 2>/dev/null || true
   tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
 }
