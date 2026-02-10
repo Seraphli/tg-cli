@@ -27,6 +27,29 @@ func init() {
 	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
 }
 
+// countAssistantEntries counts the number of assistant entries in a JSONL transcript.
+func countAssistantEntries(transcriptPath string) int {
+	content, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if typ, _ := entry["type"].(string); typ == "assistant" {
+			count++
+		}
+	}
+	return count
+}
+
 // extractAssistantBody reads a JSONL transcript and returns the last assistant message text.
 func extractAssistantBody(transcriptPath string) string {
 	content, err := os.ReadFile(transcriptPath)
@@ -107,17 +130,34 @@ func runHook(cmd *cobra.Command, args []string) {
 	if cwd != "" {
 		project = filepath.Base(cwd)
 	}
+	// Detect tmux environment
+	tmuxTarget := ""
+	tmuxPane := os.Getenv("TMUX_PANE")
+	if tmuxPane != "" {
+		tmuxEnv := os.Getenv("TMUX")
+		if tmuxEnv != "" {
+			parts := strings.SplitN(tmuxEnv, ",", 2)
+			tmuxTarget = tmuxPane + "@" + parts[0]
+		} else {
+			tmuxTarget = tmuxPane
+		}
+	}
 	// Extract last assistant message from transcript with retry.
 	// The Stop hook fires before Claude Code finishes writing the assistant
-	// entry to the JSONL transcript, so we poll a few times.
+	// entry to the JSONL transcript. We count entries first, then wait for
+	// a new one to appear (handles both first and subsequent invocations).
 	body := ""
 	if transcriptPath, ok := payload["transcript_path"].(string); ok {
-		for attempt := 0; attempt < 5; attempt++ {
-			body = extractAssistantBody(transcriptPath)
-			if body != "" {
+		initialCount := countAssistantEntries(transcriptPath)
+		for attempt := 0; attempt < 10; attempt++ {
+			time.Sleep(200 * time.Millisecond)
+			if countAssistantEntries(transcriptPath) > initialCount {
+				body = extractAssistantBody(transcriptPath)
 				break
 			}
-			time.Sleep(200 * time.Millisecond)
+		}
+		if body == "" {
+			body = extractAssistantBody(transcriptPath)
 		}
 	}
 	port := hookPortFlag
@@ -129,10 +169,11 @@ func runHook(cmd *cobra.Command, args []string) {
 		port = 12500
 	}
 	hookData := map[string]string{
-		"event":     event,
-		"sessionId": sessionID,
-		"project":   project,
-		"body":      body,
+		"event":      event,
+		"sessionId":  sessionID,
+		"project":    project,
+		"body":       body,
+		"tmuxTarget": tmuxTarget,
 	}
 	jsonData, _ := json.Marshal(hookData)
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))

@@ -82,3 +82,47 @@ func SaveCredentials(creds Credentials) error {
 	}
 	return nil
 }
+
+type AppConfig struct {
+	WhisperPath string `json:"whisperPath"`
+	ModelPath   string `json:"modelPath"`
+	Language    string `json:"language"`
+	FFmpegPath  string `json:"ffmpegPath"`
+}
+
+func GetConfigPath() string {
+	return filepath.Join(GetConfigDir(), "config.json")
+}
+
+func LoadAppConfig() (AppConfig, error) {
+	if err := ensureConfigDir(); err != nil {
+		return AppConfig{}, err
+	}
+	path := GetConfigPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return AppConfig{FFmpegPath: "ffmpeg"}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return AppConfig{}, err
+	}
+	var cfg AppConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.FFmpegPath == "" {
+		cfg.FFmpegPath = "ffmpeg"
+	}
+	return cfg, nil
+}
+
+func SaveAppConfig(cfg AppConfig) error {
+	if err := ensureConfigDir(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(GetConfigPath(), data, 0644)
+}

@@ -9,15 +9,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
+	"github.com/Seraphli/tg-cli/internal/voice"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	tele "gopkg.in/telebot.v3"
@@ -37,6 +40,18 @@ var (
 func init() {
 	BotCmd.Flags().BoolVar(&debugFlag, "debug", false, "Enable debug mode")
 	BotCmd.Flags().IntVar(&portFlag, "port", 0, "HTTP server port (overrides config)")
+}
+
+// extractTmuxTarget extracts tmux target from notification text.
+func extractTmuxTarget(text string) (injector.TmuxTarget, error) {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "📟 ") {
+			raw := strings.TrimPrefix(line, "📟 ")
+			return injector.ParseTarget(raw)
+		}
+	}
+	return injector.TmuxTarget{}, fmt.Errorf("no tmux target found")
 }
 
 func runBot(cmd *cobra.Command, args []string) {
@@ -110,6 +125,71 @@ func runBot(cmd *cobra.Command, args []string) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Send("Not paired. Use /pair first.")
 		}
+		if c.Message().ReplyTo == nil {
+			return nil
+		}
+		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		if err != nil {
+			return c.Reply("❌ No tmux session info found in the original message.")
+		}
+		if !injector.SessionExists(target) {
+			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
+		}
+		if err := injector.InjectText(target, c.Message().Text); err != nil {
+			logger.Error(fmt.Sprintf("Injection failed: %v", err))
+			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+		}
+		logger.Info(fmt.Sprintf("Injected text to %s", injector.FormatTarget(target)))
+		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+		}); err != nil {
+			logger.Debug(fmt.Sprintf("React failed: %v, falling back to reply", err))
+			return c.Reply("✅")
+		}
+		return nil
+	})
+	bot.Handle(tele.OnVoice, func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Send("Not paired. Use /pair first.")
+		}
+		if c.Message().ReplyTo == nil {
+			return nil
+		}
+		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		if err != nil {
+			return c.Reply("❌ No tmux session info found in the original message.")
+		}
+		if !injector.SessionExists(target) {
+			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
+		}
+		file, err := bot.FileByID(c.Message().Voice.FileID)
+		if err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to get voice file: %v", err))
+		}
+		tmpFile := filepath.Join(os.TempDir(), "tg-cli-voice-"+c.Message().Voice.FileID+".ogg")
+		defer os.Remove(tmpFile)
+		if err := bot.Download(&file, tmpFile); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to download voice: %v", err))
+		}
+		text, err := voice.Transcribe(tmpFile)
+		if err != nil {
+			return c.Reply(fmt.Sprintf("❌ Transcription failed: %v", err))
+		}
+		if text == "" {
+			return c.Reply("❌ Transcription produced empty text.")
+		}
+		if err := injector.InjectText(target, text); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+		}
+		logger.Info(fmt.Sprintf("Injected voice transcription to %s", injector.FormatTarget(target)))
+		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+		}); err != nil {
+			logger.Debug(fmt.Sprintf("React failed: %v, falling back to reply", err))
+			return c.Reply("✅")
+		}
 		return nil
 	})
 	mux := http.NewServeMux()
@@ -124,10 +204,11 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		var msg struct {
-			Event     string `json:"event"`
-			SessionID string `json:"sessionId"`
-			Project   string `json:"project"`
-			Body      string `json:"body"`
+			Event      string `json:"event"`
+			SessionID  string `json:"sessionId"`
+			Project    string `json:"project"`
+			Body       string `json:"body"`
+			TmuxTarget string `json:"tmuxTarget"`
 		}
 		if err := json.Unmarshal(body, &msg); err != nil {
 			http.Error(w, "Invalid JSON", 400)
@@ -146,9 +227,10 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:   msg.Event,
-			Project: msg.Project,
-			Body:    msg.Body,
+			Event:      msg.Event,
+			Project:    msg.Project,
+			Body:       msg.Body,
+			TmuxTarget: msg.TmuxTarget,
 		})
 		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 		_, err = bot.Send(&tele.Chat{ID: chatIDInt}, text)
