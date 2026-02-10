@@ -24,6 +24,7 @@ func main() {
 	rootCmd.AddCommand(cmd.HookCmd)
 	rootCmd.AddCommand(cmd.SetupCmd)
 	rootCmd.AddCommand(cmd.ServiceCmd)
+	rootCmd.AddCommand(cmd.VoiceCmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
