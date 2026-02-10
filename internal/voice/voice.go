@@ -29,9 +29,11 @@ func Transcribe(oggPath string) (string, error) {
 	// Run whisper.cpp
 	outBase := filepath.Join(os.TempDir(), "tg-cli-whisper")
 	args := []string{"-m", cfg.ModelPath, "-f", wavPath, "-otxt", "-of", outBase, "-nt"}
-	if cfg.Language != "" {
-		args = append(args, "-l", cfg.Language)
+	lang := cfg.Language
+	if lang == "" {
+		lang = "auto"
 	}
+	args = append(args, "-l", lang)
 	wCmd := exec.Command(cfg.WhisperPath, args...)
 	if out, err := wCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("whisper failed: %w\n%s", err, out)
