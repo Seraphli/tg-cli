@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,96 @@ var (
 func init() {
 	BotCmd.Flags().BoolVar(&debugFlag, "debug", false, "Enable debug mode")
 	BotCmd.Flags().IntVar(&portFlag, "port", 0, "HTTP server port (overrides config)")
+}
+
+// splitBody splits body text into chunks fitting within maxRuneLen.
+// Tries to split at paragraph boundaries (\n\n), then line boundaries (\n),
+// falling back to hard rune-boundary split.
+func splitBody(body string, maxRuneLen int) []string {
+	runes := []rune(body)
+	if len(runes) <= maxRuneLen {
+		return []string{body}
+	}
+	var chunks []string
+	for len(runes) > 0 {
+		if len(runes) <= maxRuneLen {
+			chunks = append(chunks, string(runes))
+			break
+		}
+		chunk := string(runes[:maxRuneLen])
+		if idx := strings.LastIndex(chunk, "\n\n"); idx > 0 {
+			end := len([]rune(chunk[:idx]))
+			chunks = append(chunks, string(runes[:end]))
+			runes = runes[end+2:]
+		} else if idx := strings.LastIndex(chunk, "\n"); idx > 0 {
+			end := len([]rune(chunk[:idx]))
+			chunks = append(chunks, string(runes[:end]))
+			runes = runes[end+1:]
+		} else {
+			chunks = append(chunks, chunk)
+			runes = runes[maxRuneLen:]
+		}
+	}
+	return chunks
+}
+
+type pageCacheStore struct {
+	mu       sync.RWMutex
+	entries  map[int]*pageEntry
+	sessions map[string][]int // sessionID → []messageID
+}
+
+type pageEntry struct {
+	chunks     []string
+	event      string
+	project    string
+	tmuxTarget string
+}
+
+var pages = &pageCacheStore{
+	entries:  make(map[int]*pageEntry),
+	sessions: make(map[string][]int),
+}
+
+func (pc *pageCacheStore) store(msgID int, sessionID string, entry *pageEntry) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.entries[msgID] = entry
+	if sessionID != "" {
+		pc.sessions[sessionID] = append(pc.sessions[sessionID], msgID)
+	}
+}
+
+func (pc *pageCacheStore) get(msgID int) (*pageEntry, bool) {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	e, ok := pc.entries[msgID]
+	return e, ok
+}
+
+func (pc *pageCacheStore) cleanupSession(sessionID string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for _, msgID := range pc.sessions[sessionID] {
+		delete(pc.entries, msgID)
+	}
+	delete(pc.sessions, sessionID)
+}
+
+// buildPageKeyboard returns a ReplyMarkup with ◀️ N/M ▶️ inline buttons.
+// Callback data format: p\x00<pageNum> (where pageNum is the 1-based page number as string).
+func buildPageKeyboard(currentPage, totalPages int) *tele.ReplyMarkup {
+	markup := &tele.ReplyMarkup{}
+	var buttons []tele.Btn
+	if currentPage > 1 {
+		buttons = append(buttons, markup.Data("◀️", "p", fmt.Sprintf("%d", currentPage-1)))
+	}
+	buttons = append(buttons, markup.Data(fmt.Sprintf("%d/%d", currentPage, totalPages), "p", fmt.Sprintf("%d", currentPage)))
+	if currentPage < totalPages {
+		buttons = append(buttons, markup.Data("▶️", "p", fmt.Sprintf("%d", currentPage+1)))
+	}
+	markup.Inline(markup.Row(buttons...))
+	return markup
 }
 
 // extractTmuxTarget extracts tmux target from notification text.
@@ -192,6 +283,33 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		return nil
 	})
+	bot.Handle(&tele.InlineButton{Unique: "p"}, func(c tele.Context) error {
+		pageNum, err := strconv.Atoi(c.Data())
+		if err != nil {
+			return c.Respond()
+		}
+		entry, ok := pages.get(c.Message().ID)
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "Page expired"})
+		}
+		if pageNum < 1 || pageNum > len(entry.chunks) {
+			return c.Respond()
+		}
+		text := notify.BuildNotificationText(notify.NotificationData{
+			Event:      entry.event,
+			Project:    entry.project,
+			Body:       entry.chunks[pageNum-1],
+			TmuxTarget: entry.tmuxTarget,
+			Page:       pageNum,
+			TotalPages: len(entry.chunks),
+		})
+		kb := buildPageKeyboard(pageNum, len(entry.chunks))
+		_, err = bot.Edit(c.Message(), text, kb)
+		if err != nil {
+			logger.Debug(fmt.Sprintf("edit page error: %v", err))
+		}
+		return c.Respond()
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -226,20 +344,128 @@ func runBot(cmd *cobra.Command, args []string) {
 			w.Write([]byte("No paired chat"))
 			return
 		}
-		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:      msg.Event,
-			Project:    msg.Project,
-			Body:       msg.Body,
-			TmuxTarget: msg.TmuxTarget,
-		})
+		chat := &tele.Chat{ID: int64(0)}
 		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-		_, err = bot.Send(&tele.Chat{ID: chatIDInt}, text)
+		chat.ID = chatIDInt
+		switch msg.Event {
+		case "SessionStart":
+			if msg.TmuxTarget == "" {
+				w.WriteHeader(200)
+				w.Write([]byte("OK"))
+				return
+			}
+			text := notify.BuildNotificationText(notify.NotificationData{
+				Event:      "SessionStart",
+				Project:    msg.Project,
+				TmuxTarget: msg.TmuxTarget,
+			})
+			_, err = bot.Send(chat, text)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+				http.Error(w, "Send failed", 500)
+				return
+			}
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
+		case "SessionEnd":
+			pages.cleanupSession(msg.SessionID)
+			logger.Info(fmt.Sprintf("Cleaned up session %s", msg.SessionID))
+		default:
+			headerLen := notify.HeaderLen(notify.NotificationData{
+				Event:      msg.Event,
+				Project:    msg.Project,
+				TmuxTarget: msg.TmuxTarget,
+			})
+			maxBodyRunes := 4000 - headerLen - 100
+			chunks := splitBody(msg.Body, maxBodyRunes)
+			if len(chunks) <= 1 {
+				text := notify.BuildNotificationText(notify.NotificationData{
+					Event:      msg.Event,
+					Project:    msg.Project,
+					Body:       msg.Body,
+					TmuxTarget: msg.TmuxTarget,
+				})
+				_, err = bot.Send(chat, text)
+				if err != nil {
+					logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+					http.Error(w, "Send failed", 500)
+					return
+				}
+				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
+			} else {
+				text := notify.BuildNotificationText(notify.NotificationData{
+					Event:      msg.Event,
+					Project:    msg.Project,
+					Body:       chunks[0],
+					TmuxTarget: msg.TmuxTarget,
+					Page:       1,
+					TotalPages: len(chunks),
+				})
+				kb := buildPageKeyboard(1, len(chunks))
+				sent, err := bot.Send(chat, text, kb)
+				if err != nil {
+					logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+					http.Error(w, "Send failed", 500)
+					return
+				}
+				pages.store(sent.ID, msg.SessionID, &pageEntry{
+					chunks:     chunks,
+					event:      msg.Event,
+					project:    msg.Project,
+					tmuxTarget: msg.TmuxTarget,
+				})
+				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] (%d pages, msg_id=%d)", chatID, msg.Event, msg.Project, len(chunks), sent.ID))
+			}
+		}
+		w.WriteHeader(200)
+		w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		msgIDStr := r.URL.Query().Get("msg_id")
+		pageStr := r.URL.Query().Get("page")
+		msgID, err := strconv.Atoi(msgIDStr)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
-			http.Error(w, "Send failed", 500)
+			http.Error(w, "invalid msg_id", 400)
 			return
 		}
-		logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
+		pageNum, err := strconv.Atoi(pageStr)
+		if err != nil {
+			http.Error(w, "invalid page", 400)
+			return
+		}
+		entry, ok := pages.get(msgID)
+		if !ok {
+			http.Error(w, "page entry not found", 404)
+			return
+		}
+		if pageNum < 1 || pageNum > len(entry.chunks) {
+			http.Error(w, "page out of range", 400)
+			return
+		}
+		chatID := pairing.GetDefaultChatID()
+		if chatID == "" {
+			http.Error(w, "no paired chat", 400)
+			return
+		}
+		chat := &tele.Chat{ID: int64(0)}
+		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+		chat.ID = chatIDInt
+		text := notify.BuildNotificationText(notify.NotificationData{
+			Event:      entry.event,
+			Project:    entry.project,
+			Body:       entry.chunks[pageNum-1],
+			TmuxTarget: entry.tmuxTarget,
+			Page:       pageNum,
+			TotalPages: len(entry.chunks),
+		})
+		kb := buildPageKeyboard(pageNum, len(entry.chunks))
+		editMsg := &tele.Message{ID: msgID, Chat: chat}
+		_, err = bot.Edit(editMsg, text, kb)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Callback edit failed: %v", err))
+			http.Error(w, "edit failed: "+err.Error(), 500)
+			return
+		}
+		logger.Info(fmt.Sprintf("Callback page turn: msg_id=%d page=%d/%d", msgID, pageNum, len(entry.chunks)))
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
