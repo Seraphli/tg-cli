@@ -74,7 +74,7 @@ func runSetup(cmd *cobra.Command, args []string) {
 			},
 		},
 	}
-	for _, event := range []string{"Stop", "SubagentStop"} {
+	for _, event := range []string{"Stop", "SubagentStop", "SessionStart", "SessionEnd"} {
 		existing, ok := hooks[event].([]interface{})
 		if !ok {
 			existing = []interface{}{}

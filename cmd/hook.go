@@ -90,11 +90,7 @@ func extractAssistantBody(transcriptPath string) string {
 				}
 			}
 		}
-		joined := strings.Join(textParts, "\n")
-		if len(joined) > 500 {
-			return joined[:500] + "..."
-		}
-		return joined
+		return strings.Join(textParts, "\n")
 	}
 	return ""
 }
@@ -130,34 +126,52 @@ func runHook(cmd *cobra.Command, args []string) {
 	if cwd != "" {
 		project = filepath.Base(cwd)
 	}
-	// Detect tmux environment
+	// Dispatch by event type
 	tmuxTarget := ""
-	tmuxPane := os.Getenv("TMUX_PANE")
-	if tmuxPane != "" {
-		tmuxEnv := os.Getenv("TMUX")
-		if tmuxEnv != "" {
-			parts := strings.SplitN(tmuxEnv, ",", 2)
-			tmuxTarget = tmuxPane + "@" + parts[0]
-		} else {
-			tmuxTarget = tmuxPane
-		}
-	}
-	// Extract last assistant message from transcript with retry.
-	// The Stop hook fires before Claude Code finishes writing the assistant
-	// entry to the JSONL transcript. We count entries first, then wait for
-	// a new one to appear (handles both first and subsequent invocations).
 	body := ""
-	if transcriptPath, ok := payload["transcript_path"].(string); ok {
-		initialCount := countAssistantEntries(transcriptPath)
-		for attempt := 0; attempt < 10; attempt++ {
-			time.Sleep(200 * time.Millisecond)
-			if countAssistantEntries(transcriptPath) > initialCount {
-				body = extractAssistantBody(transcriptPath)
-				break
+	switch event {
+	case "SessionStart":
+		// Detect tmux target for SessionStart (no transcript reading needed)
+		tmuxPane := os.Getenv("TMUX_PANE")
+		if tmuxPane != "" {
+			tmuxEnv := os.Getenv("TMUX")
+			if tmuxEnv != "" {
+				parts := strings.SplitN(tmuxEnv, ",", 2)
+				tmuxTarget = tmuxPane + "@" + parts[0]
+			} else {
+				tmuxTarget = tmuxPane
 			}
 		}
-		if body == "" {
-			body = extractAssistantBody(transcriptPath)
+	case "SessionEnd":
+		// SessionEnd: no transcript, no tmux detection needed
+	default:
+		// Stop/SubagentStop: extract transcript body and detect tmux
+		tmuxPane := os.Getenv("TMUX_PANE")
+		if tmuxPane != "" {
+			tmuxEnv := os.Getenv("TMUX")
+			if tmuxEnv != "" {
+				parts := strings.SplitN(tmuxEnv, ",", 2)
+				tmuxTarget = tmuxPane + "@" + parts[0]
+			} else {
+				tmuxTarget = tmuxPane
+			}
+		}
+		// Extract last assistant message from transcript with retry.
+		// The Stop hook fires before Claude Code finishes writing the assistant
+		// entry to the JSONL transcript. We count entries first, then wait for
+		// a new one to appear (handles both first and subsequent invocations).
+		if transcriptPath, ok := payload["transcript_path"].(string); ok {
+			initialCount := countAssistantEntries(transcriptPath)
+			for attempt := 0; attempt < 10; attempt++ {
+				time.Sleep(200 * time.Millisecond)
+				if countAssistantEntries(transcriptPath) > initialCount {
+					body = extractAssistantBody(transcriptPath)
+					break
+				}
+			}
+			if body == "" {
+				body = extractAssistantBody(transcriptPath)
+			}
 		}
 	}
 	port := hookPortFlag

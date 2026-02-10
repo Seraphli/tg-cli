@@ -94,6 +94,18 @@ tmux send-keys -t "$CLAUDE_SESSION" Enter
 echo "Confirmed trust dialog."
 sleep 8
 
+# 4c. Check SessionStart notification
+LOG_AFTER_START=$(wc -l < "$LOG_FILE")
+if [ "$LOG_AFTER_START" -gt "$LOG_BEFORE" ]; then
+  if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "SessionStart"; then
+    pass "SessionStart hook triggered and logged"
+  else
+    fail "SessionStart hook not found in bot log"
+  fi
+else
+  fail "No new log entries after Claude start"
+fi
+
 # 5. Send a simple command to trigger hook
 tmux send-keys -t "$CLAUDE_SESSION" -l "say hello"
 sleep 1
@@ -195,7 +207,106 @@ else
 fi
 
 # ============================================================
-# Phase 4: Exit Claude and report
+# Phase 4: Long message pagination test (real Claude output)
+# ============================================================
+echo ""
+echo "--- Phase 4: Long message pagination test ---"
+
+# Record log position before injecting long prompt
+LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
+
+# Wait for Claude to settle after Phase 3
+echo "Waiting for Claude to settle..."
+sleep 3
+
+# Inject a long-output prompt to trigger pagination
+LONG_PROMPT="list the numbers from 1 to 300, each on its own line, in the format 'Number NNN: test line for pagination verification'"
+echo "Injecting long-output prompt into Claude pane: $CLAUDE_PANE"
+echo "Prompt: ${LONG_PROMPT:0:80}..."
+tmux send-keys -t "$CLAUDE_PANE" C-u
+sleep 0.5
+tmux set-buffer -b tg-cli -- "$LONG_PROMPT"
+tmux paste-buffer -t "$CLAUDE_PANE" -b tg-cli -r -p
+sleep 1
+tmux send-keys -t "$CLAUDE_PANE" C-m
+echo "Long prompt injected, waiting for Claude to respond and trigger pagination..."
+
+# Wait for bot log to contain multi-page notification indicator
+ELAPSED=0
+PAGINATION_FOUND=false
+MSG_ID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_PAGE" ]; then
+    NEW_PAGE_LOGS=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE")
+    if echo "$NEW_PAGE_LOGS" | grep -qE "pages, msg_id="; then
+      PAGINATION_FOUND=true
+      MSG_ID=$(echo "$NEW_PAGE_LOGS" | grep -oP 'msg_id=\K[0-9]+' | head -1)
+      break
+    fi
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+  echo "  Waiting for pagination... ${ELAPSED}s / ${TIMEOUT}s"
+done
+
+# Capture Claude pane for debugging
+echo ""
+echo "Claude pane output after long prompt:"
+tmux capture-pane -t "$CLAUDE_SESSION" -p -S -100
+
+if [ "$PAGINATION_FOUND" = true ]; then
+  pass "Long message triggered pagination (real Claude output)"
+  echo "  Log excerpt:"
+  tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE" | grep -E "pages|Notification" | head -5
+else
+  # Check if Claude sent any notification at all
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_PAGE" ]; then
+    NEW_PAGE_LOGS=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE")
+    if echo "$NEW_PAGE_LOGS" | grep -q "Notification sent"; then
+      fail "Long message did not trigger pagination (Claude output too short, no multi-page indicator)"
+      echo "  This means Claude's response was under the 4096-char limit."
+      echo "  Skipping page turn test."
+    else
+      fail "No notification sent after long prompt (Claude may not have responded)"
+      echo "  Bot log tail:"
+      tail -20 "$LOG_FILE"
+    fi
+  else
+    fail "No bot activity after long prompt injection"
+    echo "  Bot log tail:"
+    tail -20 "$LOG_FILE"
+  fi
+fi
+
+# Page turn test (only if pagination was triggered)
+if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
+  echo ""
+  echo "Testing page turn callback..."
+  CB_RESP=$(curl -s -w "\n%{http_code}" \
+    "http://127.0.0.1:$TEST_PORT/callback?msg_id=$MSG_ID&page=2")
+  CB_CODE=$(echo "$CB_RESP" | tail -1)
+  if [ "$CB_CODE" = "200" ]; then
+    pass "Page turn simulation via /callback returned 200"
+  else
+    fail "Page turn simulation via /callback returned $CB_CODE"
+    echo "  Response: $(echo "$CB_RESP" | head -1)"
+  fi
+
+  # Verify bot logged the page turn
+  sleep 1
+  if tail -10 "$LOG_FILE" | grep -q "Callback page turn"; then
+    pass "Bot logged callback page turn"
+  else
+    fail "Bot did not log callback page turn"
+  fi
+elif [ "$PAGINATION_FOUND" = false ]; then
+  echo "  Skipping page turn test (pagination was not triggered)"
+fi
+
+# ============================================================
+# Phase 5: Exit Claude and report
 # ============================================================
 echo ""
 echo "--- Cleanup ---"
