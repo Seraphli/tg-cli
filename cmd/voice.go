@@ -15,6 +15,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type modelInfo struct {
+	name     string
+	filename string
+}
+
+var whisperModels = []modelInfo{
+	{"tiny", "ggml-tiny.bin"},
+	{"base", "ggml-base.bin"},
+	{"small", "ggml-small.bin"},
+	{"medium", "ggml-medium.bin"},
+	{"large", "ggml-large-v3-turbo.bin"},
+}
+
 var VoiceCmd = &cobra.Command{
 	Use:   "voice",
 	Short: "Set up voice transcription (ffmpeg + whisper.cpp)",
@@ -78,57 +91,89 @@ func runVoice(cmd *cobra.Command, args []string) {
 	}
 
 	// Step 3: Model selection
+	appCfg, _ := config.LoadAppConfig()
+	currentModelName := ""
+	if appCfg.ModelPath != "" {
+		base := filepath.Base(appCfg.ModelPath)
+		for _, m := range whisperModels {
+			if m.filename == base {
+				currentModelName = m.name
+				break
+			}
+		}
+	}
 	fmt.Println("\nAvailable whisper models:")
-	models := []string{"tiny", "base", "small", "medium", "large"}
 	modelsDir := filepath.Join(config.GetConfigDir(), "models")
 	home, _ := os.UserHomeDir()
 	systemModelsDir := filepath.Join(home, ".local", "share", "whisper.cpp", "models")
-	for i, model := range models {
-		modelName := fmt.Sprintf("ggml-%s.bin", model)
-		if _, err := os.Stat(filepath.Join(modelsDir, modelName)); err == nil {
-			fmt.Printf("  %d. %s (installed)\n", i+1, model)
-		} else if _, err := os.Stat(filepath.Join(systemModelsDir, modelName)); err == nil {
-			fmt.Printf("  %d. %s (installed: %s)\n", i+1, model, filepath.Join(systemModelsDir, modelName))
+	for i, m := range whisperModels {
+		status := "download required"
+		if _, err := os.Stat(filepath.Join(modelsDir, m.filename)); err == nil {
+			status = "installed"
+		} else if _, err := os.Stat(filepath.Join(systemModelsDir, m.filename)); err == nil {
+			status = "installed"
+		}
+		if m.name == currentModelName {
+			fmt.Printf("  %d. %s (%s) [current]\n", i+1, m.name, status)
 		} else {
-			fmt.Printf("  %d. %s (download required)\n", i+1, model)
+			fmt.Printf("  %d. %s (%s)\n", i+1, m.name, status)
 		}
 	}
-	fmt.Print("\nSelect model (1-5): ")
+	if currentModelName != "" {
+		fmt.Printf("\nCurrent model: %s\n", currentModelName)
+		fmt.Print("Select model (1-5, Enter to keep current): ")
+	} else {
+		fmt.Print("\nSelect model (1-5): ")
+	}
 	if !scanner.Scan() {
 		fmt.Fprintln(os.Stderr, "Failed to read input")
 		os.Exit(1)
 	}
 	choice := strings.TrimSpace(scanner.Text())
-	var selectedModel string
-	switch choice {
-	case "1":
-		selectedModel = "tiny"
-	case "2":
-		selectedModel = "base"
-	case "3":
-		selectedModel = "small"
-	case "4":
-		selectedModel = "medium"
-	case "5":
-		selectedModel = "large"
-	default:
-		fmt.Fprintln(os.Stderr, "Invalid selection")
-		os.Exit(1)
+	var selected modelInfo
+	if choice == "" && currentModelName != "" {
+		for _, m := range whisperModels {
+			if m.name == currentModelName {
+				selected = m
+				break
+			}
+		}
+		fmt.Printf("Keeping current model: %s\n", selected.name)
+	} else {
+		idx := -1
+		switch choice {
+		case "1":
+			idx = 0
+		case "2":
+			idx = 1
+		case "3":
+			idx = 2
+		case "4":
+			idx = 3
+		case "5":
+			idx = 4
+		default:
+			fmt.Fprintln(os.Stderr, "Invalid selection")
+			os.Exit(1)
+		}
+		selected = whisperModels[idx]
 	}
 
 	// Download model or use existing
-	modelName := fmt.Sprintf("ggml-%s.bin", selectedModel)
-	modelPath := filepath.Join(modelsDir, modelName)
-	systemModelPath := filepath.Join(systemModelsDir, modelName)
+	localModelPath := filepath.Join(modelsDir, selected.filename)
+	systemModelPath := filepath.Join(systemModelsDir, selected.filename)
+	var modelPath string
 
-	if _, err := os.Stat(modelPath); err == nil {
+	if _, err := os.Stat(localModelPath); err == nil {
+		modelPath = localModelPath
 		fmt.Printf("\nModel already exists at %s\n", modelPath)
 	} else if _, err := os.Stat(systemModelPath); err == nil {
 		modelPath = systemModelPath
-		fmt.Printf("\nUsing system model at %s\n", modelPath)
+		fmt.Printf("\nModel already exists at %s\n", modelPath)
 	} else {
-		modelURL := fmt.Sprintf("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%s.bin", selectedModel)
-		if err := os.MkdirAll(modelsDir, 0755); err != nil {
+		modelPath = systemModelPath
+		modelURL := fmt.Sprintf("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/%s", selected.filename)
+		if err := os.MkdirAll(systemModelsDir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create models directory: %v\n", err)
 			os.Exit(1)
 		}
