@@ -88,3 +88,9 @@ func FormatTarget(t TmuxTarget) string {
 	}
 	return t.PaneID
 }
+
+// SendKeys sends keys to a tmux pane.
+func SendKeys(target TmuxTarget, keys ...string) error {
+	args := append([]string{"send-keys", "-t", target.PaneID}, keys...)
+	return tmuxCmd(target, args...).Run()
+}

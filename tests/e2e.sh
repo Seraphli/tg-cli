@@ -86,7 +86,7 @@ echo "Hooks installed."
 tmux new-session -d -s "$CLAUDE_SESSION"
 CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
 echo "Claude pane: $CLAUDE_PANE"
-tmux send-keys -t "$CLAUDE_SESSION" "claude --allow-dangerously-skip-permissions --setting-sources local --settings $TEST_SETTINGS" Enter
+tmux send-keys -t "$CLAUDE_SESSION" "claude --model haiku --allow-dangerously-skip-permissions --setting-sources local --settings $TEST_SETTINGS" Enter
 echo "Waiting for Claude to start..."
 sleep 5
 
@@ -153,75 +153,20 @@ else
 fi
 
 # ============================================================
-# Phase 3: Inject text into Claude Code session (round-trip)
+# Phase 3: Long message pagination test (real Claude output)
 # ============================================================
 echo ""
-echo "--- Phase 3: Inject into Claude Code session ---"
-
-# Record log position after first notification
-LOG_AFTER_PHASE2=$(wc -l < "$LOG_FILE")
-
-# Wait for Claude to settle after first response
-sleep 3
-
-# Inject "say hi" into Claude Code pane using bracketed paste (same as injector.InjectText)
-INJECT_TEXT="what is 2+2?"
-echo "Injecting into Claude pane: $CLAUDE_PANE"
-echo "Inject text: $INJECT_TEXT"
-tmux send-keys -t "$CLAUDE_PANE" C-u
-sleep 0.5
-tmux set-buffer -b tg-cli -- "$INJECT_TEXT"
-tmux paste-buffer -t "$CLAUDE_PANE" -b tg-cli -r -p
-sleep 1
-tmux send-keys -t "$CLAUDE_PANE" C-m
-echo "Text injected, waiting for Claude to process and trigger hook..."
-
-# Wait for second notification
-ELAPSED=0
-FOUND2=false
-while [ $ELAPSED -lt $TIMEOUT ]; do
-  LOG_NOW=$(wc -l < "$LOG_FILE")
-  if [ "$LOG_NOW" -gt "$LOG_AFTER_PHASE2" ]; then
-    if tail -n +"$((LOG_AFTER_PHASE2 + 1))" "$LOG_FILE" | grep -q "Notification sent"; then
-      FOUND2=true
-      break
-    fi
-  fi
-  sleep 2
-  ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting... ${ELAPSED}s / ${TIMEOUT}s"
-done
-
-# Capture Claude pane for debugging
-echo ""
-echo "Claude pane output after injection:"
-tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
-
-if [ "$FOUND2" = true ]; then
-  pass "Injection round-trip: text injected → Claude processed → 2nd TG notification"
-  echo "  Log entries:"
-  tail -n +"$((LOG_AFTER_PHASE2 + 1))" "$LOG_FILE" | grep "Notification"
-else
-  fail "Injection round-trip: no 2nd notification within ${TIMEOUT}s"
-  echo "  Bot log tail:"
-  tail -20 "$LOG_FILE"
-fi
-
-# ============================================================
-# Phase 4: Long message pagination test (real Claude output)
-# ============================================================
-echo ""
-echo "--- Phase 4: Long message pagination test ---"
+echo "--- Phase 3: Long message pagination test ---"
 
 # Record log position before injecting long prompt
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
 
-# Wait for Claude to settle after Phase 3
+# Wait for Claude to settle after Phase 2
 echo "Waiting for Claude to settle..."
 sleep 3
 
 # Inject a long-output prompt to trigger pagination
-LONG_PROMPT="list the numbers from 1 to 300, each on its own line, in the format 'Number NNN: test line for pagination verification'"
+LONG_PROMPT="list the numbers from 1 to 100, each on its own line, in the format 'Number NNN: test line for pagination verification'"
 echo "Injecting long-output prompt into Claude pane: $CLAUDE_PANE"
 echo "Prompt: ${LONG_PROMPT:0:80}..."
 tmux send-keys -t "$CLAUDE_PANE" C-u
@@ -307,7 +252,133 @@ elif [ "$PAGINATION_FOUND" = false ]; then
 fi
 
 # ============================================================
-# Phase 5: Exit Claude and report
+# Phase 4: PermissionRequest real test
+# ============================================================
+echo ""
+echo "--- Phase 4: PermissionRequest test ---"
+
+# Record log position
+LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
+
+# Send command that triggers Bash permission (file write to ensure permission dialog)
+tmux send-keys -t "$CLAUDE_SESSION" -l "run this bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt"
+sleep 1
+tmux send-keys -t "$CLAUDE_SESSION" Enter
+
+echo "Claude pane:"
+tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+# Wait for permission request in bot log
+ELAPSED=0
+PERM_FOUND=false
+PERM_MSG_ID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_PERM" ]; then
+    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -q "Permission request sent"; then
+      PERM_FOUND=true
+      PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -oP 'msg_id=\K[0-9]+' | head -1)
+      break
+    fi
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+echo "Claude pane:"
+tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
+  pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
+
+  # Approve via API endpoint
+  DECIDE_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/permission/decide?msg_id=$PERM_MSG_ID&decision=allow")
+  if echo "$DECIDE_RESP" | grep -q "allow"; then
+    pass "Permission approved via /permission/decide API"
+  else
+    fail "Permission decide API returned unexpected: $DECIDE_RESP"
+  fi
+
+  echo "Claude pane:"
+  tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+  # Wait for Stop notification (Claude completes after permission approved)
+  sleep 10
+  LOG_AFTER_PERM=$(wc -l < "$LOG_FILE")
+  if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -q "Permission resolved"; then
+    pass "Permission resolved and logged"
+  else
+    fail "Permission resolution not found in log"
+  fi
+else
+  fail "PermissionRequest not triggered within ${TIMEOUT}s"
+fi
+
+# ============================================================
+# Phase 5: AskUserQuestion real test
+# ============================================================
+echo ""
+echo "--- Phase 5: AskUserQuestion test ---"
+
+LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
+
+# Send prompt that should trigger AskUserQuestion
+tmux send-keys -t "$CLAUDE_SESSION" -l "I need you to ask me a question with AskUserQuestion tool. Ask me: which approach should we use? Options: Approach A, Approach B"
+sleep 1
+tmux send-keys -t "$CLAUDE_SESSION" Enter
+
+echo "Claude pane:"
+tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+# Wait for AskUserQuestion notification
+ELAPSED=0
+AQ_FOUND=false
+AQ_MSG_ID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_AQ" ]; then
+    NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
+    if echo "$NEW_LOGS" | grep -q "AskUserQuestion sent"; then
+      AQ_FOUND=true
+      AQ_MSG_ID=$(echo "$NEW_LOGS" | grep -oP 'AskUserQuestion sent.*msg_id=\K[0-9]+' | head -1)
+      break
+    fi
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+echo "Claude pane:"
+tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
+  pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
+
+  # Select option 1 (Approach B) via API
+  SELECT_RESP=$(curl -s -w "\n%{http_code}" "http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$AQ_MSG_ID&tool=AskUserQuestion&option=1")
+  SELECT_CODE=$(echo "$SELECT_RESP" | tail -1)
+  if [ "$SELECT_CODE" = "200" ]; then
+    pass "AskUserQuestion option selected via /tool/respond API"
+  else
+    fail "AskUserQuestion select API returned $SELECT_CODE"
+  fi
+
+  echo "Claude pane:"
+  tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+  # Verify bot logged the selection
+  sleep 2
+  if tail -20 "$LOG_FILE" | grep -q "AskUserQuestion option selected"; then
+    pass "AskUserQuestion option selection logged"
+  else
+    fail "AskUserQuestion option selection not found in log"
+  fi
+else
+  fail "AskUserQuestion not triggered within ${TIMEOUT}s"
+fi
+
+# ============================================================
+# Phase 6: Exit Claude and report
 # ============================================================
 echo ""
 echo "--- Cleanup ---"

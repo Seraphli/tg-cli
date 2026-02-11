@@ -95,6 +95,20 @@ func extractAssistantBody(transcriptPath string) string {
 	return ""
 }
 
+// detectTmuxTarget extracts the tmux target from environment variables.
+func detectTmuxTarget() string {
+	tmuxPane := os.Getenv("TMUX_PANE")
+	if tmuxPane == "" {
+		return ""
+	}
+	tmuxEnv := os.Getenv("TMUX")
+	if tmuxEnv != "" {
+		parts := strings.SplitN(tmuxEnv, ",", 2)
+		return tmuxPane + "@" + parts[0]
+	}
+	return tmuxPane
+}
+
 func runHook(cmd *cobra.Command, args []string) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -126,36 +140,107 @@ func runHook(cmd *cobra.Command, args []string) {
 	if cwd != "" {
 		project = filepath.Base(cwd)
 	}
+	port := hookPortFlag
+	if port == 0 {
+		creds, _ := config.LoadCredentials()
+		port = creds.Port
+	}
+	if port == 0 {
+		port = 12500
+	}
 	// Dispatch by event type
 	tmuxTarget := ""
 	body := ""
 	switch event {
 	case "SessionStart":
-		// Detect tmux target for SessionStart (no transcript reading needed)
-		tmuxPane := os.Getenv("TMUX_PANE")
-		if tmuxPane != "" {
-			tmuxEnv := os.Getenv("TMUX")
-			if tmuxEnv != "" {
-				parts := strings.SplitN(tmuxEnv, ",", 2)
-				tmuxTarget = tmuxPane + "@" + parts[0]
-			} else {
-				tmuxTarget = tmuxPane
-			}
-		}
+		tmuxTarget = detectTmuxTarget()
 	case "SessionEnd":
-		// SessionEnd: no transcript, no tmux detection needed
-	default:
-		// Stop/SubagentStop: extract transcript body and detect tmux
-		tmuxPane := os.Getenv("TMUX_PANE")
-		if tmuxPane != "" {
-			tmuxEnv := os.Getenv("TMUX")
-			if tmuxEnv != "" {
-				parts := strings.SplitN(tmuxEnv, ",", 2)
-				tmuxTarget = tmuxPane + "@" + parts[0]
-			} else {
-				tmuxTarget = tmuxPane
-			}
+		tmuxTarget = detectTmuxTarget()
+	case "PermissionRequest":
+		tmuxTarget = detectTmuxTarget()
+		toolName, _ := payload["tool_name"].(string)
+		if toolName == "AskUserQuestion" {
+			os.Exit(0)
 		}
+		toolInputRaw, _ := json.Marshal(payload["tool_input"])
+		suggestionsRaw, _ := json.Marshal(payload["permission_suggestions"])
+		hookData := map[string]string{
+			"event":       "PermissionRequest",
+			"toolName":    toolName,
+			"toolInput":   string(toolInputRaw),
+			"suggestions": string(suggestionsRaw),
+			"project":     project,
+			"tmuxTarget":  tmuxTarget,
+		}
+		jsonData, _ := json.Marshal(hookData)
+		client := &http.Client{Timeout: 115 * time.Second}
+		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/permission", port), bytes.NewReader(jsonData))
+		if err != nil {
+			os.Exit(0)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			os.Exit(0)
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		var decision struct {
+			Behavior           string          `json:"behavior"`
+			Message            string          `json:"message,omitempty"`
+			UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
+		}
+		if json.Unmarshal(respBody, &decision) == nil && decision.Behavior != "" {
+			output := map[string]interface{}{
+				"hookSpecificOutput": map[string]interface{}{
+					"hookEventName": "PermissionRequest",
+					"decision": map[string]interface{}{
+						"behavior": decision.Behavior,
+					},
+				},
+			}
+			if decision.Message != "" {
+				output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["message"] = decision.Message
+			}
+			if len(decision.UpdatedPermissions) > 0 {
+				output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["updatedPermissions"] = decision.UpdatedPermissions
+			}
+			outJSON, _ := json.Marshal(output)
+			fmt.Print(string(outJSON))
+		}
+		os.Exit(0)
+	case "PreToolUse":
+		toolName, _ := payload["tool_name"].(string)
+		if toolName != "AskUserQuestion" {
+			os.Exit(0)
+		}
+		tmuxTarget = detectTmuxTarget()
+		toolInputRaw, _ := json.Marshal(payload["tool_input"])
+		hookData := map[string]string{
+			"event":      "AskUserQuestion",
+			"toolName":   toolName,
+			"toolInput":  string(toolInputRaw),
+			"project":    project,
+			"tmuxTarget": tmuxTarget,
+			"sessionId":  sessionID,
+		}
+		jsonData, _ := json.Marshal(hookData)
+		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))
+		if err != nil {
+			os.Exit(0)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			os.Exit(0)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		os.Exit(0)
+	default:
+		// Stop: extract transcript body and detect tmux
+		tmuxTarget = detectTmuxTarget()
 		// Extract last assistant message from transcript with retry.
 		// The Stop hook fires before Claude Code finishes writing the assistant
 		// entry to the JSONL transcript. We count entries first, then wait for
@@ -173,14 +258,6 @@ func runHook(cmd *cobra.Command, args []string) {
 				body = extractAssistantBody(transcriptPath)
 			}
 		}
-	}
-	port := hookPortFlag
-	if port == 0 {
-		creds, _ := config.LoadCredentials()
-		port = creds.Port
-	}
-	if port == 0 {
-		port = 12500
 	}
 	hookData := map[string]string{
 		"event":      event,
