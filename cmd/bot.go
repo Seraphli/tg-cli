@@ -43,6 +43,53 @@ func init() {
 	BotCmd.Flags().IntVar(&portFlag, "port", 0, "HTTP server port (overrides config)")
 }
 
+type customCmd struct {
+	desc   string
+	ccName string
+}
+
+func scanCustomCommands() map[string]customCmd {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	commandsDir := filepath.Join(home, ".claude", "commands")
+	result := make(map[string]customCmd)
+	filepath.Walk(commandsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		rel, _ := filepath.Rel(commandsDir, path)
+		name := strings.TrimSuffix(rel, ".md")
+		// Build CC command name: dir/file → dir:file
+		parts := strings.Split(name, string(filepath.Separator))
+		ccName := strings.Join(parts, ":")
+		// Build TG command name: replace : and - with _
+		tgName := strings.ReplaceAll(ccName, ":", "_")
+		tgName = strings.ReplaceAll(tgName, "-", "_")
+		// Read first line for description
+		desc := "Custom command: /" + ccName
+		f, err := os.Open(path)
+		if err == nil {
+			scanner := bufio.NewScanner(f)
+			if scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				line = strings.TrimLeft(line, "# ")
+				if len(line) > 0 {
+					if len(line) > 200 {
+						line = line[:200]
+					}
+					desc = line
+				}
+			}
+			f.Close()
+		}
+		result[tgName] = customCmd{desc: desc, ccName: ccName}
+		return nil
+	})
+	return result
+}
+
 // splitBody splits body text into chunks fitting within maxRuneLen.
 // Tries to split at paragraph boundaries (\n\n), then line boundaries (\n),
 // falling back to hard rune-boundary split.
@@ -90,6 +137,45 @@ type pageEntry struct {
 var pages = &pageCacheStore{
 	entries:  make(map[int]*pageEntry),
 	sessions: make(map[string][]int),
+}
+
+var activeTarget struct {
+	sync.RWMutex
+	target string
+}
+
+var ccBuiltinCommands = map[string]string{
+	"clear":          "Clear conversation history",
+	"compact":        "Compact conversation",
+	"config":         "Open config",
+	"context":        "Visualize context usage",
+	"copy":           "Copy last response to clipboard",
+	"cost":           "Show token usage stats",
+	"debug":          "Debug current session",
+	"doctor":         "Check installation health",
+	"exit":           "Exit REPL",
+	"export":         "Export conversation to file",
+	"fast":           "Toggle fast mode",
+	"help":           "Show help",
+	"init":           "Initialize project CLAUDE.md",
+	"mcp":            "Manage MCP servers",
+	"memory":         "Edit CLAUDE.md memory",
+	"model":          "Switch AI model",
+	"permissions":    "View/update permissions",
+	"plan":           "Enter plan mode",
+	"rename":         "Rename current session",
+	"resume":         "Resume a conversation",
+	"rewind":         "Rewind conversation",
+	"stats":          "Show usage stats",
+	"status":         "Show status",
+	"statusline":     "Configure status line",
+	"tasks":          "List background tasks",
+	"teleport":       "Resume remote session",
+	"theme":          "Change color theme",
+	"todos":          "List TODO items",
+	"usage":          "Show plan usage limits",
+	"vim":            "Toggle vim mode",
+	"terminal_setup": "Configure terminal",
 }
 
 func (pc *pageCacheStore) store(msgID int, sessionID string, entry *pageEntry) {
@@ -335,10 +421,65 @@ func runBot(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to create bot: %v\n", err)
 		os.Exit(1)
 	}
-	bot.Handle("/start", func(c tele.Context) error {
-		return c.Send("tg-cli bot is running. Use /pair to pair this chat.")
+	// Build command list for Telegram menu
+	var commands []tele.Command
+	// Bot's own commands
+	commands = append(commands,
+		tele.Command{Text: "bot_start", Description: "Show welcome message"},
+		tele.Command{Text: "bot_pair", Description: "Pair this chat with the bot"},
+		tele.Command{Text: "bot_status", Description: "Check bot and pairing status"},
+	)
+	// CC built-in commands
+	for name, desc := range ccBuiltinCommands {
+		commands = append(commands, tele.Command{Text: name, Description: desc})
+	}
+	// CC custom commands
+	customCmds := scanCustomCommands()
+	for name, cmd := range customCmds {
+		commands = append(commands, tele.Command{Text: name, Description: cmd.desc})
+	}
+	bot.SetCommands(commands)
+	// Build TG→CC name mapping
+	ccCommandMap := make(map[string]string)
+	for tgName := range ccBuiltinCommands {
+		ccName := tgName
+		if tgName == "terminal_setup" {
+			ccName = "terminal-setup"
+		}
+		ccCommandMap[tgName] = ccName
+	}
+	for tgName, cmd := range customCmds {
+		ccCommandMap[tgName] = cmd.ccName
+	}
+	// Register CC command handlers
+	for tgName, ccName := range ccCommandMap {
+		tg, cc := tgName, ccName
+		bot.Handle("/"+tg, func(c tele.Context) error {
+			activeTarget.RLock()
+			t := activeTarget.target
+			activeTarget.RUnlock()
+			if t == "" {
+				return c.Send("❌ No active Claude Code session.")
+			}
+			target, err := injector.ParseTarget(t)
+			if err != nil || !injector.SessionExists(target) {
+				activeTarget.Lock()
+				activeTarget.target = ""
+				activeTarget.Unlock()
+				return c.Send("❌ Claude Code session not found.")
+			}
+			if err := injector.InjectText(target, "/"+cc); err != nil {
+				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
+			}
+			return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+				Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+			})
+		})
+	}
+	bot.Handle("/bot_start", func(c tele.Context) error {
+		return c.Send("tg-cli bot is running. Use /bot_pair to pair this chat.")
 	})
-	bot.Handle("/pair", func(c tele.Context) error {
+	bot.Handle("/bot_pair", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if pairing.IsAllowed(userID) || pairing.IsAllowed(chatID) {
@@ -347,11 +488,11 @@ func runBot(cmd *cobra.Command, args []string) {
 		code := pairing.CreatePairingRequest(userID, chatID)
 		return c.Send(fmt.Sprintf("Pairing code: %s\n\nEnter this code in the bot terminal to approve.\n\nCode expires in 10 minutes.", code))
 	})
-	bot.Handle("/status", func(c tele.Context) error {
+	bot.Handle("/bot_status", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /pair first.")
+			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		return c.Send("Bot is running and paired.")
 	})
@@ -359,7 +500,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /pair first.")
+			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
 			return nil
@@ -425,7 +566,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /pair first.")
+			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
 			return nil
@@ -566,6 +707,9 @@ func runBot(cmd *cobra.Command, args []string) {
 				w.Write([]byte("OK"))
 				return
 			}
+			activeTarget.Lock()
+			activeTarget.target = msg.TmuxTarget
+			activeTarget.Unlock()
 			text := notify.BuildNotificationText(notify.NotificationData{
 				Event:      "SessionStart",
 				Project:    msg.Project,
@@ -579,6 +723,9 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
 		case "SessionEnd":
+			activeTarget.Lock()
+			activeTarget.target = ""
+			activeTarget.Unlock()
 			text := notify.BuildNotificationText(notify.NotificationData{
 				Event:      "SessionEnd",
 				Project:    msg.Project,
