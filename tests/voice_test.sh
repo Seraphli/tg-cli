@@ -107,6 +107,27 @@ else
   fail "language incorrect: $LANGUAGE"
 fi
 
+# Test 2: Keep current model (empty input)
+echo ""
+echo "--- Test 2: Keep current model ---"
+OUTPUT2=$(echo -e "\nen" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" voice 2>&1) || true
+echo "$OUTPUT2"
+
+# Verify "Keeping current model" message
+if echo "$OUTPUT2" | grep -q "Keeping current model"; then
+  pass "keep current model message shown"
+else
+  fail "keep current model message not shown"
+fi
+
+# Verify modelPath still has ggml-tiny.bin
+MODEL_PATH2=$(jq -r '.modelPath' "$CONFIG")
+if [[ "$MODEL_PATH2" == *"ggml-tiny.bin"* ]]; then
+  pass "modelPath preserved after empty selection"
+else
+  fail "modelPath changed unexpectedly: $MODEL_PATH2"
+fi
+
 # Report
 echo ""
 echo "=== Voice Setup Test Report ==="
