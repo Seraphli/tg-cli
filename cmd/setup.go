@@ -19,10 +19,12 @@ var SetupCmd = &cobra.Command{
 
 var setupPortFlag int
 var setupUninstallFlag bool
+var setupSettingsFlag string
 
 func init() {
 	SetupCmd.Flags().IntVar(&setupPortFlag, "port", 0, "HTTP server port (overrides config)")
 	SetupCmd.Flags().BoolVar(&setupUninstallFlag, "uninstall", false, "Remove hooks for this instance")
+	SetupCmd.Flags().StringVar(&setupSettingsFlag, "settings", "", "Target settings file path (default: ~/.claude/settings.json)")
 }
 
 func runSetup(cmd *cobra.Command, args []string) {
@@ -49,6 +51,9 @@ func runSetup(cmd *cobra.Command, args []string) {
 	}
 	home, _ := os.UserHomeDir()
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if setupSettingsFlag != "" {
+		settingsPath = setupSettingsFlag
+	}
 	var settings map[string]interface{}
 	if _, err := os.Stat(settingsPath); err == nil {
 		backupPath := settingsPath + ".backup"
@@ -119,10 +124,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 		instanceDesc = config.ConfigDir
 	}
 	if setupUninstallFlag {
-		fmt.Println("Hooks uninstalled from ~/.claude/settings.json")
+		fmt.Printf("Hooks uninstalled from %s\n", settingsPath)
 		fmt.Printf("Removed hooks for instance: %s\n", instanceDesc)
 	} else {
-		fmt.Println("Hooks installed to ~/.claude/settings.json")
+		fmt.Printf("Hooks installed to %s\n", settingsPath)
 		fmt.Printf("Hook command: %s\n", hookCommand)
 	}
 }
