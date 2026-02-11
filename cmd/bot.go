@@ -117,6 +117,96 @@ func (pc *pageCacheStore) cleanupSession(sessionID string) {
 	delete(pc.sessions, sessionID)
 }
 
+type permDecision struct {
+	Behavior           string          `json:"behavior"`
+	Message            string          `json:"message,omitempty"`
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
+}
+
+type pendingPermStore struct {
+	mu          sync.RWMutex
+	entries     map[int]chan permDecision
+	targets     map[int]string
+	suggestions map[int]json.RawMessage
+}
+
+var pendingPerms = &pendingPermStore{
+	entries:     make(map[int]chan permDecision),
+	targets:     make(map[int]string),
+	suggestions: make(map[int]json.RawMessage),
+}
+
+func (ps *pendingPermStore) create(msgID int, tmuxTarget string, suggestionsJSON json.RawMessage) chan permDecision {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ch := make(chan permDecision, 1)
+	ps.entries[msgID] = ch
+	ps.targets[msgID] = tmuxTarget
+	ps.suggestions[msgID] = suggestionsJSON
+	return ch
+}
+
+func (ps *pendingPermStore) resolve(msgID int, d permDecision) bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ch, ok := ps.entries[msgID]
+	if !ok {
+		return false
+	}
+	ch <- d
+	delete(ps.entries, msgID)
+	return true
+}
+
+func (ps *pendingPermStore) getTarget(msgID int) (string, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	t, ok := ps.targets[msgID]
+	return t, ok
+}
+
+func (ps *pendingPermStore) getSuggestions(msgID int) json.RawMessage {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.suggestions[msgID]
+}
+
+func (ps *pendingPermStore) cleanup(msgID int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	delete(ps.entries, msgID)
+	delete(ps.targets, msgID)
+	delete(ps.suggestions, msgID)
+}
+
+type toolNotifyEntry struct {
+	tmuxTarget string
+	toolName   string
+	numOptions int
+}
+
+type toolNotifyStore struct {
+	mu      sync.RWMutex
+	entries map[int]*toolNotifyEntry
+}
+
+var toolNotifs = &toolNotifyStore{
+	entries: make(map[int]*toolNotifyEntry),
+}
+
+func (ts *toolNotifyStore) store(msgID int, entry *toolNotifyEntry) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.entries[msgID] = entry
+}
+
+func (ts *toolNotifyStore) get(msgID int) (*toolNotifyEntry, bool) {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	e, ok := ts.entries[msgID]
+	return e, ok
+}
+
 // buildPageKeyboard returns a ReplyMarkup with ◀️ N/M ▶️ inline buttons.
 // Callback data format: p\x00<pageNum> (where pageNum is the 1-based page number as string).
 func buildPageKeyboard(currentPage, totalPages int) *tele.ReplyMarkup {
@@ -143,6 +233,61 @@ func extractTmuxTarget(text string) (injector.TmuxTarget, error) {
 		}
 	}
 	return injector.TmuxTarget{}, fmt.Errorf("no tmux target found")
+}
+
+func resolvePermission(msgID int, decision string, suggestionsOverride json.RawMessage) (permDecision, error) {
+	d := permDecision{}
+	suggestions := suggestionsOverride
+	if suggestions == nil {
+		suggestions = pendingPerms.getSuggestions(msgID)
+	}
+	switch {
+	case decision == "allow":
+		d.Behavior = "allow"
+	case decision == "deny":
+		d.Behavior = "deny"
+	case strings.HasPrefix(decision, "s"):
+		idx, err := strconv.Atoi(decision[1:])
+		if err != nil {
+			return d, fmt.Errorf("invalid suggestion index")
+		}
+		d.Behavior = "allow"
+		var sugArr []json.RawMessage
+		json.Unmarshal(suggestions, &sugArr)
+		if idx < len(sugArr) {
+			d.UpdatedPermissions, _ = json.Marshal([]json.RawMessage{sugArr[idx]})
+		}
+	default:
+		return d, fmt.Errorf("unknown decision: %s", decision)
+	}
+	if !pendingPerms.resolve(msgID, d) {
+		return d, fmt.Errorf("no pending permission for msg_id %d", msgID)
+	}
+	return d, nil
+}
+
+func selectToolOption(msgID int, optIdx int) error {
+	entry, ok := toolNotifs.get(msgID)
+	if !ok {
+		return fmt.Errorf("no tool notification for msg_id %d", msgID)
+	}
+	target, err := injector.ParseTarget(entry.tmuxTarget)
+	if err != nil {
+		return err
+	}
+	switch entry.toolName {
+	case "AskUserQuestion":
+		for i := 0; i < optIdx; i++ {
+			if err := injector.SendKeys(target, "Down"); err != nil {
+				return err
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		return injector.SendKeys(target, "Enter")
+	default:
+		return fmt.Errorf("unsupported tool: %s", entry.toolName)
+	}
 }
 
 func runBot(cmd *cobra.Command, args []string) {
@@ -218,6 +363,43 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		if c.Message().ReplyTo == nil {
 			return nil
+		}
+		if replyTo := c.Message().ReplyTo; replyTo != nil {
+			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
+				pendingPerms.resolve(replyTo.ID, permDecision{
+					Behavior: "deny",
+					Message:  "User provided custom input: " + c.Message().Text,
+				})
+				target, err := extractTmuxTarget(replyTo.Text)
+				if err == nil && injector.SessionExists(target) {
+					injector.InjectText(target, c.Message().Text)
+				}
+				logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d", replyTo.ID))
+				return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+				})
+			}
+			if entry, ok := toolNotifs.get(replyTo.ID); ok {
+				target, err := injector.ParseTarget(entry.tmuxTarget)
+				if err != nil || !injector.SessionExists(target) {
+					return c.Reply("❌ tmux session not found.")
+				}
+				switch entry.toolName {
+				case "AskUserQuestion":
+					for i := 0; i < entry.numOptions; i++ {
+						injector.SendKeys(target, "Down")
+						time.Sleep(100 * time.Millisecond)
+					}
+					time.Sleep(100 * time.Millisecond)
+					injector.SendKeys(target, "Enter")
+					time.Sleep(500 * time.Millisecond)
+					injector.InjectText(target, c.Message().Text)
+				}
+				logger.Info(fmt.Sprintf("Tool text reply: tool=%s msg_id=%d", entry.toolName, replyTo.ID))
+				return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+				})
+			}
 		}
 		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 		if err != nil {
@@ -310,6 +492,34 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		return c.Respond()
 	})
+	bot.Handle(&tele.InlineButton{Unique: "perm"}, func(c tele.Context) error {
+		decision := c.Data()
+		_, err := resolvePermission(c.Message().ID, decision, nil)
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
+		}
+		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s", c.Message().ID, decision))
+		return c.Respond(&tele.CallbackResponse{Text: "✅ " + decision})
+	})
+	bot.Handle(&tele.InlineButton{Unique: "tool"}, func(c tele.Context) error {
+		parts := strings.SplitN(c.Data(), "|", 2)
+		if len(parts) < 2 {
+			return c.Respond(&tele.CallbackResponse{Text: "Invalid data"})
+		}
+		toolName := parts[0]
+		switch toolName {
+		case "AskUserQuestion":
+			optIdx, _ := strconv.Atoi(parts[1])
+			if err := selectToolOption(c.Message().ID, optIdx); err != nil {
+				return c.Respond(&tele.CallbackResponse{Text: err.Error()})
+			}
+			logger.Info(fmt.Sprintf("AskUserQuestion option selected via TG: msg_id=%d option=%d", c.Message().ID, optIdx))
+		}
+		bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+		})
+		return c.Respond()
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -327,6 +537,8 @@ func runBot(cmd *cobra.Command, args []string) {
 			Project    string `json:"project"`
 			Body       string `json:"body"`
 			TmuxTarget string `json:"tmuxTarget"`
+			ToolName   string `json:"toolName"`
+			ToolInput  string `json:"toolInput"`
 		}
 		if err := json.Unmarshal(body, &msg); err != nil {
 			http.Error(w, "Invalid JSON", 400)
@@ -367,8 +579,73 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
 		case "SessionEnd":
+			text := notify.BuildNotificationText(notify.NotificationData{
+				Event:      "SessionEnd",
+				Project:    msg.Project,
+				TmuxTarget: msg.TmuxTarget,
+			})
+			_, err = bot.Send(chat, text)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+			} else {
+				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s]", chatID, msg.Project))
+			}
 			pages.cleanupSession(msg.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", msg.SessionID))
+		case "AskUserQuestion":
+			var toolInput struct {
+				Questions []struct {
+					Question string `json:"question"`
+					Header   string `json:"header"`
+					Options  []struct {
+						Label       string `json:"label"`
+						Description string `json:"description"`
+					} `json:"options"`
+					MultiSelect bool `json:"multiSelect"`
+				} `json:"questions"`
+			}
+			json.Unmarshal([]byte(msg.ToolInput), &toolInput)
+			if len(toolInput.Questions) == 0 {
+				w.WriteHeader(200)
+				return
+			}
+			q := toolInput.Questions[0]
+			var optLabels []string
+			for _, o := range q.Options {
+				optLabels = append(optLabels, o.Label)
+			}
+			text := notify.BuildQuestionText(notify.QuestionData{
+				Project:    msg.Project,
+				TmuxTarget: msg.TmuxTarget,
+				Question:   q.Question,
+				Options:    optLabels,
+			})
+			markup := &tele.ReplyMarkup{}
+			var buttons []tele.Btn
+			for i, o := range q.Options {
+				buttons = append(buttons, markup.Data(o.Label, "tool", fmt.Sprintf("AskUserQuestion|%d", i)))
+			}
+			var rows []tele.Row
+			for i := 0; i < len(buttons); i += 2 {
+				if i+1 < len(buttons) {
+					rows = append(rows, markup.Row(buttons[i], buttons[i+1]))
+				} else {
+					rows = append(rows, markup.Row(buttons[i]))
+				}
+			}
+			markup.Inline(rows...)
+			sent, err := bot.Send(chat, text, markup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to send question: %v", err))
+				http.Error(w, "Send failed", 500)
+				return
+			}
+			toolNotifs.store(sent.ID, &toolNotifyEntry{
+				tmuxTarget: msg.TmuxTarget,
+				toolName:   "AskUserQuestion",
+				numOptions: len(q.Options),
+			})
+			logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d options=%d", sent.ID, len(q.Options)))
 		default:
 			headerLen := notify.HeaderLen(notify.NotificationData{
 				Event:      msg.Event,
@@ -466,6 +743,119 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		logger.Info(fmt.Sprintf("Callback page turn: msg_id=%d page=%d/%d", msgID, pageNum, len(entry.chunks)))
+		w.WriteHeader(200)
+		w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/permission", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var msg struct {
+			Event       string `json:"event"`
+			ToolName    string `json:"toolName"`
+			ToolInput   string `json:"toolInput"`
+			Suggestions string `json:"suggestions"`
+			Project     string `json:"project"`
+			TmuxTarget  string `json:"tmuxTarget"`
+		}
+		if json.Unmarshal(body, &msg) != nil {
+			http.Error(w, "Invalid JSON", 400)
+			return
+		}
+		logger.Debug(fmt.Sprintf("Permission request: tool=%s project=%s", msg.ToolName, msg.Project))
+		chatID := pairing.GetDefaultChatID()
+		if chatID == "" {
+			w.WriteHeader(200)
+			return
+		}
+		chat := &tele.Chat{ID: 0}
+		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+		chat.ID = chatIDInt
+		var toolInput map[string]interface{}
+		json.Unmarshal([]byte(msg.ToolInput), &toolInput)
+		text := notify.BuildPermissionText(notify.PermissionData{
+			Project:    msg.Project,
+			TmuxTarget: msg.TmuxTarget,
+			ToolName:   msg.ToolName,
+			ToolInput:  toolInput,
+		})
+		markup := &tele.ReplyMarkup{}
+		row1 := []tele.Btn{
+			markup.Data("✅ Allow", "perm", "allow"),
+			markup.Data("❌ Deny", "perm", "deny"),
+		}
+		var suggestions []json.RawMessage
+		json.Unmarshal([]byte(msg.Suggestions), &suggestions)
+		var row2 []tele.Btn
+		for i, s := range suggestions {
+			var sug struct {
+				Type string `json:"type"`
+				Tool string `json:"tool"`
+			}
+			json.Unmarshal(s, &sug)
+			label := "🔓 Always Allow"
+			if sug.Tool != "" {
+				label += " " + sug.Tool
+			}
+			row2 = append(row2, markup.Data(label, "perm", fmt.Sprintf("s%d", i)))
+		}
+		if len(row2) > 0 {
+			markup.Inline(markup.Row(row1...), markup.Row(row2...))
+		} else {
+			markup.Inline(markup.Row(row1...))
+		}
+		sent, err := bot.Send(chat, text, markup)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to send permission message: %v", err))
+			w.WriteHeader(200)
+			return
+		}
+		logger.Info(fmt.Sprintf("Permission request sent: tool=%s (msg_id=%d)", msg.ToolName, sent.ID))
+		suggestionsRaw, _ := json.Marshal(suggestions)
+		ch := pendingPerms.create(sent.ID, msg.TmuxTarget, suggestionsRaw)
+		select {
+		case d := <-ch:
+			pendingPerms.cleanup(sent.ID)
+			logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d behavior=%s", sent.ID, d.Behavior))
+			respJSON, _ := json.Marshal(d)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(respJSON)
+		case <-time.After(110 * time.Second):
+			pendingPerms.cleanup(sent.ID)
+			logger.Info(fmt.Sprintf("Permission timed out: msg_id=%d", sent.ID))
+			w.WriteHeader(200)
+		}
+	})
+	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
+		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
+		decision := r.URL.Query().Get("decision")
+		d, err := resolvePermission(msgID, decision, nil)
+		if err != nil {
+			http.Error(w, err.Error(), 404)
+			return
+		}
+		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s", msgID, decision))
+		respJSON, _ := json.Marshal(d)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(respJSON)
+	})
+	mux.HandleFunc("/tool/respond", func(w http.ResponseWriter, r *http.Request) {
+		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
+		tool := r.URL.Query().Get("tool")
+		switch tool {
+		case "AskUserQuestion":
+			optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
+			if err := selectToolOption(msgID, optIdx); err != nil {
+				http.Error(w, err.Error(), 404)
+				return
+			}
+			logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d option=%d", msgID, optIdx))
+		default:
+			http.Error(w, "unsupported tool", 400)
+			return
+		}
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})

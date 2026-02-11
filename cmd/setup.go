@@ -69,17 +69,32 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if !ok {
 		hooks = make(map[string]interface{})
 	}
-	hookEntry := map[string]interface{}{
-		"matcher": "",
-		"hooks": []map[string]interface{}{
-			{
-				"type":    "command",
-				"command": hookCommand,
-				"timeout": 5,
-			},
-		},
+	type hookCfg struct {
+		matcher string
+		timeout int
+		async   bool
 	}
-	for _, event := range []string{"Stop", "SubagentStop", "SessionStart", "SessionEnd"} {
+	configs := map[string]hookCfg{
+		"Stop":              {matcher: "", timeout: 5},
+		"SessionStart":      {matcher: "", timeout: 5},
+		"SessionEnd":        {matcher: "", timeout: 5},
+		"PermissionRequest": {matcher: "", timeout: 120},
+		"PreToolUse":        {matcher: "AskUserQuestion", timeout: 5, async: true},
+	}
+	for event, cfg := range configs {
+		entry := map[string]interface{}{
+			"matcher": cfg.matcher,
+			"hooks": []map[string]interface{}{
+				{
+					"type":    "command",
+					"command": hookCommand,
+					"timeout": cfg.timeout,
+				},
+			},
+		}
+		if cfg.async {
+			entry["hooks"].([]map[string]interface{})[0]["async"] = true
+		}
 		existing, ok := hooks[event].([]interface{})
 		if !ok {
 			existing = []interface{}{}
@@ -92,7 +107,6 @@ func runSetup(cmd *cobra.Command, args []string) {
 				filtered = append(filtered, h)
 				continue
 			}
-			// Only remove hooks matching the same instance (by config-dir)
 			if config.ConfigDir != "" {
 				if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
 					continue
@@ -105,7 +119,33 @@ func runSetup(cmd *cobra.Command, args []string) {
 			filtered = append(filtered, h)
 		}
 		if !setupUninstallFlag {
-			filtered = append(filtered, hookEntry)
+			filtered = append(filtered, entry)
+		}
+		hooks[event] = filtered
+	}
+	for _, event := range []string{"SubagentStop"} {
+		existing, ok := hooks[event].([]interface{})
+		if !ok {
+			existing = []interface{}{}
+		}
+		filtered := []interface{}{}
+		for _, h := range existing {
+			hJSON, _ := json.Marshal(h)
+			hStr := string(hJSON)
+			if !strings.Contains(hStr, "tg-cli") {
+				filtered = append(filtered, h)
+				continue
+			}
+			if config.ConfigDir != "" {
+				if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
+					continue
+				}
+			} else {
+				if !strings.Contains(hStr, "--config-dir") {
+					continue
+				}
+			}
+			filtered = append(filtered, h)
 		}
 		hooks[event] = filtered
 	}
