@@ -5,6 +5,7 @@ set -euo pipefail
 BOT_SESSION="tg-cli-e2e-bot"
 CLAUDE_SESSION="tg-cli-e2e-claude"
 TEST_CONFIG_DIR="$HOME/.tg-cli-test"
+TEST_SETTINGS="$TEST_CONFIG_DIR/claude-settings.json"
 TEST_PORT=12501
 LOG_FILE="$TEST_CONFIG_DIR/bot.log"
 CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
@@ -31,7 +32,7 @@ echo "Paired chat ID: $DEFAULT_CHAT_ID"
 cleanup() {
   echo ""
   echo "Cleaning up..."
-  ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --uninstall 2>/dev/null || true
+  rm -f "$TEST_SETTINGS"
   tmux kill-session -t "$BOT_SESSION" 2>/dev/null || true
   tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
 }
@@ -78,14 +79,14 @@ echo "Waiting for bot to start..."
 sleep 5
 
 # 3. Setup hooks with isolated config and port
-./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT"
+./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
 echo "Hooks installed."
 
 # 4. Start Claude in tmux
 tmux new-session -d -s "$CLAUDE_SESSION"
 CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
 echo "Claude pane: $CLAUDE_PANE"
-tmux send-keys -t "$CLAUDE_SESSION" "claude --allow-dangerously-skip-permissions" Enter
+tmux send-keys -t "$CLAUDE_SESSION" "claude --allow-dangerously-skip-permissions --setting-sources local --settings $TEST_SETTINGS" Enter
 echo "Waiting for Claude to start..."
 sleep 5
 
