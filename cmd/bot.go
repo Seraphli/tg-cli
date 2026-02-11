@@ -468,7 +468,11 @@ func runBot(cmd *cobra.Command, args []string) {
 				activeTarget.Unlock()
 				return c.Send("❌ Claude Code session not found.")
 			}
-			if err := injector.InjectText(target, "/"+cc); err != nil {
+			text := "/" + cc
+			if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
+				text += " " + payload
+			}
+			if err := injector.InjectText(target, text); err != nil {
 				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
 			return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
