@@ -280,6 +280,157 @@ var toolNotifs = &toolNotifyStore{
 	entries: make(map[int]*toolNotifyEntry),
 }
 
+type sessionCountStore struct {
+	mu     sync.Mutex
+	counts map[string]int
+	locks  map[string]*sync.Mutex
+}
+
+var sessionCounts = &sessionCountStore{
+	counts: make(map[string]int),
+	locks:  make(map[string]*sync.Mutex),
+}
+
+func (s *sessionCountStore) getLock(sessionID string) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.locks[sessionID] == nil {
+		s.locks[sessionID] = &sync.Mutex{}
+	}
+	return s.locks[sessionID]
+}
+
+func (s *sessionCountStore) cleanup(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.counts, sessionID)
+	delete(s.locks, sessionID)
+}
+
+func readAssistantTexts(transcriptPath string) []string {
+	content, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		return nil
+	}
+	var texts []string
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if typ, _ := entry["type"].(string); typ != "assistant" {
+			continue
+		}
+		msg, _ := entry["message"].(map[string]interface{})
+		if msg == nil {
+			continue
+		}
+		contentArr, _ := msg["content"].([]interface{})
+		if contentArr == nil {
+			continue
+		}
+		var textParts []string
+		for _, c := range contentArr {
+			cMap, _ := c.(map[string]interface{})
+			if cMap == nil {
+				continue
+			}
+			if cType, _ := cMap["type"].(string); cType == "text" {
+				if text, ok := cMap["text"].(string); ok {
+					textParts = append(textParts, text)
+				}
+			}
+		}
+		if len(textParts) > 0 {
+			texts = append(texts, strings.Join(textParts, "\n"))
+		}
+	}
+	return texts
+}
+
+func processTranscriptUpdates(sessionID, transcriptPath string, isStop bool) string {
+	if transcriptPath == "" || sessionID == "" {
+		return ""
+	}
+	lock := sessionCounts.getLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	notified := sessionCounts.counts[sessionID]
+	var texts []string
+	if isStop {
+		for attempt := 0; attempt < 10; attempt++ {
+			texts = readAssistantTexts(transcriptPath)
+			if len(texts) > notified {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	} else {
+		texts = readAssistantTexts(transcriptPath)
+	}
+	if len(texts) <= notified {
+		return ""
+	}
+	var newTexts []string
+	for i := notified; i < len(texts); i++ {
+		if texts[i] != "" {
+			newTexts = append(newTexts, texts[i])
+		}
+	}
+	sessionCounts.counts[sessionID] = len(texts)
+	return strings.Join(newTexts, "\n\n")
+}
+
+func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, tmuxTarget, body string) {
+	headerLen := notify.HeaderLen(notify.NotificationData{
+		Event:      event,
+		Project:    project,
+		TmuxTarget: tmuxTarget,
+	})
+	maxBodyRunes := 4000 - headerLen - 100
+	chunks := splitBody(body, maxBodyRunes)
+	if len(chunks) <= 1 {
+		text := notify.BuildNotificationText(notify.NotificationData{
+			Event:      event,
+			Project:    project,
+			Body:       body,
+			TmuxTarget: tmuxTarget,
+		})
+		_, err := b.Send(chat, text)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+		} else {
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, event, project))
+		}
+	} else {
+		text := notify.BuildNotificationText(notify.NotificationData{
+			Event:      event,
+			Project:    project,
+			Body:       chunks[0],
+			TmuxTarget: tmuxTarget,
+			Page:       1,
+			TotalPages: len(chunks),
+		})
+		kb := buildPageKeyboard(1, len(chunks))
+		sent, err := b.Send(chat, text, kb)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+		} else {
+			pages.store(sent.ID, sessionID, &pageEntry{
+				chunks:     chunks,
+				event:      event,
+				project:    project,
+				tmuxTarget: tmuxTarget,
+			})
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] (%d pages, msg_id=%d)", chatID, event, project, len(chunks), sent.ID))
+		}
+	}
+}
+
 func (ts *toolNotifyStore) store(msgID int, entry *toolNotifyEntry) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -677,13 +828,14 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		var msg struct {
-			Event      string `json:"event"`
-			SessionID  string `json:"sessionId"`
-			Project    string `json:"project"`
-			Body       string `json:"body"`
-			TmuxTarget string `json:"tmuxTarget"`
-			ToolName   string `json:"toolName"`
-			ToolInput  string `json:"toolInput"`
+			Event          string `json:"event"`
+			SessionID      string `json:"sessionId"`
+			Project        string `json:"project"`
+			Body           string `json:"body"`
+			TmuxTarget     string `json:"tmuxTarget"`
+			ToolName       string `json:"toolName"`
+			ToolInput      string `json:"toolInput"`
+			TranscriptPath string `json:"transcriptPath"`
 		}
 		if err := json.Unmarshal(body, &msg); err != nil {
 			http.Error(w, "Invalid JSON", 400)
@@ -742,12 +894,13 @@ func runBot(cmd *cobra.Command, args []string) {
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s]", chatID, msg.Project))
 			}
 			pages.cleanupSession(msg.SessionID)
+			sessionCounts.cleanup(msg.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", msg.SessionID))
 		case "AskUserQuestion":
 			var toolInput struct {
 				Questions []struct {
-					Question string `json:"question"`
 					Header   string `json:"header"`
+					Question string `json:"question"`
 					Options  []struct {
 						Label       string `json:"label"`
 						Description string `json:"description"`
@@ -761,15 +914,16 @@ func runBot(cmd *cobra.Command, args []string) {
 				return
 			}
 			q := toolInput.Questions[0]
-			var optLabels []string
+			var opts []notify.QuestionOption
 			for _, o := range q.Options {
-				optLabels = append(optLabels, o.Label)
+				opts = append(opts, notify.QuestionOption{Label: o.Label, Description: o.Description})
 			}
 			text := notify.BuildQuestionText(notify.QuestionData{
 				Project:    msg.Project,
 				TmuxTarget: msg.TmuxTarget,
+				Header:     q.Header,
 				Question:   q.Question,
-				Options:    optLabels,
+				Options:    opts,
 			})
 			markup := &tele.ReplyMarkup{}
 			var buttons []tele.Btn
@@ -797,52 +951,14 @@ func runBot(cmd *cobra.Command, args []string) {
 				numOptions: len(q.Options),
 			})
 			logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d options=%d", sent.ID, len(q.Options)))
-		default:
-			headerLen := notify.HeaderLen(notify.NotificationData{
-				Event:      msg.Event,
-				Project:    msg.Project,
-				TmuxTarget: msg.TmuxTarget,
-			})
-			maxBodyRunes := 4000 - headerLen - 100
-			chunks := splitBody(msg.Body, maxBodyRunes)
-			if len(chunks) <= 1 {
-				text := notify.BuildNotificationText(notify.NotificationData{
-					Event:      msg.Event,
-					Project:    msg.Project,
-					Body:       msg.Body,
-					TmuxTarget: msg.TmuxTarget,
-				})
-				_, err = bot.Send(chat, text)
-				if err != nil {
-					logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
-					http.Error(w, "Send failed", 500)
-					return
-				}
-				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
-			} else {
-				text := notify.BuildNotificationText(notify.NotificationData{
-					Event:      msg.Event,
-					Project:    msg.Project,
-					Body:       chunks[0],
-					TmuxTarget: msg.TmuxTarget,
-					Page:       1,
-					TotalPages: len(chunks),
-				})
-				kb := buildPageKeyboard(1, len(chunks))
-				sent, err := bot.Send(chat, text, kb)
-				if err != nil {
-					logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
-					http.Error(w, "Send failed", 500)
-					return
-				}
-				pages.store(sent.ID, msg.SessionID, &pageEntry{
-					chunks:     chunks,
-					event:      msg.Event,
-					project:    msg.Project,
-					tmuxTarget: msg.TmuxTarget,
-				})
-				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] (%d pages, msg_id=%d)", chatID, msg.Event, msg.Project, len(chunks), sent.ID))
+		case "PreToolUse":
+			body := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath, false)
+			if body != "" {
+				sendEventNotification(bot, chat, chatID, msg.SessionID, msg.Event, msg.Project, msg.TmuxTarget, body)
 			}
+		default:
+			body := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath, true)
+			sendEventNotification(bot, chat, chatID, msg.SessionID, msg.Event, msg.Project, msg.TmuxTarget, body)
 		}
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))

@@ -21,11 +21,17 @@ type PermissionData struct {
 	ToolInput  map[string]interface{}
 }
 
+type QuestionOption struct {
+	Label       string
+	Description string
+}
+
 type QuestionData struct {
 	Project    string
 	TmuxTarget string
+	Header     string
 	Question   string
-	Options    []string
+	Options    []QuestionOption
 }
 
 func BuildNotificationText(data NotificationData) string {
@@ -37,6 +43,9 @@ func BuildNotificationText(data NotificationData) string {
 	case data.Event == "SessionEnd":
 		emoji = "🔴"
 		status = "Session Ended"
+	case data.Event == "PreToolUse":
+		emoji = "💬"
+		status = "Update"
 	default:
 		emoji = "✅"
 		status = "Task Completed"
@@ -94,9 +103,15 @@ func BuildQuestionText(data QuestionData) string {
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+data.TmuxTarget)
 	}
+	if data.Header != "" {
+		lines = append(lines, "", "📋 "+data.Header)
+	}
 	lines = append(lines, "", data.Question)
 	for i, opt := range data.Options {
-		lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt))
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+		if opt.Description != "" {
+			lines = append(lines, "  → "+opt.Description)
+		}
 	}
 	return strings.Join(lines, "\n")
 }

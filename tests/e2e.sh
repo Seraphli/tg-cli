@@ -82,6 +82,13 @@ sleep 5
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
 echo "Hooks installed."
 
+# 3a. Verify PreToolUse hook registration
+if grep -q "PreToolUse" "$TEST_SETTINGS"; then
+  pass "PreToolUse hook registered in settings"
+else
+  fail "PreToolUse hook not found in settings"
+fi
+
 # 4. Start Claude in tmux
 tmux new-session -d -s "$CLAUDE_SESSION"
 CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
@@ -323,7 +330,7 @@ echo "--- Phase 5: AskUserQuestion test ---"
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
 
 # Send prompt that should trigger AskUserQuestion
-tmux send-keys -t "$CLAUDE_SESSION" -l "I need you to ask me a question with AskUserQuestion tool. Ask me: which approach should we use? Options: Approach A, Approach B"
+tmux send-keys -t "$CLAUDE_SESSION" -l "First write a brief paragraph explaining what you are about to do, then ask me a question using AskUserQuestion tool with header 'Test Header' and two options: 'Option A' with description 'First option desc', 'Option B' with description 'Second option desc'. Question: 'Which option?'"
 sleep 1
 tmux send-keys -t "$CLAUDE_SESSION" Enter
 
@@ -353,6 +360,13 @@ tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
 
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
+
+  # Verify PreToolUse intermediate notification was sent
+  if tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -q "Notification sent.*PreToolUse"; then
+    pass "PreToolUse intermediate notification sent"
+  else
+    fail "PreToolUse intermediate notification not found"
+  fi
 
   # Select option 1 (Approach B) via API
   SELECT_RESP=$(curl -s -w "\n%{http_code}" "http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$AQ_MSG_ID&tool=AskUserQuestion&option=1")
