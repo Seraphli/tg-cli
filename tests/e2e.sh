@@ -280,8 +280,8 @@ echo "--- Phase 4: PermissionRequest test ---"
 # Record log position
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
 
-# Send command that triggers Bash permission (file write to ensure permission dialog)
-tmux send-keys -t "$CLAUDE_SESSION" -l "run this bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt"
+# Send command that triggers Bash permission, with explicit instruction to output text first
+tmux send-keys -t "$CLAUDE_SESSION" -l "First write a brief paragraph explaining what you are about to do, then run this bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt"
 sleep 1
 tmux send-keys -t "$CLAUDE_SESSION" Enter
 
@@ -310,6 +310,21 @@ tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
+
+  # Verify Update notification sent BEFORE PermissionRequest
+  NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")
+  UPDATE_LINE=$(echo "$NEW_LOGS" | grep -n "Notification sent.*PreToolUse" | head -1 | cut -d: -f1)
+  PERM_LINE=$(echo "$NEW_LOGS" | grep -n "Permission request sent" | head -1 | cut -d: -f1)
+  if [ -n "$UPDATE_LINE" ] && [ -n "$PERM_LINE" ]; then
+    if [ "$UPDATE_LINE" -lt "$PERM_LINE" ]; then
+      pass "Update sent BEFORE PermissionRequest (line $UPDATE_LINE < $PERM_LINE)"
+    else
+      fail "Update sent AFTER PermissionRequest (line $UPDATE_LINE >= $PERM_LINE)"
+    fi
+  else
+    [ -z "$UPDATE_LINE" ] && fail "PreToolUse intermediate notification not found before PermissionRequest"
+    [ -z "$PERM_LINE" ] && fail "Permission request log line not found"
+  fi
 
   # Approve via API endpoint
   DECIDE_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/permission/decide?msg_id=$PERM_MSG_ID&decision=allow")
