@@ -84,7 +84,7 @@ func runHook(cmd *cobra.Command, args []string) {
 	if tp, ok := payload["transcript_path"].(string); ok {
 		transcriptPath = tp
 	}
-	// Dispatch by event type
+	var hookToolName, hookToolInput string
 	tmuxTarget := ""
 	switch event {
 	case "SessionStart":
@@ -146,30 +146,13 @@ func runHook(cmd *cobra.Command, args []string) {
 		os.Exit(0)
 	case "PreToolUse":
 		tmuxTarget = detectTmuxTarget()
-		toolName, _ := payload["tool_name"].(string)
-		// AskUserQuestion-specific: send question data to bot
-		if toolName == "AskUserQuestion" {
-			toolInputRaw, _ := json.Marshal(payload["tool_input"])
-			askData := map[string]string{
-				"event":      "AskUserQuestion",
-				"toolName":   toolName,
-				"toolInput":  string(toolInputRaw),
-				"project":    project,
-				"tmuxTarget": tmuxTarget,
-				"sessionId":  sessionID,
-			}
-			askJSON, _ := json.Marshal(askData)
-			askReq, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(askJSON))
-			if err == nil {
-				askReq.Header.Set("Content-Type", "application/json")
-				client := &http.Client{}
-				if resp, err := client.Do(askReq); err == nil {
-					io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
-				}
-			}
+		hookToolName, _ = payload["tool_name"].(string)
+		if hookToolName == "AskUserQuestion" {
+			raw, _ := json.Marshal(payload["tool_input"])
+			hookToolInput = string(raw)
 		}
-		// Fall through to common hookData code (sends PreToolUse event with transcriptPath)
+	case "UserPromptSubmit":
+		tmuxTarget = detectTmuxTarget()
 	default:
 		tmuxTarget = detectTmuxTarget()
 	}
@@ -180,6 +163,8 @@ func runHook(cmd *cobra.Command, args []string) {
 		"body":           "",
 		"tmuxTarget":     tmuxTarget,
 		"transcriptPath": transcriptPath,
+		"toolName":       hookToolName,
+		"toolInput":      hookToolInput,
 	}
 	jsonData, _ := json.Marshal(hookData)
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))

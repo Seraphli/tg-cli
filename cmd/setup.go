@@ -80,6 +80,7 @@ func runSetup(cmd *cobra.Command, args []string) {
 		"SessionEnd":        {matcher: "", timeout: 5},
 		"PermissionRequest": {matcher: "", timeout: 120},
 		"PreToolUse":        {matcher: "", timeout: 5, async: true},
+		"UserPromptSubmit":  {matcher: "", timeout: 5, async: true},
 	}
 	for event, cfg := range configs {
 		entry := map[string]interface{}{
