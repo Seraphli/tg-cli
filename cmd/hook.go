@@ -27,74 +27,6 @@ func init() {
 	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
 }
 
-// countAssistantEntries counts the number of assistant entries in a JSONL transcript.
-func countAssistantEntries(transcriptPath string) int {
-	content, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var entry map[string]interface{}
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		if typ, _ := entry["type"].(string); typ == "assistant" {
-			count++
-		}
-	}
-	return count
-}
-
-// extractAssistantBody reads a JSONL transcript and returns the last assistant message text.
-func extractAssistantBody(transcriptPath string) string {
-	content, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		return ""
-	}
-	lines := strings.Split(string(content), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		var entry map[string]interface{}
-		if json.Unmarshal([]byte(line), &entry) != nil {
-			continue
-		}
-		typ, _ := entry["type"].(string)
-		if typ != "assistant" {
-			continue
-		}
-		msg, _ := entry["message"].(map[string]interface{})
-		if msg == nil {
-			continue
-		}
-		contentArr, _ := msg["content"].([]interface{})
-		if contentArr == nil {
-			continue
-		}
-		var textParts []string
-		for _, c := range contentArr {
-			cMap, _ := c.(map[string]interface{})
-			if cMap == nil {
-				continue
-			}
-			if cType, _ := cMap["type"].(string); cType == "text" {
-				if text, ok := cMap["text"].(string); ok {
-					textParts = append(textParts, text)
-				}
-			}
-		}
-		return strings.Join(textParts, "\n")
-	}
-	return ""
-}
-
 // detectTmuxTarget extracts the tmux target from environment variables.
 func detectTmuxTarget() string {
 	tmuxPane := os.Getenv("TMUX_PANE")
@@ -148,9 +80,12 @@ func runHook(cmd *cobra.Command, args []string) {
 	if port == 0 {
 		port = 12500
 	}
+	transcriptPath := ""
+	if tp, ok := payload["transcript_path"].(string); ok {
+		transcriptPath = tp
+	}
 	// Dispatch by event type
 	tmuxTarget := ""
-	body := ""
 	switch event {
 	case "SessionStart":
 		tmuxTarget = detectTmuxTarget()
@@ -210,61 +145,41 @@ func runHook(cmd *cobra.Command, args []string) {
 		}
 		os.Exit(0)
 	case "PreToolUse":
+		tmuxTarget = detectTmuxTarget()
 		toolName, _ := payload["tool_name"].(string)
-		if toolName != "AskUserQuestion" {
-			os.Exit(0)
-		}
-		tmuxTarget = detectTmuxTarget()
-		toolInputRaw, _ := json.Marshal(payload["tool_input"])
-		hookData := map[string]string{
-			"event":      "AskUserQuestion",
-			"toolName":   toolName,
-			"toolInput":  string(toolInputRaw),
-			"project":    project,
-			"tmuxTarget": tmuxTarget,
-			"sessionId":  sessionID,
-		}
-		jsonData, _ := json.Marshal(hookData)
-		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))
-		if err != nil {
-			os.Exit(0)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			os.Exit(0)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		os.Exit(0)
-	default:
-		// Stop: extract transcript body and detect tmux
-		tmuxTarget = detectTmuxTarget()
-		// Extract last assistant message from transcript with retry.
-		// The Stop hook fires before Claude Code finishes writing the assistant
-		// entry to the JSONL transcript. We count entries first, then wait for
-		// a new one to appear (handles both first and subsequent invocations).
-		if transcriptPath, ok := payload["transcript_path"].(string); ok {
-			initialCount := countAssistantEntries(transcriptPath)
-			for attempt := 0; attempt < 10; attempt++ {
-				time.Sleep(200 * time.Millisecond)
-				if countAssistantEntries(transcriptPath) > initialCount {
-					body = extractAssistantBody(transcriptPath)
-					break
+		// AskUserQuestion-specific: send question data to bot
+		if toolName == "AskUserQuestion" {
+			toolInputRaw, _ := json.Marshal(payload["tool_input"])
+			askData := map[string]string{
+				"event":      "AskUserQuestion",
+				"toolName":   toolName,
+				"toolInput":  string(toolInputRaw),
+				"project":    project,
+				"tmuxTarget": tmuxTarget,
+				"sessionId":  sessionID,
+			}
+			askJSON, _ := json.Marshal(askData)
+			askReq, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(askJSON))
+			if err == nil {
+				askReq.Header.Set("Content-Type", "application/json")
+				client := &http.Client{}
+				if resp, err := client.Do(askReq); err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
 				}
 			}
-			if body == "" {
-				body = extractAssistantBody(transcriptPath)
-			}
 		}
+		// Fall through to common hookData code (sends PreToolUse event with transcriptPath)
+	default:
+		tmuxTarget = detectTmuxTarget()
 	}
 	hookData := map[string]string{
-		"event":      event,
-		"sessionId":  sessionID,
-		"project":    project,
-		"body":       body,
-		"tmuxTarget": tmuxTarget,
+		"event":          event,
+		"sessionId":      sessionID,
+		"project":        project,
+		"body":           "",
+		"tmuxTarget":     tmuxTarget,
+		"transcriptPath": transcriptPath,
 	}
 	jsonData, _ := json.Marshal(hookData)
 	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))
