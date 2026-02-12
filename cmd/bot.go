@@ -355,6 +355,12 @@ func processTranscriptUpdates(sessionID, transcriptPath string) string {
 	lock := sessionCounts.getLock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
+	// Initialize count for unknown sessions (e.g. after bot restart) to avoid sending historical content
+	if _, known := sessionCounts.counts[sessionID]; !known {
+		texts := readAssistantTexts(transcriptPath)
+		sessionCounts.counts[sessionID] = len(texts)
+		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, len(texts)))
+	}
 	time.Sleep(2 * time.Second)
 	texts := readAssistantTexts(transcriptPath)
 	notified := sessionCounts.counts[sessionID]
@@ -778,7 +784,11 @@ func runBot(cmd *cobra.Command, args []string) {
 			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
 		}
 		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s", c.Message().ID, decision))
-		return c.Respond(&tele.CallbackResponse{Text: "✅ " + decision})
+		displayText := decision
+		if strings.HasPrefix(decision, "s") {
+			displayText = "Always Allow"
+		}
+		return c.Respond(&tele.CallbackResponse{Text: "✅ " + displayText})
 	})
 	bot.Handle(&tele.InlineButton{Unique: "tool"}, func(c tele.Context) error {
 		parts := strings.SplitN(c.Data(), "|", 2)
@@ -1004,12 +1014,14 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		var msg struct {
-			Event       string `json:"event"`
-			ToolName    string `json:"toolName"`
-			ToolInput   string `json:"toolInput"`
-			Suggestions string `json:"suggestions"`
-			Project     string `json:"project"`
-			TmuxTarget  string `json:"tmuxTarget"`
+			Event          string `json:"event"`
+			ToolName       string `json:"toolName"`
+			ToolInput      string `json:"toolInput"`
+			Suggestions    string `json:"suggestions"`
+			Project        string `json:"project"`
+			TmuxTarget     string `json:"tmuxTarget"`
+			SessionID      string `json:"sessionId"`
+			TranscriptPath string `json:"transcriptPath"`
 		}
 		if json.Unmarshal(body, &msg) != nil {
 			http.Error(w, "Invalid JSON", 400)
@@ -1024,6 +1036,10 @@ func runBot(cmd *cobra.Command, args []string) {
 		chat := &tele.Chat{ID: 0}
 		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 		chat.ID = chatIDInt
+		// Send intermediate text before permission message
+		if updateBody := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath); updateBody != "" {
+			sendEventNotification(bot, chat, chatID, msg.SessionID, "PreToolUse", msg.Project, msg.TmuxTarget, updateBody)
+		}
 		var toolInput map[string]interface{}
 		json.Unmarshal([]byte(msg.ToolInput), &toolInput)
 		text := notify.BuildPermissionText(notify.PermissionData{

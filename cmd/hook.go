@@ -100,12 +100,14 @@ func runHook(cmd *cobra.Command, args []string) {
 		toolInputRaw, _ := json.Marshal(payload["tool_input"])
 		suggestionsRaw, _ := json.Marshal(payload["permission_suggestions"])
 		hookData := map[string]string{
-			"event":       "PermissionRequest",
-			"toolName":    toolName,
-			"toolInput":   string(toolInputRaw),
-			"suggestions": string(suggestionsRaw),
-			"project":     project,
-			"tmuxTarget":  tmuxTarget,
+			"event":          "PermissionRequest",
+			"toolName":       toolName,
+			"toolInput":      string(toolInputRaw),
+			"suggestions":    string(suggestionsRaw),
+			"project":        project,
+			"tmuxTarget":     tmuxTarget,
+			"sessionId":      sessionID,
+			"transcriptPath": transcriptPath,
 		}
 		jsonData, _ := json.Marshal(hookData)
 		client := &http.Client{Timeout: 115 * time.Second}
