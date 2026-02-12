@@ -89,6 +89,12 @@ else
   fail "PreToolUse hook not found in settings"
 fi
 
+if grep -q "UserPromptSubmit" "$TEST_SETTINGS"; then
+  pass "UserPromptSubmit hook registered in settings"
+else
+  fail "UserPromptSubmit hook not found in settings"
+fi
+
 # 4. Start Claude in tmux
 tmux new-session -d -s "$CLAUDE_SESSION"
 CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
@@ -115,6 +121,7 @@ else
 fi
 
 # 5. Send a simple command to trigger hook
+LOG_BEFORE_HELLO=$(wc -l < "$LOG_FILE")
 tmux send-keys -t "$CLAUDE_SESSION" -l "say hello"
 sleep 1
 tmux send-keys -t "$CLAUDE_SESSION" Enter
@@ -125,8 +132,8 @@ ELAPSED=0
 FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
   LOG_AFTER=$(wc -l < "$LOG_FILE")
-  if [ "$LOG_AFTER" -gt "$LOG_BEFORE" ]; then
-    if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "Notification sent"; then
+  if [ "$LOG_AFTER" -gt "$LOG_BEFORE_HELLO" ]; then
+    if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep -q "Notification sent"; then
       FOUND=true
       break
     fi
@@ -144,7 +151,7 @@ tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
 if [ "$FOUND" = true ]; then
   pass "1st TG notification sent (hook → bot → TG)"
   echo "  Log entries:"
-  tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "Notification"
+  tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "Notification"
 else
   fail "1st TG notification (no notification within ${TIMEOUT}s)"
   echo "  Bot log tail:"
@@ -152,11 +159,17 @@ else
 fi
 
 # 8. Verify hook included tmux target in debug log
-NEW_LOGS=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE")
+NEW_LOGS=$(tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE")
 if echo "$NEW_LOGS" | grep -q "Received hook"; then
   pass "Hook HTTP POST received by bot"
 else
   fail "Hook HTTP POST not found in bot log"
+fi
+
+if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep -q "UserPromptSubmit position"; then
+  pass "UserPromptSubmit position recorded"
+else
+  fail "UserPromptSubmit position not found in bot log"
 fi
 
 # ============================================================
@@ -361,11 +374,19 @@ tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
 
-  # Verify PreToolUse intermediate notification was sent
-  if tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -q "Notification sent.*PreToolUse"; then
-    pass "PreToolUse intermediate notification sent"
+  # Verify PreToolUse notification order
+  NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
+  UPDATE_LINE=$(echo "$NEW_LOGS" | grep -n "Notification sent.*PreToolUse" | head -1 | cut -d: -f1)
+  AQ_LINE=$(echo "$NEW_LOGS" | grep -n "AskUserQuestion sent" | head -1 | cut -d: -f1)
+  if [ -n "$UPDATE_LINE" ] && [ -n "$AQ_LINE" ]; then
+    if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
+      pass "PreToolUse Update sent BEFORE AskUserQuestion (line $UPDATE_LINE < $AQ_LINE)"
+    else
+      fail "PreToolUse Update sent AFTER AskUserQuestion (line $UPDATE_LINE >= $AQ_LINE)"
+    fi
   else
-    fail "PreToolUse intermediate notification not found"
+    [ -z "$UPDATE_LINE" ] && fail "PreToolUse intermediate notification not found"
+    [ -z "$AQ_LINE" ] && fail "AskUserQuestion notification not found"
   fi
 
   # Select option 1 (Approach B) via API
@@ -386,6 +407,35 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     pass "AskUserQuestion option selection logged"
   else
     fail "AskUserQuestion option selection not found in log"
+  fi
+
+  # Wait for Stop notification after AskUserQuestion option selection
+  LOG_BEFORE_STOP5=$(wc -l < "$LOG_FILE")
+  ELAPSED=0
+  STOP5_FOUND=false
+  while [ $ELAPSED -lt $TIMEOUT ]; do
+    if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_STOP5" ]; then
+      if tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -q "Notification sent.*Stop.*body_len="; then
+        STOP5_FOUND=true
+        break
+      fi
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+  done
+
+  echo "Claude pane after Stop:"
+  tmux capture-pane -t "$CLAUDE_SESSION" -p -S -50
+
+  if [ "$STOP5_FOUND" = true ]; then
+    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -oP 'Notification sent.*Stop.*body_len=\K[0-9]+' | head -1)
+    if [ -n "$BODY_LEN" ] && [ "$BODY_LEN" -gt 0 ]; then
+      pass "Stop notification has content after AskUserQuestion (body_len=$BODY_LEN)"
+    else
+      fail "Stop notification body is empty after AskUserQuestion"
+    fi
+  else
+    fail "Stop notification not found after AskUserQuestion within ${TIMEOUT}s"
   fi
 else
   fail "AskUserQuestion not triggered within ${TIMEOUT}s"
