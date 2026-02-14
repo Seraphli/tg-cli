@@ -27,7 +27,24 @@ func init() {
 	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
 }
 
-// detectTmuxTarget extracts the tmux target from environment variables.
+// hookLog appends a debug line to bot.log.
+func hookLog(format string, args ...interface{}) {
+	logPath := filepath.Join(config.GetConfigDir(), "bot.log")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	ts := time.Now().Format("2006-01-02T15:04:05-07:00")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "[%s] [PID=%d] [HOOK] %s\n", ts, os.Getpid(), msg)
+}
+
+func hookExit(code int, reason string) {
+	hookLog("exit %d: %s", code, reason)
+	os.Exit(code)
+}
+
 func detectTmuxTarget() string {
 	tmuxPane := os.Getenv("TMUX_PANE")
 	if tmuxPane == "" {
@@ -44,34 +61,29 @@ func detectTmuxTarget() string {
 func runHook(cmd *cobra.Command, args []string) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		os.Exit(0)
+		hookExit(1, fmt.Sprintf("stdin read error: %v", err))
 	}
 	raw := strings.TrimSpace(string(data))
 	if raw == "" {
-		os.Exit(0)
+		hookExit(1, "empty stdin")
 	}
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		os.Exit(0)
+		hookExit(1, fmt.Sprintf("JSON parse error: %v", err))
 	}
-	event := "unknown"
-	if v, ok := payload["hook_event_name"].(string); ok {
-		event = v
-	} else if v, ok := payload["event"].(string); ok {
-		event = v
+	hookLog("CC stdin payload: %s", raw)
+	// Extract event name
+	event, _ := payload["hook_event_name"].(string)
+	if event == "" {
+		hookExit(1, "no hook_event_name in payload")
 	}
-	sessionID := ""
-	if v, ok := payload["session_id"].(string); ok {
-		sessionID = v
+	hookLog("event=%s", event)
+	// Add computed fields (CC doesn't include these)
+	payload["tmux_target"] = detectTmuxTarget()
+	if cwd, ok := payload["cwd"].(string); ok && cwd != "" {
+		payload["project"] = filepath.Base(cwd)
 	}
-	cwd := ""
-	if v, ok := payload["cwd"].(string); ok {
-		cwd = v
-	}
-	project := "unknown"
-	if cwd != "" {
-		project = filepath.Base(cwd)
-	}
+	// Determine port
 	port := hookPortFlag
 	if port == 0 {
 		creds, _ := config.LoadCredentials()
@@ -80,106 +92,27 @@ func runHook(cmd *cobra.Command, args []string) {
 	if port == 0 {
 		port = 12500
 	}
-	transcriptPath := ""
-	if tp, ok := payload["transcript_path"].(string); ok {
-		transcriptPath = tp
-	}
-	var hookToolName, hookToolInput string
-	tmuxTarget := ""
-	switch event {
-	case "SessionStart":
-		tmuxTarget = detectTmuxTarget()
-	case "SessionEnd":
-		tmuxTarget = detectTmuxTarget()
-	case "PermissionRequest":
-		tmuxTarget = detectTmuxTarget()
-		toolName, _ := payload["tool_name"].(string)
-		if toolName == "AskUserQuestion" {
-			os.Exit(0)
-		}
-		toolInputRaw, _ := json.Marshal(payload["tool_input"])
-		suggestionsRaw, _ := json.Marshal(payload["permission_suggestions"])
-		hookData := map[string]string{
-			"event":          "PermissionRequest",
-			"toolName":       toolName,
-			"toolInput":      string(toolInputRaw),
-			"suggestions":    string(suggestionsRaw),
-			"project":        project,
-			"tmuxTarget":     tmuxTarget,
-			"sessionId":      sessionID,
-			"transcriptPath": transcriptPath,
-		}
-		jsonData, _ := json.Marshal(hookData)
-		client := &http.Client{Timeout: 115 * time.Second}
-		req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/permission", port), bytes.NewReader(jsonData))
-		if err != nil {
-			os.Exit(0)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			os.Exit(0)
-		}
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		var decision struct {
-			Behavior           string          `json:"behavior"`
-			Message            string          `json:"message,omitempty"`
-			UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
-		}
-		if json.Unmarshal(respBody, &decision) == nil && decision.Behavior != "" {
-			output := map[string]interface{}{
-				"hookSpecificOutput": map[string]interface{}{
-					"hookEventName": "PermissionRequest",
-					"decision": map[string]interface{}{
-						"behavior": decision.Behavior,
-					},
-				},
-			}
-			if decision.Message != "" {
-				output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["message"] = decision.Message
-			}
-			if len(decision.UpdatedPermissions) > 0 {
-				output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["updatedPermissions"] = decision.UpdatedPermissions
-			}
-			outJSON, _ := json.Marshal(output)
-			fmt.Print(string(outJSON))
-		}
-		os.Exit(0)
-	case "PreToolUse":
-		tmuxTarget = detectTmuxTarget()
-		hookToolName, _ = payload["tool_name"].(string)
-		if hookToolName == "AskUserQuestion" {
-			raw, _ := json.Marshal(payload["tool_input"])
-			hookToolInput = string(raw)
-		}
-	case "UserPromptSubmit":
-		tmuxTarget = detectTmuxTarget()
-	default:
-		tmuxTarget = detectTmuxTarget()
-	}
-	hookData := map[string]string{
-		"event":          event,
-		"sessionId":      sessionID,
-		"project":        project,
-		"body":           "",
-		"tmuxTarget":     tmuxTarget,
-		"transcriptPath": transcriptPath,
-		"toolName":       hookToolName,
-		"toolInput":      hookToolInput,
-	}
-	jsonData, _ := json.Marshal(hookData)
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/hook", port), bytes.NewReader(jsonData))
+	// Marshal enriched payload
+	enrichedJSON, _ := json.Marshal(payload)
+	url := fmt.Sprintf("http://127.0.0.1:%d/hook/%s", port, event)
+	hookLog("POST %s body: %s", url, string(enrichedJSON))
+	// POST to /hook/{event}
+	client := &http.Client{Timeout: 115 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(enrichedJSON))
 	if err != nil {
-		os.Exit(0)
+		hookExit(1, fmt.Sprintf("HTTP error: %v", err))
 	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		os.Exit(0)
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	hookLog("bot response (%d): %s", resp.StatusCode, string(respBody))
+	if resp.StatusCode != 200 {
+		hookExit(1, fmt.Sprintf("HTTP status %d", resp.StatusCode))
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	os.Exit(0)
+	// If response is JSON hook output, print to stdout for CC
+	respStr := strings.TrimSpace(string(respBody))
+	if len(respStr) > 0 && respStr[0] == '{' {
+		hookLog("stdout to CC: %s", respStr)
+		fmt.Print(respStr)
+	}
+	hookExit(0, fmt.Sprintf("event=%s", event))
 }

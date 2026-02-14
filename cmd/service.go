@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"text/template"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -38,6 +38,11 @@ func serviceName() string {
 	return "tg-cli-" + base
 }
 
+// installBinPath returns the path where the service binary should be installed.
+func installBinPath() string {
+	return filepath.Join(config.GetConfigDir(), "bin", "tg-cli")
+}
+
 func unitFilePath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "systemd", "user", serviceName()+".service")
@@ -57,6 +62,29 @@ RestartSec=5
 WantedBy=default.target
 `
 
+// copyFile copies src to dst with the given permissions.
+func copyFile(src, dst string) error {
+	os.MkdirAll(filepath.Dir(dst), 0755)
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	out.Close()
+	os.Chmod(tmp, 0755)
+	return os.Rename(tmp, dst)
+}
+
 var serviceInstallCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install systemd user service",
@@ -67,9 +95,15 @@ var serviceInstallCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		exePath, _ = filepath.Abs(exePath)
-		execStart := exePath + " bot"
+		binPath := installBinPath()
+		fmt.Printf("Copying binary to %s...\n", binPath)
+		if err := copyFile(exePath, binPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to copy binary: %v\n", err)
+			os.Exit(1)
+		}
+		execStart := binPath + " bot"
 		if config.ConfigDir != "" {
-			execStart = exePath + " --config-dir " + config.ConfigDir + " bot"
+			execStart = binPath + " --config-dir " + config.ConfigDir + " bot"
 		}
 		unitPath := unitFilePath()
 		os.MkdirAll(filepath.Dir(unitPath), 0755)
@@ -99,6 +133,7 @@ var serviceUninstallCmd = &cobra.Command{
 		systemctl("disable", name)
 		os.Remove(unitFilePath())
 		systemctl("daemon-reload")
+		os.Remove(installBinPath())
 		fmt.Printf("Service %s uninstalled\n", name)
 	},
 }
@@ -131,27 +166,12 @@ var serviceUpgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Rebuild binary and restart service",
 	Run: func(cmd *cobra.Command, args []string) {
-		unitData, err := os.ReadFile(unitFilePath())
-		if err != nil {
+		binPath := installBinPath()
+		if _, err := os.Stat(unitFilePath()); err != nil {
 			fmt.Fprintf(os.Stderr, "Service not installed: %v\n", err)
 			os.Exit(1)
 		}
-		var installPath string
-		for _, line := range strings.Split(string(unitData), "\n") {
-			if strings.HasPrefix(line, "ExecStart=") {
-				parts := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
-				if len(parts) > 0 {
-					installPath = parts[0]
-				}
-				break
-			}
-		}
-		if installPath == "" {
-			fmt.Fprintln(os.Stderr, "Cannot determine install path from unit file")
-			os.Exit(1)
-		}
-		// Build to a temp file to avoid "text file busy" on the running binary
-		tmpBin := installPath + ".tmp"
+		tmpBin := binPath + ".build"
 		fmt.Println("Building...")
 		buildCmd := exec.Command("go", "build", "-o", tmpBin)
 		buildCmd.Stdout = os.Stdout
@@ -163,13 +183,12 @@ var serviceUpgradeCmd = &cobra.Command{
 		}
 		fmt.Println("Stopping service...")
 		systemctl("stop", serviceName())
-		// Atomic rename avoids "text file busy"
-		fmt.Printf("Replacing %s...\n", installPath)
-		if err := os.Rename(tmpBin, installPath); err != nil {
+		fmt.Printf("Replacing %s...\n", binPath)
+		if err := os.Rename(tmpBin, binPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to replace binary: %v\n", err)
 			os.Exit(1)
 		}
-		os.Chmod(installPath, 0755)
+		os.Chmod(binPath, 0755)
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
 		fmt.Println("Upgrade complete")

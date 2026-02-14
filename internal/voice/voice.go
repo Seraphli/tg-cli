@@ -34,6 +34,11 @@ func Transcribe(oggPath string) (string, error) {
 		lang = "auto"
 	}
 	args = append(args, "-l", lang)
+	prompt := cfg.WhisperPrompt
+	if prompt == "" {
+		prompt = "Hello, how are you? I'm doing great! 你好，请问有什么需要帮助的？"
+	}
+	args = append(args, "--prompt", prompt)
 	wCmd := exec.Command(cfg.WhisperPath, args...)
 	if out, err := wCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("whisper failed: %w\n%s", err, out)

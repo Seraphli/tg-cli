@@ -3,6 +3,8 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -261,10 +263,22 @@ func (ps *pendingPermStore) cleanup(msgID int) {
 	delete(ps.suggestions, msgID)
 }
 
+type questionMeta struct {
+	questionText    string
+	header          string
+	numOptions      int
+	optionLabels    []string
+	multiSelect     bool
+	selectedOptions map[int]bool
+	selectedOption  int
+}
+
 type toolNotifyEntry struct {
 	tmuxTarget string
 	toolName   string
-	numOptions int
+	questions  []questionMeta
+	chatID     int64
+	msgText    string
 }
 
 type toolNotifyStore struct {
@@ -276,6 +290,43 @@ var toolNotifs = &toolNotifyStore{
 	entries: make(map[int]*toolNotifyEntry),
 }
 
+type pendingAskEntry struct {
+	ch chan map[string]string
+}
+
+type pendingAskStore struct {
+	mu      sync.Mutex
+	entries map[int]*pendingAskEntry
+}
+
+var pendingAsks = &pendingAskStore{entries: make(map[int]*pendingAskEntry)}
+
+func (s *pendingAskStore) create(msgID int) chan map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch := make(chan map[string]string, 1)
+	s.entries[msgID] = &pendingAskEntry{ch: ch}
+	return ch
+}
+
+func (s *pendingAskStore) resolve(msgID int, answers map[string]string) bool {
+	s.mu.Lock()
+	entry, ok := s.entries[msgID]
+	delete(s.entries, msgID)
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	entry.ch <- answers
+	return true
+}
+
+func (s *pendingAskStore) cleanup(msgID int) {
+	s.mu.Lock()
+	delete(s.entries, msgID)
+	s.mu.Unlock()
+}
+
 type sessionCountStore struct {
 	mu     sync.Mutex
 	counts map[string]int
@@ -285,6 +336,20 @@ type sessionCountStore struct {
 var sessionCounts = &sessionCountStore{
 	counts: make(map[string]int),
 	locks:  make(map[string]*sync.Mutex),
+}
+
+type reactionEntry struct {
+	chatID int64
+	msgID  int
+}
+
+type reactionTrackerStore struct {
+	mu      sync.Mutex
+	entries map[string][]reactionEntry
+}
+
+var reactionTracker = &reactionTrackerStore{
+	entries: make(map[string][]reactionEntry),
 }
 
 func (s *sessionCountStore) getLock(sessionID string) *sync.Mutex {
@@ -301,6 +366,30 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 	defer s.mu.Unlock()
 	delete(s.counts, sessionID)
 	delete(s.locks, sessionID)
+}
+
+func (rt *reactionTrackerStore) record(tmuxTarget string, chatID int64, msgID int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.entries[tmuxTarget] = append(rt.entries[tmuxTarget], reactionEntry{chatID: chatID, msgID: msgID})
+	logger.Debug(fmt.Sprintf("Reaction recorded: target=%s msg_id=%d", tmuxTarget, msgID))
+}
+
+func (rt *reactionTrackerStore) clearAndRemove(bot *tele.Bot, tmuxTarget string) {
+	rt.mu.Lock()
+	rEntries := rt.entries[tmuxTarget]
+	delete(rt.entries, tmuxTarget)
+	rt.mu.Unlock()
+	if len(rEntries) > 0 {
+		logger.Debug(fmt.Sprintf("Clearing %d reactions for target %s", len(rEntries), tmuxTarget))
+	}
+	for _, e := range rEntries {
+		bot.Raw("setMessageReaction", map[string]interface{}{
+			"chat_id":    e.chatID,
+			"message_id": e.msgID,
+			"reaction":   []interface{}{},
+		})
+	}
 }
 
 func readAssistantTexts(transcriptPath string) []string {
@@ -377,6 +466,14 @@ func processTranscriptUpdates(sessionID, transcriptPath string) string {
 	return strings.Join(newTexts, "\n\n")
 }
 
+func truncateStr(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) > maxRunes {
+		return string(r[:maxRunes]) + "..."
+	}
+	return s
+}
+
 func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, tmuxTarget, body string) {
 	headerLen := notify.HeaderLen(notify.NotificationData{
 		Event:      event,
@@ -396,7 +493,8 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
-			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] body_len=%d", chatID, event, project, len([]rune(body))))
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), truncateStr(body, 200)))
+			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
 	} else {
 		text := notify.BuildNotificationText(notify.NotificationData{
@@ -418,7 +516,8 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 				project:    project,
 				tmuxTarget: tmuxTarget,
 			})
-			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] (%d pages, msg_id=%d) body_len=%d", chatID, event, project, len(chunks), sent.ID, len([]rune(body))))
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
+			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
 	}
 }
@@ -493,6 +592,79 @@ func resolvePermission(msgID int, decision string, suggestionsOverride json.RawM
 		return d, fmt.Errorf("no pending permission for msg_id %d", msgID)
 	}
 	return d, nil
+}
+
+func buildAnswers(entry *toolNotifyEntry) map[string]string {
+	answers := make(map[string]string)
+	for _, q := range entry.questions {
+		if q.multiSelect {
+			var selected []string
+			for oi := 0; oi < q.numOptions; oi++ {
+				if q.selectedOptions[oi] {
+					selected = append(selected, q.optionLabels[oi])
+				}
+			}
+			answers[q.questionText] = strings.Join(selected, ", ")
+		} else if q.selectedOption >= 0 {
+			answers[q.questionText] = q.optionLabels[q.selectedOption]
+		}
+	}
+	return answers
+}
+
+func rebuildAskMarkup(entry *toolNotifyEntry) *tele.ReplyMarkup {
+	markup := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	hasSubmit := len(entry.questions) > 1
+	for _, q := range entry.questions {
+		if q.multiSelect {
+			hasSubmit = true
+		}
+	}
+
+	if len(entry.questions) == 1 && !entry.questions[0].multiSelect {
+		// Single question, single select
+		q := entry.questions[0]
+		var buttons []tele.Btn
+		for i, label := range q.optionLabels {
+			displayLabel := label
+			if q.selectedOption == i {
+				displayLabel = "✅ " + label
+			}
+			buttons = append(buttons, markup.Data(displayLabel, "tool", fmt.Sprintf("AskUserQuestion|0:%d", i)))
+		}
+		for i := 0; i < len(buttons); i += 2 {
+			if i+1 < len(buttons) {
+				rows = append(rows, markup.Row(buttons[i], buttons[i+1]))
+			} else {
+				rows = append(rows, markup.Row(buttons[i]))
+			}
+		}
+	} else {
+		// Multi-question or multiSelect
+		for qIdx, q := range entry.questions {
+			for optIdx, label := range q.optionLabels {
+				displayLabel := label
+				if len(entry.questions) > 1 {
+					displayLabel = fmt.Sprintf("Q%d: %s", qIdx+1, label)
+				}
+				if q.multiSelect && q.selectedOptions[optIdx] {
+					displayLabel = "✅ " + displayLabel
+				} else if !q.multiSelect && q.selectedOption == optIdx {
+					displayLabel = "✅ " + displayLabel
+				}
+				rows = append(rows, markup.Row(markup.Data(displayLabel, "tool", fmt.Sprintf("AskUserQuestion|%d:%d", qIdx, optIdx))))
+			}
+		}
+		if hasSubmit {
+			rows = append(rows, markup.Row(markup.Data("📤 Submit", "tool", "AskUserQuestion|submit")))
+		}
+	}
+	rows = append(rows, markup.Row(markup.Data("💬 Chat about this", "tool", "AskUserQuestion|chat")))
+
+	markup.Inline(rows...)
+	return markup
 }
 
 func selectToolOption(msgID int, optIdx int) error {
@@ -571,6 +743,12 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_start", Description: "Show welcome message"},
 		tele.Command{Text: "bot_pair", Description: "Pair this chat with the bot"},
 		tele.Command{Text: "bot_status", Description: "Check bot and pairing status"},
+		tele.Command{Text: "bot_perm_default", Description: "Switch to default mode"},
+		tele.Command{Text: "bot_perm_plan", Description: "Switch to plan mode"},
+		tele.Command{Text: "bot_perm_autoedit", Description: "Switch to auto-edit mode"},
+		tele.Command{Text: "bot_perm_fullauto", Description: "Switch to full-auto mode"},
+		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
+		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
@@ -615,9 +793,13 @@ func runBot(cmd *cobra.Command, args []string) {
 			if err := injector.InjectText(target, text); err != nil {
 				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
-			return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+			if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 				Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-			})
+			}); err == nil {
+				tmuxStr := injector.FormatTarget(target)
+				reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
+			}
+			return nil
 		})
 	}
 	bot.Handle("/bot_start", func(c tele.Context) error {
@@ -649,6 +831,67 @@ func runBot(cmd *cobra.Command, args []string) {
 		if c.Message().ReplyTo == nil {
 			return nil
 		}
+		// Permission mode switching commands
+		if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
+			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info found.")
+			}
+			if !injector.SessionExists(target) {
+				return c.Reply("❌ tmux session not found.")
+			}
+			cmd := strings.TrimPrefix(c.Message().Text, "/bot_perm_")
+			switch cmd {
+			case "status":
+				content, err := injector.CapturePane(target)
+				if err != nil {
+					return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
+				}
+				return c.Reply(fmt.Sprintf("📋 Pane content:\n%s", content))
+			case "default", "plan", "autoedit", "fullauto":
+				modeIndex := map[string]int{
+					"default":  0,
+					"plan":     1,
+					"autoedit": 2,
+					"fullauto": 3,
+				}
+				injector.SendKeys(target, "Escape")
+				time.Sleep(200 * time.Millisecond)
+				injector.SendKeys(target, "BTab")
+				time.Sleep(500 * time.Millisecond)
+				for i := 0; i < 4; i++ {
+					injector.SendKeys(target, "Up")
+					time.Sleep(100 * time.Millisecond)
+				}
+				idx := modeIndex[cmd]
+				for i := 0; i < idx; i++ {
+					injector.SendKeys(target, "Down")
+					time.Sleep(100 * time.Millisecond)
+				}
+				// Select
+				injector.SendKeys(target, "Enter")
+				return c.Reply(fmt.Sprintf("🔐 Switching to %s mode...", cmd))
+			default:
+				return c.Reply("❌ Unknown permission command. Use: default, plan, autoedit, fullauto, status")
+			}
+		}
+		if c.Message().Text == "/bot_capture" && c.Message().ReplyTo != nil {
+			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info found.")
+			}
+			if !injector.SessionExists(target) {
+				return c.Reply("❌ tmux session not found.")
+			}
+			content, err := injector.CapturePane(target)
+			if err != nil {
+				return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
+			}
+			if content == "" {
+				return c.Reply("(empty pane)")
+			}
+			return c.Reply(content)
+		}
 		if replyTo := c.Message().ReplyTo; replyTo != nil {
 			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
 				pendingPerms.resolve(replyTo.ID, permDecision{
@@ -659,10 +902,14 @@ func runBot(cmd *cobra.Command, args []string) {
 				if err == nil && injector.SessionExists(target) {
 					injector.InjectText(target, c.Message().Text)
 				}
-				logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d", replyTo.ID))
-				return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+				logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s text=%s", replyTo.ID, injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
+				if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-				})
+				}); err == nil {
+					tmuxStr := injector.FormatTarget(target)
+					reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
+				}
+				return nil
 			}
 			if entry, ok := toolNotifs.get(replyTo.ID); ok {
 				target, err := injector.ParseTarget(entry.tmuxTarget)
@@ -671,19 +918,38 @@ func runBot(cmd *cobra.Command, args []string) {
 				}
 				switch entry.toolName {
 				case "AskUserQuestion":
-					for i := 0; i < entry.numOptions; i++ {
-						injector.SendKeys(target, "Down")
+					pendingAsks.mu.Lock()
+					_, isPending := pendingAsks.entries[replyTo.ID]
+					pendingAsks.mu.Unlock()
+					if isPending {
+						answers := make(map[string]string)
+						if len(entry.questions) > 0 {
+							answers[entry.questions[0].questionText] = c.Message().Text
+						}
+						pendingAsks.resolve(replyTo.ID, answers)
+						logger.Info(fmt.Sprintf("AskUserQuestion custom text via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(c.Message().Text, 200)))
+					} else {
+						numOptions := 0
+						if len(entry.questions) > 0 {
+							numOptions = entry.questions[0].numOptions
+						}
+						for i := 0; i < numOptions; i++ {
+							injector.SendKeys(target, "Down")
+							time.Sleep(100 * time.Millisecond)
+						}
 						time.Sleep(100 * time.Millisecond)
+						injector.SendKeys(target, "Enter")
+						time.Sleep(1000 * time.Millisecond)
+						injector.InjectText(target, c.Message().Text)
 					}
-					time.Sleep(100 * time.Millisecond)
-					injector.SendKeys(target, "Enter")
-					time.Sleep(500 * time.Millisecond)
-					injector.InjectText(target, c.Message().Text)
 				}
-				logger.Info(fmt.Sprintf("Tool text reply: tool=%s msg_id=%d", entry.toolName, replyTo.ID))
-				return bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+				logger.Info(fmt.Sprintf("Tool text reply: tool=%s msg_id=%d target=%s text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, truncateStr(c.Message().Text, 200)))
+				if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-				})
+				}); err == nil {
+					reactionTracker.record(entry.tmuxTarget, c.Chat().ID, c.Message().ID)
+				}
+				return nil
 			}
 		}
 		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
@@ -697,12 +963,15 @@ func runBot(cmd *cobra.Command, args []string) {
 			logger.Error(fmt.Sprintf("Injection failed: %v", err))
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
-		logger.Info(fmt.Sprintf("Injected text to %s", injector.FormatTarget(target)))
+		logger.Info(fmt.Sprintf("Injected text to %s text=%s", injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
 		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
 		}); err != nil {
 			logger.Debug(fmt.Sprintf("React failed: %v, falling back to reply", err))
 			return c.Reply("✅")
+		} else {
+			tmuxStr := injector.FormatTarget(target)
+			reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
 		}
 		return nil
 	})
@@ -714,13 +983,6 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		if c.Message().ReplyTo == nil {
 			return nil
-		}
-		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-		if err != nil {
-			return c.Reply("❌ No tmux session info found in the original message.")
-		}
-		if !injector.SessionExists(target) {
-			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
 		}
 		file, err := bot.FileByID(c.Message().Voice.FileID)
 		if err != nil {
@@ -738,15 +1000,78 @@ func runBot(cmd *cobra.Command, args []string) {
 		if text == "" {
 			return c.Reply("❌ Transcription produced empty text.")
 		}
+		if replyTo := c.Message().ReplyTo; replyTo != nil {
+			if entry, ok := toolNotifs.get(replyTo.ID); ok {
+				switch entry.toolName {
+				case "AskUserQuestion":
+					target, err := injector.ParseTarget(entry.tmuxTarget)
+					if err != nil || !injector.SessionExists(target) {
+						return c.Reply("❌ tmux session not found.")
+					}
+					pendingAsks.mu.Lock()
+					_, isPending := pendingAsks.entries[replyTo.ID]
+					pendingAsks.mu.Unlock()
+					if isPending {
+						answers := make(map[string]string)
+						if len(entry.questions) > 0 {
+							answers[entry.questions[0].questionText] = text
+						}
+						pendingAsks.resolve(replyTo.ID, answers)
+						logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(text, 200)))
+						sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+						if sentMsg != nil {
+							bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
+								Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+							})
+							reactionTracker.record(entry.tmuxTarget, c.Chat().ID, sentMsg.ID)
+						}
+						return nil
+					} else {
+						numOptions := 0
+						if len(entry.questions) > 0 {
+							numOptions = entry.questions[0].numOptions
+						}
+						for i := 0; i < numOptions; i++ {
+							injector.SendKeys(target, "Down")
+							time.Sleep(100 * time.Millisecond)
+						}
+						time.Sleep(100 * time.Millisecond)
+						injector.SendKeys(target, "Enter")
+						time.Sleep(1000 * time.Millisecond)
+						injector.InjectText(target, text)
+						sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+						if sentMsg != nil {
+							bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
+								Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+							})
+							reactionTracker.record(entry.tmuxTarget, c.Chat().ID, sentMsg.ID)
+						}
+						return nil
+					}
+				}
+			}
+		}
+		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		if err != nil {
+			return c.Reply("❌ No tmux session info found in the original message.")
+		}
+		if !injector.SessionExists(target) {
+			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
+		}
 		if err := injector.InjectText(target, text); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
-		logger.Info(fmt.Sprintf("Injected voice transcription to %s", injector.FormatTarget(target)))
-		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
-			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-		}); err != nil {
-			logger.Debug(fmt.Sprintf("React failed: %v, falling back to reply", err))
-			return c.Reply("✅")
+		logger.Info(fmt.Sprintf("Injected voice transcription to %s text=%s", injector.FormatTarget(target), truncateStr(text, 200)))
+		sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+		if sentMsg != nil {
+			if err := bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
+				Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+			}); err != nil {
+				logger.Debug(fmt.Sprintf("React failed: %v", err))
+			} else {
+				tmuxStr := injector.FormatTarget(target)
+				reactionTracker.record(tmuxStr, c.Chat().ID, sentMsg.ID)
+			}
 		}
 		return nil
 	})
@@ -788,6 +1113,15 @@ func runBot(cmd *cobra.Command, args []string) {
 		if strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
 		}
+		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+		}); err == nil {
+			target, err := extractTmuxTarget(c.Message().Text)
+			if err == nil {
+				tmuxStr := injector.FormatTarget(target)
+				reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
+			}
+		}
 		return c.Respond(&tele.CallbackResponse{Text: "✅ " + displayText})
 	})
 	bot.Handle(&tele.InlineButton{Unique: "tool"}, func(c tele.Context) error {
@@ -798,98 +1132,211 @@ func runBot(cmd *cobra.Command, args []string) {
 		toolName := parts[0]
 		switch toolName {
 		case "AskUserQuestion":
-			optIdx, _ := strconv.Atoi(parts[1])
-			if err := selectToolOption(c.Message().ID, optIdx); err != nil {
-				return c.Respond(&tele.CallbackResponse{Text: err.Error()})
+			entry, ok := toolNotifs.get(c.Message().ID)
+			if !ok {
+				return c.Respond(&tele.CallbackResponse{Text: "Expired"})
 			}
-			logger.Info(fmt.Sprintf("AskUserQuestion option selected via TG: msg_id=%d option=%d", c.Message().ID, optIdx))
+			if parts[1] == "chat" {
+				answers := map[string]string{"__chat": "true"}
+				if !pendingAsks.resolve(c.Message().ID, answers) {
+					target, _ := injector.ParseTarget(entry.tmuxTarget)
+					numOptions := 0
+					if len(entry.questions) > 0 {
+						numOptions = entry.questions[0].numOptions
+					}
+					for i := 0; i < numOptions+1; i++ {
+						injector.SendKeys(target, "Down")
+						time.Sleep(100 * time.Millisecond)
+					}
+					injector.SendKeys(target, "Enter")
+				}
+				logger.Info(fmt.Sprintf("AskUserQuestion 'Chat about this' selected: msg_id=%d", c.Message().ID))
+				return c.Respond(&tele.CallbackResponse{Text: "Chat mode"})
+			} else if parts[1] == "submit" {
+				answers := buildAnswers(entry)
+				if !pendingAsks.resolve(c.Message().ID, answers) {
+					return c.Respond(&tele.CallbackResponse{Text: "Already submitted"})
+				}
+				logger.Info(fmt.Sprintf("AskUserQuestion submitted: msg_id=%d answers=%v", c.Message().ID, answers))
+				return c.Respond(&tele.CallbackResponse{Text: "✅ Submitted"})
+			} else {
+				split := strings.SplitN(parts[1], ":", 2)
+				qIdx, _ := strconv.Atoi(split[0])
+				optIdx, _ := strconv.Atoi(split[1])
+				if qIdx >= len(entry.questions) {
+					return c.Respond(&tele.CallbackResponse{Text: "Invalid question"})
+				}
+				qm := &entry.questions[qIdx]
+				if qm.multiSelect {
+					qm.selectedOptions[optIdx] = !qm.selectedOptions[optIdx]
+					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d state=%v label=%s", c.Message().ID, qIdx, optIdx, qm.selectedOptions[optIdx], qm.optionLabels[optIdx]))
+					newMarkup := rebuildAskMarkup(entry)
+					bot.Edit(c.Message(), c.Message().Text, newMarkup)
+					return c.Respond(&tele.CallbackResponse{Text: "Toggled"})
+				} else {
+					qm.selectedOption = optIdx
+					hasSubmit := len(entry.questions) > 1
+					for _, q := range entry.questions {
+						if q.multiSelect {
+							hasSubmit = true
+						}
+					}
+					if !hasSubmit {
+						answers := buildAnswers(entry)
+						if !pendingAsks.resolve(c.Message().ID, answers) {
+							return c.Respond(&tele.CallbackResponse{Text: "Already submitted"})
+						}
+						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved: msg_id=%d answers=%v", c.Message().ID, answers))
+						// Remove buttons after auto-resolve
+						bot.Edit(c.Message(), c.Message().Text)
+						return c.Respond(&tele.CallbackResponse{Text: "✅ Selected"})
+					} else {
+						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.optionLabels[optIdx]))
+						newMarkup := rebuildAskMarkup(entry)
+						bot.Edit(c.Message(), c.Message().Text, newMarkup)
+						return c.Respond(&tele.CallbackResponse{Text: "Selected"})
+					}
+				}
+			}
 		}
-		bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-		})
+		}); err == nil {
+			if entry, ok := toolNotifs.get(c.Message().ID); ok {
+				reactionTracker.record(entry.tmuxTarget, c.Chat().ID, c.Message().ID)
+			}
+		}
 		return c.Respond()
 	})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+	// hookPayload represents the CC payload enriched by hook.go
+	type hookPayload struct {
+		HookEventName  string          `json:"hook_event_name"`
+		SessionID      string          `json:"session_id"`
+		CWD            string          `json:"cwd"`
+		TranscriptPath string          `json:"transcript_path"`
+		ToolName       string          `json:"tool_name"`
+		ToolInput      json.RawMessage `json:"tool_input"`
+		PermSuggestions json.RawMessage `json:"permission_suggestions"`
+		TmuxTarget     string          `json:"tmux_target"`
+		Project        string          `json:"project"`
+	}
+	parseHookPayload := func(r *http.Request) (*hookPayload, []byte, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, nil, err
+		}
+		var p hookPayload
+		if err := json.Unmarshal(body, &p); err != nil {
+			return nil, body, err
+		}
+		return &p, body, nil
+	}
+	hookChat := func() (*tele.Chat, string) {
+		chatID := pairing.GetDefaultChatID()
+		if chatID == "" {
+			return nil, ""
+		}
+		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+		return &tele.Chat{ID: chatIDInt}, chatID
+	}
+	mux.HandleFunc("/hook/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.NotFound(w, r)
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		event := strings.TrimPrefix(r.URL.Path, "/hook/")
+		p, raw, err := parseHookPayload(r)
 		if err != nil {
-			http.Error(w, "Invalid request", 400)
+			http.Error(w, "bad request", 400)
 			return
 		}
-		var msg struct {
-			Event          string `json:"event"`
-			SessionID      string `json:"sessionId"`
-			Project        string `json:"project"`
-			Body           string `json:"body"`
-			TmuxTarget     string `json:"tmuxTarget"`
-			ToolName       string `json:"toolName"`
-			ToolInput      string `json:"toolInput"`
-			TranscriptPath string `json:"transcriptPath"`
-		}
-		if err := json.Unmarshal(body, &msg); err != nil {
-			http.Error(w, "Invalid JSON", 400)
-			return
-		}
-		bodyPreview := msg.Body
-		if len(bodyPreview) > 200 {
-			bodyPreview = bodyPreview[:200]
-		}
-		logger.Debug(fmt.Sprintf("Received hook: %s [%s] body=%s", msg.Event, msg.Project, bodyPreview))
-		chatID := pairing.GetDefaultChatID()
-		if chatID == "" {
-			logger.Error("No paired chat to send notifications to")
-			w.WriteHeader(200)
-			w.Write([]byte("No paired chat"))
-			return
-		}
-		chat := &tele.Chat{ID: int64(0)}
-		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-		chat.ID = chatIDInt
-		switch msg.Event {
+		logger.Debug(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
+		chat, chatID := hookChat()
+		switch event {
 		case "SessionStart":
-			if msg.TmuxTarget == "" {
+			if chat == nil || p.TmuxTarget == "" {
 				w.WriteHeader(200)
-				w.Write([]byte("OK"))
 				return
 			}
 			text := notify.BuildNotificationText(notify.NotificationData{
-				Event:      "SessionStart",
-				Project:    msg.Project,
-				TmuxTarget: msg.TmuxTarget,
+				Event: "SessionStart", Project: p.Project, TmuxTarget: p.TmuxTarget,
 			})
-			_, err = bot.Send(chat, text)
-			if err != nil {
-				logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
-				http.Error(w, "Send failed", 500)
-				return
-			}
-			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s]", chatID, msg.Event, msg.Project))
+			bot.Send(chat, text)
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 		case "SessionEnd":
-			text := notify.BuildNotificationText(notify.NotificationData{
-				Event:      "SessionEnd",
-				Project:    msg.Project,
-				TmuxTarget: msg.TmuxTarget,
-			})
-			_, err = bot.Send(chat, text)
-			if err != nil {
-				logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
-			} else {
-				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s]", chatID, msg.Project))
+			if chat != nil {
+				text := notify.BuildNotificationText(notify.NotificationData{
+					Event: "SessionEnd", Project: p.Project, TmuxTarget: p.TmuxTarget,
+				})
+				bot.Send(chat, text)
+				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			}
-			pages.cleanupSession(msg.SessionID)
-			sessionCounts.cleanup(msg.SessionID)
-			logger.Info(fmt.Sprintf("Cleaned up session %s", msg.SessionID))
+			pages.cleanupSession(p.SessionID)
+			sessionCounts.cleanup(p.SessionID)
+			logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
+		case "UserPromptSubmit":
+			if p.SessionID != "" && p.TranscriptPath != "" {
+				lock := sessionCounts.getLock(p.SessionID)
+				lock.Lock()
+				texts := readAssistantTexts(p.TranscriptPath)
+				sessionCounts.counts[p.SessionID] = len(texts)
+				lock.Unlock()
+				logger.Debug(fmt.Sprintf("UserPromptSubmit position: session=%s count=%d", p.SessionID, len(texts)))
+			}
+			if p.TmuxTarget != "" {
+				reactionTracker.clearAndRemove(bot, p.TmuxTarget)
+				logger.Debug(fmt.Sprintf("Cleared reactions for tmux target: %s", p.TmuxTarget))
+			}
+		case "Stop":
+			if chat != nil {
+				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
+				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.TmuxTarget, body)
+			}
 		case "PreToolUse":
-			body := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath)
-			if body != "" {
-				sendEventNotification(bot, chat, chatID, msg.SessionID, msg.Event, msg.Project, msg.TmuxTarget, body)
+			toolName := p.ToolName
+			if toolName == "AskUserQuestion" {
+				// AskUserQuestion: just send Update notification, don't block.
+				// Answers will be handled by PermissionRequest handler.
+				if chat != nil {
+					if updateBody := processTranscriptUpdates(p.SessionID, p.TranscriptPath); updateBody != "" {
+						sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, updateBody)
+					}
+				}
+				w.WriteHeader(200)
+				return
 			}
-			if msg.ToolName == "AskUserQuestion" {
-				var toolInput struct {
+			// Non-AskUserQuestion PreToolUse: just send intermediate notification
+			if chat != nil {
+				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
+				if body != "" {
+					sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, body)
+				}
+			}
+		case "PermissionRequest":
+			toolName := p.ToolName
+			if toolName == "AskUserQuestion" {
+				// --- AskUserQuestion: blocking, wait for TG answer ---
+				if chat == nil {
+					// No chat paired, auto-allow with current tool_input
+					var toolInput map[string]interface{}
+					json.Unmarshal(p.ToolInput, &toolInput)
+					output := map[string]interface{}{
+						"hookSpecificOutput": map[string]interface{}{
+							"hookEventName": "PermissionRequest",
+							"decision": map[string]interface{}{
+								"behavior":     "allow",
+								"updatedInput": toolInput,
+							},
+						},
+					}
+					outJSON, _ := json.Marshal(output)
+					w.Header().Set("Content-Type", "application/json")
+					w.Write(outJSON)
+					return
+				}
+				// Parse questions from tool_input
+				var askInput struct {
 					Questions []struct {
 						Header   string `json:"header"`
 						Question string `json:"question"`
@@ -900,26 +1347,60 @@ func runBot(cmd *cobra.Command, args []string) {
 						MultiSelect bool `json:"multiSelect"`
 					} `json:"questions"`
 				}
-				json.Unmarshal([]byte(msg.ToolInput), &toolInput)
-				if len(toolInput.Questions) > 0 {
-					q := toolInput.Questions[0]
+				json.Unmarshal(p.ToolInput, &askInput)
+				if len(askInput.Questions) == 0 {
+					var toolInput map[string]interface{}
+					json.Unmarshal(p.ToolInput, &toolInput)
+					output := map[string]interface{}{
+						"hookSpecificOutput": map[string]interface{}{
+							"hookEventName": "PermissionRequest",
+							"decision": map[string]interface{}{
+								"behavior":     "allow",
+								"updatedInput": toolInput,
+							},
+						},
+					}
+					outJSON, _ := json.Marshal(output)
+					w.Header().Set("Content-Type", "application/json")
+					w.Write(outJSON)
+					return
+				}
+				var qMetas []questionMeta
+				var questionEntries []notify.QuestionEntry
+				for _, q := range askInput.Questions {
 					var opts []notify.QuestionOption
+					var labels []string
 					for _, o := range q.Options {
 						opts = append(opts, notify.QuestionOption{Label: o.Label, Description: o.Description})
+						labels = append(labels, o.Label)
 					}
-					text := notify.BuildQuestionText(notify.QuestionData{
-						Project:    msg.Project,
-						TmuxTarget: msg.TmuxTarget,
-						Header:     q.Header,
-						Question:   q.Question,
-						Options:    opts,
+					qMetas = append(qMetas, questionMeta{
+						questionText: q.Question, header: q.Header,
+						numOptions: len(q.Options), optionLabels: labels,
+						multiSelect: q.MultiSelect, selectedOptions: make(map[int]bool),
+						selectedOption: -1,
 					})
-					markup := &tele.ReplyMarkup{}
+					questionEntries = append(questionEntries, notify.QuestionEntry{
+						Header: q.Header, Question: q.Question, Options: opts, MultiSelect: q.MultiSelect,
+					})
+				}
+				text := notify.BuildQuestionText(notify.QuestionData{
+					Project: p.Project, TmuxTarget: p.TmuxTarget, Questions: questionEntries,
+				})
+				markup := &tele.ReplyMarkup{}
+				var rows []tele.Row
+				hasSubmit := len(askInput.Questions) > 1
+				for _, q := range askInput.Questions {
+					if q.MultiSelect {
+						hasSubmit = true
+					}
+				}
+				if len(askInput.Questions) == 1 && !askInput.Questions[0].MultiSelect {
+					q := askInput.Questions[0]
 					var buttons []tele.Btn
 					for i, o := range q.Options {
-						buttons = append(buttons, markup.Data(o.Label, "tool", fmt.Sprintf("AskUserQuestion|%d", i)))
+						buttons = append(buttons, markup.Data(o.Label, "tool", fmt.Sprintf("AskUserQuestion|0:%d", i)))
 					}
-					var rows []tele.Row
 					for i := 0; i < len(buttons); i += 2 {
 						if i+1 < len(buttons) {
 							rows = append(rows, markup.Row(buttons[i], buttons[i+1]))
@@ -927,35 +1408,170 @@ func runBot(cmd *cobra.Command, args []string) {
 							rows = append(rows, markup.Row(buttons[i]))
 						}
 					}
-					markup.Inline(rows...)
-					sent, err := bot.Send(chat, text, markup)
-					if err != nil {
-						logger.Error(fmt.Sprintf("Failed to send question: %v", err))
-					} else {
-						toolNotifs.store(sent.ID, &toolNotifyEntry{
-							tmuxTarget: msg.TmuxTarget,
-							toolName:   "AskUserQuestion",
-							numOptions: len(q.Options),
-						})
-						logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d options=%d", sent.ID, len(q.Options)))
+					chatBtn := markup.Data("💬 Chat about this", "tool", "AskUserQuestion|chat")
+					rows = append(rows, markup.Row(chatBtn))
+				} else {
+					for qIdx, q := range askInput.Questions {
+						for optIdx, o := range q.Options {
+							label := o.Label
+							if len(askInput.Questions) > 1 {
+								label = fmt.Sprintf("Q%d: %s", qIdx+1, o.Label)
+							}
+							rows = append(rows, markup.Row(markup.Data(label, "tool", fmt.Sprintf("AskUserQuestion|%d:%d", qIdx, optIdx))))
+						}
 					}
+					if hasSubmit {
+						rows = append(rows, markup.Row(markup.Data("📤 Submit", "tool", "AskUserQuestion|submit")))
+					}
+					rows = append(rows, markup.Row(markup.Data("💬 Chat about this", "tool", "AskUserQuestion|chat")))
 				}
+				markup.Inline(rows...)
+				sent, err := bot.Send(chat, text, markup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("Failed to send AskUserQuestion: %v", err))
+					w.WriteHeader(200)
+					return
+				}
+				chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+				toolNotifs.store(sent.ID, &toolNotifyEntry{
+					tmuxTarget: p.TmuxTarget, toolName: "AskUserQuestion",
+					questions: qMetas, chatID: chatIDInt, msgText: text,
+				})
+				logger.Debug(fmt.Sprintf("TG question message sent full_text:\n%s", text))
+				var qSummaries []string
+				for _, q := range askInput.Questions {
+					var labels []string
+					for _, o := range q.Options {
+						labels = append(labels, o.Label)
+					}
+					qSummaries = append(qSummaries, fmt.Sprintf("%s:[%s]", q.Header, strings.Join(labels, ",")))
+				}
+				contentSummary := strings.Join(qSummaries, " | ")
+				ch := pendingAsks.create(sent.ID)
+				logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d questions=%d tmux=%s content=%s", sent.ID, len(askInput.Questions), p.TmuxTarget, contentSummary))
+				// Block until answered
+				select {
+				case answers := <-ch:
+					pendingAsks.cleanup(sent.ID)
+					var ti map[string]interface{}
+					json.Unmarshal(p.ToolInput, &ti)
+					questions := ti["questions"]
+					output := map[string]interface{}{
+						"hookSpecificOutput": map[string]interface{}{
+							"hookEventName": "PermissionRequest",
+							"decision": map[string]interface{}{
+								"behavior": "allow",
+								"updatedInput": map[string]interface{}{
+									"questions": questions,
+									"answers":   answers,
+								},
+							},
+						},
+					}
+					outJSON, _ := json.Marshal(output)
+					logger.Debug(fmt.Sprintf("AskUserQuestion hookOutput to CC: %s", string(outJSON)))
+					w.Header().Set("Content-Type", "application/json")
+					w.Write(outJSON)
+				case <-time.After(110 * time.Second):
+					pendingAsks.cleanup(sent.ID)
+					logger.Debug("AskUserQuestion timeout (no answers)")
+					w.WriteHeader(200)
+				}
+				return
 			}
-		case "UserPromptSubmit":
-			if msg.SessionID != "" && msg.TranscriptPath != "" {
-				lock := sessionCounts.getLock(msg.SessionID)
-				lock.Lock()
-				texts := readAssistantTexts(msg.TranscriptPath)
-				sessionCounts.counts[msg.SessionID] = len(texts)
-				lock.Unlock()
-				logger.Debug(fmt.Sprintf("UserPromptSubmit position: session=%s count=%d", msg.SessionID, len(texts)))
+			if chat == nil {
+				w.WriteHeader(200)
+				return
 			}
+			logger.Debug(fmt.Sprintf("Permission request: tool=%s project=%s", toolName, p.Project))
+			// Send intermediate text before permission message
+			if updateBody := processTranscriptUpdates(p.SessionID, p.TranscriptPath); updateBody != "" {
+				sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, updateBody)
+			}
+			var toolInput map[string]interface{}
+			json.Unmarshal(p.ToolInput, &toolInput)
+			logger.Debug(fmt.Sprintf("Permission payload: toolInput=%s suggestions=%s", string(p.ToolInput), string(p.PermSuggestions)))
+			text := notify.BuildPermissionText(notify.PermissionData{
+				Project: p.Project, TmuxTarget: p.TmuxTarget,
+				ToolName: toolName, ToolInput: toolInput,
+			})
+			markup := &tele.ReplyMarkup{}
+			row1 := []tele.Btn{
+				markup.Data("✅ Allow", "perm", "allow"),
+				markup.Data("❌ Deny", "perm", "deny"),
+			}
+			var suggestions []json.RawMessage
+			json.Unmarshal(p.PermSuggestions, &suggestions)
+			var row2 []tele.Btn
+			for i, s := range suggestions {
+				var sug struct {
+					Type         string `json:"type"`
+					Tool         string `json:"tool"`
+					AllowPattern string `json:"allow_pattern"`
+				}
+				json.Unmarshal(s, &sug)
+				label := "✅ Always Allow"
+				if sug.Tool != "" {
+					label += " " + sug.Tool
+				}
+				if sug.AllowPattern != "" && sug.AllowPattern != "*" {
+					label += " (" + sug.AllowPattern + ")"
+				}
+				row2 = append(row2, markup.Data(label, "perm", fmt.Sprintf("s%d", i)))
+			}
+			if len(row2) > 0 {
+				markup.Inline(markup.Row(row1...), markup.Row(row2...))
+			} else {
+				markup.Inline(markup.Row(row1...))
+			}
+			sent, err := bot.Send(chat, text, markup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("Failed to send permission message: %v", err))
+				w.WriteHeader(200)
+				return
+			}
+			logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d)", toolName, p.Project, p.TmuxTarget, sent.ID))
+			logger.Debug(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
+			suggestionsRaw, _ := json.Marshal(suggestions)
+			ch := pendingPerms.create(sent.ID, p.TmuxTarget, suggestionsRaw)
+			// Block until resolved
+			select {
+			case d := <-ch:
+				pendingPerms.cleanup(sent.ID)
+				logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d behavior=%s", sent.ID, d.Behavior))
+				// Construct hookSpecificOutput for CC
+				output := map[string]interface{}{
+					"hookSpecificOutput": map[string]interface{}{
+						"hookEventName": "PermissionRequest",
+						"decision": map[string]interface{}{
+							"behavior": d.Behavior,
+						},
+					},
+				}
+				if d.Message != "" {
+					output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["message"] = d.Message
+				}
+				if len(d.UpdatedPermissions) > 0 {
+					output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["updatedPermissions"] = d.UpdatedPermissions
+				}
+				outJSON, _ := json.Marshal(output)
+				logger.Debug(fmt.Sprintf("PermissionRequest hookOutput to CC: %s", string(outJSON)))
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(outJSON)
+			case <-time.After(110 * time.Second):
+				pendingPerms.cleanup(sent.ID)
+				logger.Info(fmt.Sprintf("Permission timed out: msg_id=%d", sent.ID))
+				w.WriteHeader(200)
+			}
+			return
 		default:
-			body := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath)
-			sendEventNotification(bot, chat, chatID, msg.SessionID, msg.Event, msg.Project, msg.TmuxTarget, body)
+			// Unknown event — send notification if possible
+			if chat != nil {
+				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
+				sendEventNotification(bot, chat, chatID, p.SessionID, event, p.Project, p.TmuxTarget, body)
+			}
 		}
 		w.WriteHeader(200)
-		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		msgIDStr := r.URL.Query().Get("msg_id")
@@ -1007,94 +1623,6 @@ func runBot(cmd *cobra.Command, args []string) {
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/permission", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.NotFound(w, r)
-			return
-		}
-		body, _ := io.ReadAll(r.Body)
-		var msg struct {
-			Event          string `json:"event"`
-			ToolName       string `json:"toolName"`
-			ToolInput      string `json:"toolInput"`
-			Suggestions    string `json:"suggestions"`
-			Project        string `json:"project"`
-			TmuxTarget     string `json:"tmuxTarget"`
-			SessionID      string `json:"sessionId"`
-			TranscriptPath string `json:"transcriptPath"`
-		}
-		if json.Unmarshal(body, &msg) != nil {
-			http.Error(w, "Invalid JSON", 400)
-			return
-		}
-		logger.Debug(fmt.Sprintf("Permission request: tool=%s project=%s", msg.ToolName, msg.Project))
-		chatID := pairing.GetDefaultChatID()
-		if chatID == "" {
-			w.WriteHeader(200)
-			return
-		}
-		chat := &tele.Chat{ID: 0}
-		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-		chat.ID = chatIDInt
-		// Send intermediate text before permission message
-		if updateBody := processTranscriptUpdates(msg.SessionID, msg.TranscriptPath); updateBody != "" {
-			sendEventNotification(bot, chat, chatID, msg.SessionID, "PreToolUse", msg.Project, msg.TmuxTarget, updateBody)
-		}
-		var toolInput map[string]interface{}
-		json.Unmarshal([]byte(msg.ToolInput), &toolInput)
-		text := notify.BuildPermissionText(notify.PermissionData{
-			Project:    msg.Project,
-			TmuxTarget: msg.TmuxTarget,
-			ToolName:   msg.ToolName,
-			ToolInput:  toolInput,
-		})
-		markup := &tele.ReplyMarkup{}
-		row1 := []tele.Btn{
-			markup.Data("✅ Allow", "perm", "allow"),
-			markup.Data("❌ Deny", "perm", "deny"),
-		}
-		var suggestions []json.RawMessage
-		json.Unmarshal([]byte(msg.Suggestions), &suggestions)
-		var row2 []tele.Btn
-		for i, s := range suggestions {
-			var sug struct {
-				Type string `json:"type"`
-				Tool string `json:"tool"`
-			}
-			json.Unmarshal(s, &sug)
-			label := "🔓 Always Allow"
-			if sug.Tool != "" {
-				label += " " + sug.Tool
-			}
-			row2 = append(row2, markup.Data(label, "perm", fmt.Sprintf("s%d", i)))
-		}
-		if len(row2) > 0 {
-			markup.Inline(markup.Row(row1...), markup.Row(row2...))
-		} else {
-			markup.Inline(markup.Row(row1...))
-		}
-		sent, err := bot.Send(chat, text, markup)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send permission message: %v", err))
-			w.WriteHeader(200)
-			return
-		}
-		logger.Info(fmt.Sprintf("Permission request sent: tool=%s (msg_id=%d)", msg.ToolName, sent.ID))
-		suggestionsRaw, _ := json.Marshal(suggestions)
-		ch := pendingPerms.create(sent.ID, msg.TmuxTarget, suggestionsRaw)
-		select {
-		case d := <-ch:
-			pendingPerms.cleanup(sent.ID)
-			logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d behavior=%s", sent.ID, d.Behavior))
-			respJSON, _ := json.Marshal(d)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(respJSON)
-		case <-time.After(110 * time.Second):
-			pendingPerms.cleanup(sent.ID)
-			logger.Info(fmt.Sprintf("Permission timed out: msg_id=%d", sent.ID))
-			w.WriteHeader(200)
-		}
-	})
 	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		decision := r.URL.Query().Get("decision")
@@ -1111,20 +1639,148 @@ func runBot(cmd *cobra.Command, args []string) {
 	mux.HandleFunc("/tool/respond", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		tool := r.URL.Query().Get("tool")
+		action := r.URL.Query().Get("action")
+		respondChatID := pairing.GetDefaultChatID()
+		respondChatIDInt, _ := strconv.ParseInt(respondChatID, 10, 64)
+		editChat := &tele.Chat{ID: respondChatIDInt}
 		switch tool {
 		case "AskUserQuestion":
-			optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
-			if err := selectToolOption(msgID, optIdx); err != nil {
-				http.Error(w, err.Error(), 404)
-				return
+			if action == "text" {
+				value := r.URL.Query().Get("value")
+				entry, ok := toolNotifs.get(msgID)
+				if !ok {
+					http.Error(w, "not found", 404)
+					return
+				}
+				answers := make(map[string]string)
+				if len(entry.questions) > 0 {
+					answers[entry.questions[0].questionText] = value
+				}
+				if !pendingAsks.resolve(msgID, answers) {
+					http.Error(w, "no pending ask", 404)
+					return
+				}
+				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d text=%s", msgID, truncateStr(value, 200)))
+				editMsg := &tele.Message{ID: msgID, Chat: editChat}
+				bot.Edit(editMsg, entry.msgText)
+			} else if action == "submit" {
+				entry, ok := toolNotifs.get(msgID)
+				if !ok {
+					http.Error(w, "not found", 404)
+					return
+				}
+				answers := buildAnswers(entry)
+				if !pendingAsks.resolve(msgID, answers) {
+					http.Error(w, "no pending ask", 404)
+					return
+				}
+				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d answers=%v", msgID, answers))
+				editMsg := &tele.Message{ID: msgID, Chat: editChat}
+				bot.Edit(editMsg, entry.msgText)
+			} else {
+				qIdx, _ := strconv.Atoi(r.URL.Query().Get("question"))
+				optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
+				entry, ok := toolNotifs.get(msgID)
+				if !ok {
+					http.Error(w, "not found", 404)
+					return
+				}
+				if qIdx >= len(entry.questions) {
+					http.Error(w, "invalid question index", 400)
+					return
+				}
+				qm := &entry.questions[qIdx]
+				if qm.multiSelect {
+					qm.selectedOptions[optIdx] = !qm.selectedOptions[optIdx]
+					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d state=%v label=%s", msgID, qIdx, optIdx, qm.selectedOptions[optIdx], qm.optionLabels[optIdx]))
+					newMarkup := rebuildAskMarkup(entry)
+					editMsg := &tele.Message{ID: msgID, Chat: editChat}
+					bot.Edit(editMsg, entry.msgText, newMarkup)
+				} else {
+					qm.selectedOption = optIdx
+					hasSubmit := len(entry.questions) > 1
+					for _, q := range entry.questions {
+						if q.multiSelect {
+							hasSubmit = true
+						}
+					}
+					if !hasSubmit {
+						answers := buildAnswers(entry)
+						if !pendingAsks.resolve(msgID, answers) {
+							http.Error(w, "no pending ask", 404)
+							return
+						}
+						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d q=%d opt=%d label=%s answers=%v", msgID, qIdx, optIdx, qm.optionLabels[optIdx], answers))
+						editMsg := &tele.Message{ID: msgID, Chat: editChat}
+						bot.Edit(editMsg, entry.msgText)
+					} else {
+						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.optionLabels[optIdx]))
+						newMarkup := rebuildAskMarkup(entry)
+						editMsg := &tele.Message{ID: msgID, Chat: editChat}
+						bot.Edit(editMsg, entry.msgText, newMarkup)
+					}
+				}
 			}
-			logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d option=%d", msgID, optIdx))
 		default:
 			http.Error(w, "unsupported tool", 400)
 			return
 		}
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Target string `json:"target"`
+			Text   string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		target, err := injector.ParseTarget(req.Target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !injector.SessionExists(target) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		logger.Info(fmt.Sprintf("Inject API: target=%s text=%s", injector.FormatTarget(target), truncateStr(req.Text, 200)))
+		if err := injector.InjectText(target, req.Text); err != nil {
+			logger.Error(fmt.Sprintf("Inject API failed: %v", err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("/capture", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "target required", http.StatusBadRequest)
+			return
+		}
+		t, err := injector.ParseTarget(target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !injector.SessionExists(t) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		content, err := injector.CapturePane(t)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"content": content})
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
@@ -1172,6 +1828,13 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 		}()
 	}
-	logger.Info("Starting tg-cli bot...")
+	binaryMD5 := "unknown"
+	if exePath, err := os.Executable(); err == nil {
+		if data, err := os.ReadFile(exePath); err == nil {
+			h := md5.Sum(data)
+			binaryMD5 = hex.EncodeToString(h[:])
+		}
+	}
+	logger.Info(fmt.Sprintf("Starting tg-cli bot... binary_md5=%s", binaryMD5))
 	bot.Start()
 }
