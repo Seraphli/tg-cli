@@ -26,12 +26,20 @@ type QuestionOption struct {
 	Description string
 }
 
+type QuestionEntry struct {
+	Header      string
+	Question    string
+	Options     []QuestionOption
+	MultiSelect bool
+}
+
 type QuestionData struct {
 	Project    string
 	TmuxTarget string
 	Header     string
 	Question   string
 	Options    []QuestionOption
+	Questions  []QuestionEntry
 }
 
 func BuildNotificationText(data NotificationData) string {
@@ -83,13 +91,14 @@ func BuildPermissionText(data PermissionData) string {
 	}
 	lines = append(lines, "", "🔧 Tool: "+data.ToolName)
 	// Show key fields from tool_input
-	for _, key := range []string{"command", "file_path", "url", "query", "pattern", "prompt"} {
+	for _, key := range []string{"command", "file_path", "old_string", "new_string", "replace_all", "url", "query", "pattern", "prompt"} {
 		if v, ok := data.ToolInput[key]; ok {
 			s := fmt.Sprintf("%v", v)
-			if len(s) > 500 {
-				s = s[:500] + "..."
+			if key == "old_string" || key == "new_string" {
+				lines = append(lines, key+":\n```\n"+s+"\n```")
+			} else {
+				lines = append(lines, key+": "+s)
 			}
-			lines = append(lines, key+": "+s)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -103,14 +112,43 @@ func BuildQuestionText(data QuestionData) string {
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+data.TmuxTarget)
 	}
-	if data.Header != "" {
-		lines = append(lines, "", "📋 "+data.Header)
-	}
-	lines = append(lines, "", data.Question)
-	for i, opt := range data.Options {
-		lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
-		if opt.Description != "" {
-			lines = append(lines, "  → "+opt.Description)
+	if len(data.Questions) > 1 {
+		for qIdx, q := range data.Questions {
+			multiTag := ""
+			if q.MultiSelect {
+				multiTag = " (多选)"
+			}
+			lines = append(lines, "", fmt.Sprintf("**Q%d: %s**%s", qIdx+1, q.Header, multiTag))
+			lines = append(lines, q.Question)
+			for i, opt := range q.Options {
+				lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+				if opt.Description != "" {
+					lines = append(lines, "  → "+opt.Description)
+				}
+			}
+		}
+	} else if len(data.Questions) == 1 {
+		q := data.Questions[0]
+		if q.Header != "" {
+			lines = append(lines, "", "📋 "+q.Header)
+		}
+		lines = append(lines, "", q.Question)
+		for i, opt := range q.Options {
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+			if opt.Description != "" {
+				lines = append(lines, "  → "+opt.Description)
+			}
+		}
+	} else {
+		if data.Header != "" {
+			lines = append(lines, "", "📋 "+data.Header)
+		}
+		lines = append(lines, "", data.Question)
+		for i, opt := range data.Options {
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+			if opt.Description != "" {
+				lines = append(lines, "  → "+opt.Description)
+			}
 		}
 	}
 	return strings.Join(lines, "\n")

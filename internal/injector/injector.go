@@ -94,3 +94,13 @@ func SendKeys(target TmuxTarget, keys ...string) error {
 	args := append([]string{"send-keys", "-t", target.PaneID}, keys...)
 	return tmuxCmd(target, args...).Run()
 }
+
+// CapturePane captures the content of a tmux pane.
+func CapturePane(target TmuxTarget) (string, error) {
+	cmd := tmuxCmd(target, "capture-pane", "-t", target.PaneID, "-p", "-S", "-")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("capture-pane failed: %w", err)
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}

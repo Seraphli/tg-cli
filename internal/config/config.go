@@ -84,10 +84,11 @@ func SaveCredentials(creds Credentials) error {
 }
 
 type AppConfig struct {
-	WhisperPath string `json:"whisperPath"`
-	ModelPath   string `json:"modelPath"`
-	Language    string `json:"language"`
-	FFmpegPath  string `json:"ffmpegPath"`
+	WhisperPath   string `json:"whisperPath"`
+	ModelPath     string `json:"modelPath"`
+	Language      string `json:"language"`
+	FFmpegPath    string `json:"ffmpegPath"`
+	WhisperPrompt string `json:"whisperPrompt"`
 }
 
 func GetConfigPath() string {

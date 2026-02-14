@@ -145,8 +145,42 @@ func TestSessionExists(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
-	// Non-existent pane should return false
 	if SessionExists(TmuxTarget{PaneID: "%99999"}) {
 		t.Error("SessionExists returned true for non-existent pane")
+	}
+}
+
+func TestCapturePane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	session := "tg-cli-capture-test"
+	exec.Command("tmux", "kill-session", "-t", session).Run()
+	if err := exec.Command("tmux", "new-session", "-d", "-s", session).Run(); err != nil {
+		t.Fatalf("Failed to create tmux session: %v", err)
+	}
+	defer exec.Command("tmux", "kill-session", "-t", session).Run()
+	out, err := exec.Command("tmux", "list-panes", "-t", session, "-F", "#{pane_id}").Output()
+	if err != nil {
+		t.Fatalf("Failed to get pane ID: %v", err)
+	}
+	paneID := strings.TrimSpace(string(out))
+	target := TmuxTarget{PaneID: paneID}
+	time.Sleep(500 * time.Millisecond)
+	// Write known content to the pane
+	exec.Command("tmux", "send-keys", "-t", paneID, "echo CAPTURE_TEST_MARKER_XYZ", "Enter").Run()
+	time.Sleep(500 * time.Millisecond)
+	// Test CapturePane
+	content, err := CapturePane(target)
+	if err != nil {
+		t.Fatalf("CapturePane failed: %v", err)
+	}
+	if !strings.Contains(content, "CAPTURE_TEST_MARKER_XYZ") {
+		t.Errorf("CapturePane did not contain expected marker.\nGot:\n%s", content)
+	}
+	// Test capture on non-existent pane
+	_, err = CapturePane(TmuxTarget{PaneID: "%99999"})
+	if err == nil {
+		t.Error("CapturePane should fail on non-existent pane")
 	}
 }
