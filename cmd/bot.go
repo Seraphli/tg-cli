@@ -1448,9 +1448,9 @@ func runBot(cmd *cobra.Command, args []string) {
 					logger.Debug(fmt.Sprintf("AskUserQuestion hookOutput to CC: %s", string(outJSON)))
 					w.Header().Set("Content-Type", "application/json")
 					w.Write(outJSON)
-				case <-time.After(110 * time.Second):
+				case <-r.Context().Done():
 					pendingAsks.cleanup(sent.ID)
-					logger.Debug("AskUserQuestion timeout (no answers)")
+					logger.Info(fmt.Sprintf("AskUserQuestion client disconnected: msg_id=%d", sent.ID))
 					w.WriteHeader(200)
 				}
 				return
@@ -1534,9 +1534,9 @@ func runBot(cmd *cobra.Command, args []string) {
 				logger.Debug(fmt.Sprintf("PermissionRequest hookOutput to CC: %s", string(outJSON)))
 				w.Header().Set("Content-Type", "application/json")
 				w.Write(outJSON)
-			case <-time.After(110 * time.Second):
+			case <-r.Context().Done():
 				pendingPerms.cleanup(sent.ID)
-				logger.Info(fmt.Sprintf("Permission timed out: msg_id=%d", sent.ID))
+				logger.Info(fmt.Sprintf("Permission client disconnected: msg_id=%d", sent.ID))
 				w.WriteHeader(200)
 			}
 			return
