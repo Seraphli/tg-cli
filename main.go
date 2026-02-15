@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var version = "1.0.0"
 var configDir string
 
 func main() {
@@ -19,6 +20,8 @@ func main() {
 			config.ConfigDir = configDir
 		},
 	}
+	rootCmd.Version = version
+	cmd.Version = version
 	rootCmd.PersistentFlags().StringVar(&configDir, "config-dir", "", "Configuration directory (default ~/.tg-cli/)")
 	rootCmd.AddCommand(cmd.BotCmd)
 	rootCmd.AddCommand(cmd.HookCmd)

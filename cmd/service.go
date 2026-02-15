@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -120,7 +121,7 @@ var serviceInstallCmd = &cobra.Command{
 		f.Close()
 		systemctl("daemon-reload")
 		systemctl("enable", serviceName())
-		fmt.Printf("Service %s installed at %s\n", serviceName(), unitPath)
+		fmt.Printf("Service %s (v%s) installed at %s\n", serviceName(), Version, unitPath)
 	},
 }
 
@@ -181,6 +182,23 @@ var serviceUpgradeCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Build failed: %v\n", err)
 			os.Exit(1)
 		}
+		// Read old version from installed binary
+		oldVersion := "unknown"
+		if oldVerBytes, err := exec.Command(binPath, "--version").Output(); err == nil {
+			oldVersion = strings.TrimSpace(string(oldVerBytes))
+			if parts := strings.Fields(oldVersion); len(parts) >= 3 {
+				oldVersion = parts[len(parts)-1]
+			}
+		}
+		// Read new version from freshly built binary
+		newVersion := "unknown"
+		if newVerBytes, err := exec.Command(tmpBin, "--version").Output(); err == nil {
+			newVersion = strings.TrimSpace(string(newVerBytes))
+			if parts := strings.Fields(newVersion); len(parts) >= 3 {
+				newVersion = parts[len(parts)-1]
+			}
+		}
+		fmt.Printf("Upgrading from v%s to v%s\n", oldVersion, newVersion)
 		fmt.Println("Stopping service...")
 		systemctl("stop", serviceName())
 		fmt.Printf("Replacing %s...\n", binPath)
@@ -191,7 +209,7 @@ var serviceUpgradeCmd = &cobra.Command{
 		os.Chmod(binPath, 0755)
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
-		fmt.Println("Upgrade complete")
+		fmt.Printf("Upgrade complete (v%s)\n", newVersion)
 	},
 }
 
