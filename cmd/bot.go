@@ -134,6 +134,7 @@ type pageEntry struct {
 	event      string
 	project    string
 	tmuxTarget string
+	permRows   []tele.Row // non-nil for permission messages
 }
 
 var pages = &pageCacheStore{
@@ -212,21 +213,27 @@ type pendingPermStore struct {
 	entries     map[int]chan permDecision
 	targets     map[int]string
 	suggestions map[int]json.RawMessage
+	msgTexts    map[int]string
+	chatIDs     map[int]int64
 }
 
 var pendingPerms = &pendingPermStore{
 	entries:     make(map[int]chan permDecision),
 	targets:     make(map[int]string),
 	suggestions: make(map[int]json.RawMessage),
+	msgTexts:    make(map[int]string),
+	chatIDs:     make(map[int]int64),
 }
 
-func (ps *pendingPermStore) create(msgID int, tmuxTarget string, suggestionsJSON json.RawMessage) chan permDecision {
+func (ps *pendingPermStore) create(msgID int, tmuxTarget string, suggestionsJSON json.RawMessage, msgText string, chatID int64) chan permDecision {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ch := make(chan permDecision, 1)
 	ps.entries[msgID] = ch
 	ps.targets[msgID] = tmuxTarget
 	ps.suggestions[msgID] = suggestionsJSON
+	ps.msgTexts[msgID] = msgText
+	ps.chatIDs[msgID] = chatID
 	return ch
 }
 
@@ -255,12 +262,26 @@ func (ps *pendingPermStore) getSuggestions(msgID int) json.RawMessage {
 	return ps.suggestions[msgID]
 }
 
+func (ps *pendingPermStore) getMsgText(msgID int) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.msgTexts[msgID]
+}
+
+func (ps *pendingPermStore) getChatID(msgID int) int64 {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.chatIDs[msgID]
+}
+
 func (ps *pendingPermStore) cleanup(msgID int) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	delete(ps.entries, msgID)
 	delete(ps.targets, msgID)
 	delete(ps.suggestions, msgID)
+	delete(ps.msgTexts, msgID)
+	delete(ps.chatIDs, msgID)
 }
 
 type questionMeta struct {
@@ -494,7 +515,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), truncateStr(body, 200)))
-			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
+			logger.Info(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
 	} else {
 		text := notify.BuildNotificationText(notify.NotificationData{
@@ -517,7 +538,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 				tmuxTarget: tmuxTarget,
 			})
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
-			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
+			logger.Info(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
 	}
 }
@@ -538,16 +559,26 @@ func (ts *toolNotifyStore) get(msgID int) (*toolNotifyEntry, bool) {
 // buildPageKeyboard returns a ReplyMarkup with ◀️ N/M ▶️ inline buttons.
 // Callback data format: p\x00<pageNum> (where pageNum is the 1-based page number as string).
 func buildPageKeyboard(currentPage, totalPages int) *tele.ReplyMarkup {
+	return buildPageKeyboardWithExtra(currentPage, totalPages, nil)
+}
+
+// buildPageKeyboardWithExtra returns page navigation buttons plus optional extra rows
+// (e.g. permission Allow/Deny buttons).
+func buildPageKeyboardWithExtra(currentPage, totalPages int, extraRows []tele.Row) *tele.ReplyMarkup {
 	markup := &tele.ReplyMarkup{}
-	var buttons []tele.Btn
+	var allRows []tele.Row
+	allRows = append(allRows, extraRows...)
+	// Page navigation row
+	var pageRow tele.Row
 	if currentPage > 1 {
-		buttons = append(buttons, markup.Data("◀️", "p", fmt.Sprintf("%d", currentPage-1)))
+		pageRow = append(pageRow, markup.Data("◀️", "p", fmt.Sprintf("%d", currentPage-1)))
 	}
-	buttons = append(buttons, markup.Data(fmt.Sprintf("%d/%d", currentPage, totalPages), "p", fmt.Sprintf("%d", currentPage)))
+	pageRow = append(pageRow, markup.Data(fmt.Sprintf("%d/%d", currentPage, totalPages), "p", fmt.Sprintf("%d", currentPage)))
 	if currentPage < totalPages {
-		buttons = append(buttons, markup.Data("▶️", "p", fmt.Sprintf("%d", currentPage+1)))
+		pageRow = append(pageRow, markup.Data("▶️", "p", fmt.Sprintf("%d", currentPage+1)))
 	}
-	markup.Inline(markup.Row(buttons...))
+	allRows = append(allRows, pageRow)
+	markup.Inline(allRows...)
 	return markup
 }
 
@@ -898,6 +929,8 @@ func runBot(cmd *cobra.Command, args []string) {
 					Behavior: "deny",
 					Message:  "User provided custom input: " + c.Message().Text,
 				})
+				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
+				bot.Edit(editMsg, replyTo.Text)
 				target, err := extractTmuxTarget(replyTo.Text)
 				if err == nil && injector.SessionExists(target) {
 					injector.InjectText(target, c.Message().Text)
@@ -1063,15 +1096,21 @@ func runBot(cmd *cobra.Command, args []string) {
 		if pageNum < 1 || pageNum > len(entry.chunks) {
 			return c.Respond()
 		}
-		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:      entry.event,
-			Project:    entry.project,
-			Body:       entry.chunks[pageNum-1],
-			TmuxTarget: entry.tmuxTarget,
-			Page:       pageNum,
-			TotalPages: len(entry.chunks),
-		})
-		kb := buildPageKeyboard(pageNum, len(entry.chunks))
+		var text string
+		if entry.permRows != nil {
+			// Permission message: chunks are raw text fragments
+			text = entry.chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.chunks))
+		} else {
+			text = notify.BuildNotificationText(notify.NotificationData{
+				Event:      entry.event,
+				Project:    entry.project,
+				Body:       entry.chunks[pageNum-1],
+				TmuxTarget: entry.tmuxTarget,
+				Page:       pageNum,
+				TotalPages: len(entry.chunks),
+			})
+		}
+		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
 		_, err = bot.Edit(c.Message(), text, kb)
 		if err != nil {
 			logger.Debug(fmt.Sprintf("edit page error: %v", err))
@@ -1085,6 +1124,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
 		}
 		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s", c.Message().ID, decision))
+		bot.Edit(c.Message(), c.Message().Text)
 		displayText := decision
 		if strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
@@ -1227,7 +1267,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			http.Error(w, "bad request", 400)
 			return
 		}
-		logger.Debug(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
+		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
 		chat, chatID := hookChat()
 		switch event {
 		case "SessionStart":
@@ -1413,7 +1453,7 @@ func runBot(cmd *cobra.Command, args []string) {
 					tmuxTarget: p.TmuxTarget, toolName: "AskUserQuestion",
 					questions: qMetas, chatID: chatIDInt, msgText: text,
 				})
-				logger.Debug(fmt.Sprintf("TG question message sent full_text:\n%s", text))
+				logger.Info(fmt.Sprintf("TG question message sent full_text:\n%s", text))
 				var qSummaries []string
 				for _, q := range askInput.Questions {
 					var labels []string
@@ -1445,7 +1485,7 @@ func runBot(cmd *cobra.Command, args []string) {
 						},
 					}
 					outJSON, _ := json.Marshal(output)
-					logger.Debug(fmt.Sprintf("AskUserQuestion hookOutput to CC: %s", string(outJSON)))
+					logger.Info(fmt.Sprintf("AskUserQuestion hookOutput to CC: %s", string(outJSON)))
 					w.Header().Set("Content-Type", "application/json")
 					w.Write(outJSON)
 				case <-r.Context().Done():
@@ -1459,14 +1499,14 @@ func runBot(cmd *cobra.Command, args []string) {
 				w.WriteHeader(200)
 				return
 			}
-			logger.Debug(fmt.Sprintf("Permission request: tool=%s project=%s", toolName, p.Project))
+			logger.Info(fmt.Sprintf("Permission request: tool=%s project=%s", toolName, p.Project))
 			// Send intermediate text before permission message
 			if updateBody := processTranscriptUpdates(p.SessionID, p.TranscriptPath); updateBody != "" {
 				sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, updateBody)
 			}
 			var toolInput map[string]interface{}
 			json.Unmarshal(p.ToolInput, &toolInput)
-			logger.Debug(fmt.Sprintf("Permission payload: toolInput=%s suggestions=%s", string(p.ToolInput), string(p.PermSuggestions)))
+			logger.Info(fmt.Sprintf("Permission payload: toolInput=%s suggestions=%s", string(p.ToolInput), string(p.PermSuggestions)))
 			text := notify.BuildPermissionText(notify.PermissionData{
 				Project: p.Project, TmuxTarget: p.TmuxTarget,
 				ToolName: toolName, ToolInput: toolInput,
@@ -1481,24 +1521,66 @@ func runBot(cmd *cobra.Command, args []string) {
 			var row2 []tele.Btn
 			for i, s := range suggestions {
 				var sug struct {
-					Type         string `json:"type"`
-					Tool         string `json:"tool"`
-					AllowPattern string `json:"allow_pattern"`
+					Type         string   `json:"type"`
+					Tool         string   `json:"tool"`
+					AllowPattern string   `json:"allow_pattern"`
+					Mode         string   `json:"mode"`
+					Directories  []string `json:"directories"`
+					Rules        []struct {
+						ToolName    string `json:"toolName"`
+						RuleContent string `json:"ruleContent"`
+					} `json:"rules"`
 				}
 				json.Unmarshal(s, &sug)
-				label := "✅ Always Allow"
-				if sug.Tool != "" {
-					label += " " + sug.Tool
-				}
-				if sug.AllowPattern != "" && sug.AllowPattern != "*" {
-					label += " (" + sug.AllowPattern + ")"
+				var label string
+				switch sug.Type {
+				case "setMode":
+					label = "✅ " + sug.Mode
+				case "addDirectories":
+					dir := ""
+					if len(sug.Directories) > 0 {
+						dir = sug.Directories[0]
+					}
+					label = "✅ Allow dir: " + dir
+				default:
+					toolName := sug.Tool
+					allowPattern := sug.AllowPattern
+					if toolName == "" && len(sug.Rules) > 0 {
+						toolName = sug.Rules[0].ToolName
+						if allowPattern == "" {
+							allowPattern = sug.Rules[0].RuleContent
+						}
+					}
+					label = "✅ Always Allow"
+					if toolName != "" {
+						label += " " + toolName
+					}
+					if allowPattern != "" && allowPattern != "*" {
+						label += " (" + allowPattern + ")"
+					}
 				}
 				row2 = append(row2, markup.Data(label, "perm", fmt.Sprintf("s%d", i)))
 			}
+			// Build permission button rows for reuse in pagination
+			var permBtnRows []tele.Row
+			permBtnRows = append(permBtnRows, row1)
 			if len(row2) > 0 {
-				markup.Inline(markup.Row(row1...), markup.Row(row2...))
+				permBtnRows = append(permBtnRows, row2)
+			}
+			// Split permission text into pages if too long
+			permChunks := splitBody(text, 3900)
+			if len(permChunks) <= 1 {
+				// Single page — just attach permission buttons
+				if len(row2) > 0 {
+					markup.Inline(markup.Row(row1...), markup.Row(row2...))
+				} else {
+					markup.Inline(markup.Row(row1...))
+				}
 			} else {
-				markup.Inline(markup.Row(row1...))
+				// Multi-page — permission buttons + page navigation
+				text = permChunks[0] + fmt.Sprintf("\n\n📄 1/%d", len(permChunks))
+				kb := buildPageKeyboardWithExtra(1, len(permChunks), permBtnRows)
+				markup = kb
 			}
 			sent, err := bot.Send(chat, text, markup)
 			if err != nil {
@@ -1506,10 +1588,20 @@ func runBot(cmd *cobra.Command, args []string) {
 				w.WriteHeader(200)
 				return
 			}
-			logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d)", toolName, p.Project, p.TmuxTarget, sent.ID))
-			logger.Debug(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
+			if len(permChunks) > 1 {
+				pages.store(sent.ID, p.SessionID, &pageEntry{
+					chunks:     permChunks,
+					event:      "PermissionRequest",
+					project:    p.Project,
+					tmuxTarget: p.TmuxTarget,
+					permRows:   permBtnRows,
+				})
+			}
+			logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d)", toolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks)))
+			logger.Info(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
 			suggestionsRaw, _ := json.Marshal(suggestions)
-			ch := pendingPerms.create(sent.ID, p.TmuxTarget, suggestionsRaw)
+			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+			ch := pendingPerms.create(sent.ID, p.TmuxTarget, suggestionsRaw, text, chatIDInt)
 			// Block until resolved
 			select {
 			case d := <-ch:
@@ -1531,7 +1623,7 @@ func runBot(cmd *cobra.Command, args []string) {
 					output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})["updatedPermissions"] = d.UpdatedPermissions
 				}
 				outJSON, _ := json.Marshal(output)
-				logger.Debug(fmt.Sprintf("PermissionRequest hookOutput to CC: %s", string(outJSON)))
+				logger.Info(fmt.Sprintf("PermissionRequest hookOutput to CC: %s", string(outJSON)))
 				w.Header().Set("Content-Type", "application/json")
 				w.Write(outJSON)
 			case <-r.Context().Done():
@@ -1579,15 +1671,20 @@ func runBot(cmd *cobra.Command, args []string) {
 		chat := &tele.Chat{ID: int64(0)}
 		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 		chat.ID = chatIDInt
-		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:      entry.event,
-			Project:    entry.project,
-			Body:       entry.chunks[pageNum-1],
-			TmuxTarget: entry.tmuxTarget,
-			Page:       pageNum,
-			TotalPages: len(entry.chunks),
-		})
-		kb := buildPageKeyboard(pageNum, len(entry.chunks))
+		var text string
+		if entry.permRows != nil {
+			text = entry.chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.chunks))
+		} else {
+			text = notify.BuildNotificationText(notify.NotificationData{
+				Event:      entry.event,
+				Project:    entry.project,
+				Body:       entry.chunks[pageNum-1],
+				TmuxTarget: entry.tmuxTarget,
+				Page:       pageNum,
+				TotalPages: len(entry.chunks),
+			})
+		}
+		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
 		editMsg := &tele.Message{ID: msgID, Chat: chat}
 		_, err = bot.Edit(editMsg, text, kb)
 		if err != nil {
@@ -1608,6 +1705,12 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s", msgID, decision))
+		msgText := pendingPerms.getMsgText(msgID)
+		permChatID := pendingPerms.getChatID(msgID)
+		if permChatID != 0 && msgText != "" {
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
+			bot.Edit(editMsg, msgText)
+		}
 		respJSON, _ := json.Marshal(d)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(respJSON)
