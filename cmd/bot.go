@@ -1004,50 +1004,26 @@ func runBot(cmd *cobra.Command, args []string) {
 			if entry, ok := toolNotifs.get(replyTo.ID); ok {
 				switch entry.toolName {
 				case "AskUserQuestion":
-					target, err := injector.ParseTarget(entry.tmuxTarget)
-					if err != nil || !injector.SessionExists(target) {
-						return c.Reply("❌ tmux session not found.")
+					answers := make(map[string]string)
+					if len(entry.questions) > 0 {
+						answers[entry.questions[0].questionText] = text
 					}
-					pendingAsks.mu.Lock()
-					_, isPending := pendingAsks.entries[replyTo.ID]
-					pendingAsks.mu.Unlock()
-					if isPending {
-						answers := make(map[string]string)
-						if len(entry.questions) > 0 {
-							answers[entry.questions[0].questionText] = text
-						}
-						pendingAsks.resolve(replyTo.ID, answers)
-						logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(text, 200)))
-						sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-						if sentMsg != nil {
-							bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
-								Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-							})
-							reactionTracker.record(entry.tmuxTarget, c.Chat().ID, sentMsg.ID)
-						}
-						return nil
-					} else {
-						numOptions := 0
-						if len(entry.questions) > 0 {
-							numOptions = entry.questions[0].numOptions
-						}
-						for i := 0; i < numOptions; i++ {
-							injector.SendKeys(target, "Down")
-							time.Sleep(100 * time.Millisecond)
-						}
-						time.Sleep(100 * time.Millisecond)
-						injector.SendKeys(target, "Enter")
-						time.Sleep(1000 * time.Millisecond)
-						injector.InjectText(target, text)
-						sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-						if sentMsg != nil {
-							bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
-								Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-							})
-							reactionTracker.record(entry.tmuxTarget, c.Chat().ID, sentMsg.ID)
-						}
-						return nil
+					if !pendingAsks.resolve(replyTo.ID, answers) {
+						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: pendingAsk not found (already resolved/expired): msg_id=%d", replyTo.ID))
+						return c.Reply("❌ Question already answered or expired.")
 					}
+					logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(text, 200)))
+					editChat := &tele.Chat{ID: entry.chatID}
+					editMsg := &tele.Message{ID: replyTo.ID, Chat: editChat}
+					bot.Edit(editMsg, entry.msgText)
+					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+					if sentMsg != nil {
+						bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
+							Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+						})
+						reactionTracker.record(entry.tmuxTarget, c.Chat().ID, sentMsg.ID)
+					}
+					return nil
 				}
 			}
 		}
