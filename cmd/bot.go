@@ -35,6 +35,8 @@ var BotCmd = &cobra.Command{
 	Run:   runBot,
 }
 
+var Version string
+
 var (
 	debugFlag bool
 	portFlag  int
@@ -1914,6 +1916,6 @@ func runBot(cmd *cobra.Command, args []string) {
 			binaryMD5 = hex.EncodeToString(h[:])
 		}
 	}
-	logger.Info(fmt.Sprintf("Starting tg-cli bot... binary_md5=%s", binaryMD5))
+	logger.Info(fmt.Sprintf("Starting tg-cli bot... version=%s binary_md5=%s", Version, binaryMD5))
 	bot.Start()
 }

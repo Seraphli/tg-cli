@@ -59,6 +59,7 @@ func detectTmuxTarget() string {
 }
 
 func runHook(cmd *cobra.Command, args []string) {
+	hookLog("version=%s", Version)
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		hookExit(1, fmt.Sprintf("stdin read error: %v", err))

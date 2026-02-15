@@ -56,6 +56,10 @@ This registers Stop and SubagentStop hooks in `~/.claude/settings.json` so Claud
 go build -o tg-cli
 ```
 
+## Version Management
+
+The version number is defined in `main.go` (set via `rootCmd.Version`). Update it before committing new releases.
+
 ## Configuration
 
 Credentials are stored in `~/.tg-cli/credentials.json`:
