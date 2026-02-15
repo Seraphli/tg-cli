@@ -97,7 +97,7 @@ func runHook(cmd *cobra.Command, args []string) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/hook/%s", port, event)
 	hookLog("POST %s body: %s", url, string(enrichedJSON))
 	// POST to /hook/{event}
-	client := &http.Client{Timeout: 115 * time.Second}
+	client := &http.Client{Timeout: 0}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(enrichedJSON))
 	if err != nil {
 		hookExit(1, fmt.Sprintf("HTTP error: %v", err))
