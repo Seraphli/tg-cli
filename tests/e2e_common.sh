@@ -57,7 +57,7 @@ ensure_credentials() {
     echo "ERROR: $CREDENTIALS not found. Complete pairing first."
     exit 1
   fi
-  DEFAULT_CHAT_ID=$(jq -r '.pairingAllow.defaultChatId // empty' "$CREDENTIALS")
+  export DEFAULT_CHAT_ID=$(jq -r '.pairingAllow.defaultChatId // empty' "$CREDENTIALS")
   if [ -z "$DEFAULT_CHAT_ID" ]; then
     echo "ERROR: No defaultChatId in credentials. Complete pairing first."
     exit 1

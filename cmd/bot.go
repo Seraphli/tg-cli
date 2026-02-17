@@ -137,6 +137,7 @@ type pageEntry struct {
 	project    string
 	tmuxTarget string
 	permRows   []tele.Row // non-nil for permission messages
+	chatID     int64
 }
 
 var pages = &pageCacheStore{
@@ -538,6 +539,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 				event:      event,
 				project:    project,
 				tmuxTarget: tmuxTarget,
+			chatID:     chat.ID,
 			})
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
 			logger.Info(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
@@ -585,15 +587,19 @@ func buildPageKeyboardWithExtra(currentPage, totalPages int, extraRows []tele.Ro
 }
 
 // extractTmuxTarget extracts tmux target from notification text.
-func extractTmuxTarget(text string) (injector.TmuxTarget, error) {
+func extractTmuxTarget(text string) (*injector.TmuxTarget, error) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "📟 ") {
 			raw := strings.TrimPrefix(line, "📟 ")
-			return injector.ParseTarget(raw)
+			target, err := injector.ParseTarget(raw)
+			if err != nil {
+				return nil, err
+			}
+			return &target, nil
 		}
 	}
-	return injector.TmuxTarget{}, fmt.Errorf("no tmux target found")
+	return nil, fmt.Errorf("no tmux target found")
 }
 
 func resolvePermission(msgID int, decision string, suggestionsOverride json.RawMessage) (permDecision, error) {
@@ -782,6 +788,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_perm_fullauto", Description: "Switch to full-auto mode"},
 		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
+		tele.Command{Text: "bind", Description: "Bind a tmux session to this chat"},
+		tele.Command{Text: "unbind", Description: "Unbind a tmux session from this chat"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
@@ -810,12 +818,44 @@ func runBot(cmd *cobra.Command, args []string) {
 		tg, cc := tgName, ccName
 		bot.Handle("/"+tg, func(c tele.Context) error {
 			if c.Message().ReplyTo == nil {
+				if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+					creds, _ := config.LoadCredentials()
+					var targets []string
+					for t, chatID := range creds.RouteMap {
+						if chatID == c.Chat().ID {
+							targets = append(targets, t)
+						}
+					}
+					if len(targets) == 1 {
+						target, err := injector.ParseTarget(targets[0])
+						if err != nil || !injector.SessionExists(target) {
+							return c.Reply("❌ tmux session not found.")
+						}
+						text := "/" + cc
+						if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
+							text += " " + payload
+						}
+						if err := injector.InjectText(target, text); err != nil {
+							return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+						}
+						logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", targets[0], truncateStr(text, 200)))
+						bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+							Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+						})
+						reactionTracker.record(targets[0], c.Chat().ID, c.Message().ID)
+						return nil
+					}
+					if len(targets) > 1 {
+						return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+					}
+				}
 				return c.Send("💡 Please reply to a notification message to target a session.")
 			}
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Send("❌ No tmux session info found in the original message.")
 			}
+			target := *targetPtr
 			if !injector.SessionExists(target) {
 				return c.Send("❌ tmux session not found. The Claude Code session may have ended.")
 			}
@@ -835,7 +875,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			return nil
 		})
 	}
-	bot.Handle("/bot_start", func(c tele.Context) error {
+	bot.Handle("/start", func(c tele.Context) error {
 		return c.Send("tg-cli bot is running. Use /bot_pair to pair this chat.")
 	})
 	bot.Handle("/bot_pair", func(c tele.Context) error {
@@ -847,13 +887,86 @@ func runBot(cmd *cobra.Command, args []string) {
 		code := pairing.CreatePairingRequest(userID, chatID)
 		return c.Send(fmt.Sprintf("Pairing code: %s\n\nEnter this code in the bot terminal to approve.\n\nCode expires in 10 minutes.", code))
 	})
-	bot.Handle("/bot_status", func(c tele.Context) error {
+	bot.Handle("/status", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		return c.Send("Bot is running and paired.")
+	})
+	bot.Handle("/bot_routes", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		if !pairing.IsAllowed(userID) {
+			return c.Send("❌ Not paired. Use /bot_pair first.")
+		}
+		creds, _ := config.LoadCredentials()
+		if len(creds.RouteMap) == 0 {
+			return c.Send("No active route bindings.")
+		}
+		var lines []string
+		for tmux, chatID := range creds.RouteMap {
+			chatName := fmt.Sprintf("%d", chatID)
+			if chat, err := bot.ChatByID(chatID); err == nil && chat.Title != "" {
+				chatName = chat.Title
+			}
+			lines = append(lines, fmt.Sprintf("📟 %s → %s", tmux, chatName))
+		}
+		return c.Send("🗺 Route bindings:\n" + strings.Join(lines, "\n"))
+	})
+	bot.Handle("/bot_bind", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		if !pairing.IsAllowed(userID) {
+			return c.Reply("❌ Not paired. Use /bot_pair first.")
+		}
+		if c.Message().ReplyTo == nil {
+			return c.Reply("❌ Reply to a notification message with /bot_bind to bind that session to this chat.")
+		}
+		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		if err != nil {
+			return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+		}
+		tmuxStr := injector.FormatTarget(*target)
+		if tmuxStr == "" {
+			return c.Reply("❌ Empty tmux target, cannot bind.")
+		}
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+		}
+		creds.RouteMap[tmuxStr] = c.Chat().ID
+		if err := config.SaveCredentials(creds); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
+		}
+		logger.Info(fmt.Sprintf("Route bound: tmux=%s → chat=%d by user=%s", tmuxStr, c.Chat().ID, userID))
+		return c.Reply(fmt.Sprintf("✅ Bound session to this chat.\n📟 %s", tmuxStr))
+	})
+	bot.Handle("/bot_unbind", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		if !pairing.IsAllowed(userID) {
+			return c.Reply("❌ Not paired.")
+		}
+		if c.Message().ReplyTo == nil {
+			return c.Reply("❌ Reply to a notification message with /bot_unbind to unbind that session.")
+		}
+		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		if err != nil {
+			return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+		}
+		tmuxStr := injector.FormatTarget(*target)
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+		}
+		if _, ok := creds.RouteMap[tmuxStr]; !ok {
+			return c.Reply("❌ This session is not bound to any chat.")
+		}
+		delete(creds.RouteMap, tmuxStr)
+		if err := config.SaveCredentials(creds); err != nil {
+			return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+		}
+		logger.Info(fmt.Sprintf("Route unbound: tmux=%s by user=%s", tmuxStr, userID))
+		return c.Reply(fmt.Sprintf("✅ Unbound session. Messages will go to default chat.\n📟 %s", tmuxStr))
 	})
 	bot.Handle(tele.OnText, func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
@@ -862,14 +975,43 @@ func runBot(cmd *cobra.Command, args []string) {
 			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
+			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+				creds, _ := config.LoadCredentials()
+				var targets []string
+				for t, chatID := range creds.RouteMap {
+					if chatID == c.Chat().ID {
+						targets = append(targets, t)
+					}
+				}
+				if len(targets) == 0 {
+					return nil
+				}
+				if len(targets) > 1 {
+					return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+				}
+				target, err := injector.ParseTarget(targets[0])
+				if err != nil || !injector.SessionExists(target) {
+					return c.Reply("❌ tmux session not found.")
+				}
+				if err := injector.InjectText(target, c.Message().Text); err != nil {
+					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+				}
+				logger.Info(fmt.Sprintf("Group quick reply: target=%s text=%s", targets[0], truncateStr(c.Message().Text, 200)))
+				bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+				})
+				reactionTracker.record(targets[0], c.Chat().ID, c.Message().ID)
+				return nil
+			}
 			return nil
 		}
 		// Permission mode switching commands
 		if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info found.")
 			}
+			target := *targetPtr
 			if !injector.SessionExists(target) {
 				return c.Reply("❌ tmux session not found.")
 			}
@@ -909,10 +1051,11 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 		}
 		if c.Message().Text == "/bot_capture" && c.Message().ReplyTo != nil {
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info found.")
 			}
+			target := *targetPtr
 			if !injector.SessionExists(target) {
 				return c.Reply("❌ tmux session not found.")
 			}
@@ -933,16 +1076,19 @@ func runBot(cmd *cobra.Command, args []string) {
 				})
 				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
 				bot.Edit(editMsg, replyTo.Text)
-				target, err := extractTmuxTarget(replyTo.Text)
-				if err == nil && injector.SessionExists(target) {
-					injector.InjectText(target, c.Message().Text)
-				}
-				logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s text=%s", replyTo.ID, injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
-				if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
-					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-				}); err == nil {
-					tmuxStr := injector.FormatTarget(target)
-					reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
+				targetPtr, err := extractTmuxTarget(replyTo.Text)
+				if err == nil && targetPtr != nil {
+					target := *targetPtr
+					if injector.SessionExists(target) {
+						injector.InjectText(target, c.Message().Text)
+					}
+					logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s text=%s", replyTo.ID, injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
+					if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
+						Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+					}); err == nil {
+						tmuxStr := injector.FormatTarget(target)
+						reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
+					}
 				}
 				return nil
 			}
@@ -987,10 +1133,11 @@ func runBot(cmd *cobra.Command, args []string) {
 				return nil
 			}
 		}
-		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 		if err != nil {
 			return c.Reply("❌ No tmux session info found in the original message.")
 		}
+		target := *targetPtr
 		if !injector.SessionExists(target) {
 			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
 		}
@@ -1017,6 +1164,50 @@ func runBot(cmd *cobra.Command, args []string) {
 			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
+			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+				creds, _ := config.LoadCredentials()
+				var targets []string
+				for t, chatID := range creds.RouteMap {
+					if chatID == c.Chat().ID {
+						targets = append(targets, t)
+					}
+				}
+				if len(targets) == 0 {
+					return nil
+				}
+				if len(targets) > 1 {
+					return c.Reply("❌ Multiple sessions bound. Reply to a specific notification.")
+				}
+				file, err := bot.FileByID(c.Message().Voice.FileID)
+				if err != nil {
+					return c.Reply(fmt.Sprintf("❌ Failed to get voice file: %v", err))
+				}
+				tmpFile := filepath.Join(os.TempDir(), "tg-cli-voice-"+c.Message().Voice.FileID+".ogg")
+				defer os.Remove(tmpFile)
+				if err := bot.Download(&file, tmpFile); err != nil {
+					return c.Reply(fmt.Sprintf("❌ Failed to download voice: %v", err))
+				}
+				text, err := voice.Transcribe(tmpFile)
+				if err != nil || text == "" {
+					return c.Reply("❌ Transcription failed or empty.")
+				}
+				target, err := injector.ParseTarget(targets[0])
+				if err != nil || !injector.SessionExists(target) {
+					return c.Reply("❌ tmux session not found.")
+				}
+				if err := injector.InjectText(target, text); err != nil {
+					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+				}
+				logger.Info(fmt.Sprintf("Group voice quick reply: target=%s text=%s", targets[0], truncateStr(text, 200)))
+				sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+				if sentMsg != nil {
+					bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
+						Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
+					})
+					reactionTracker.record(targets[0], c.Chat().ID, sentMsg.ID)
+				}
+				return nil
+			}
 			return nil
 		}
 		file, err := bot.FileByID(c.Message().Voice.FileID)
@@ -1062,10 +1253,11 @@ func runBot(cmd *cobra.Command, args []string) {
 				}
 			}
 		}
-		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+		targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 		if err != nil {
 			return c.Reply("❌ No tmux session info found in the original message.")
 		}
+		target := *targetPtr
 		if !injector.SessionExists(target) {
 			return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
 		}
@@ -1134,8 +1326,9 @@ func runBot(cmd *cobra.Command, args []string) {
 		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
 		}); err == nil {
-			target, err := extractTmuxTarget(c.Message().Text)
-			if err == nil {
+			targetPtr, err := extractTmuxTarget(c.Message().Text)
+			if err == nil && targetPtr != nil {
+				target := *targetPtr
 				tmuxStr := injector.FormatTarget(target)
 				reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
 			}
@@ -1250,7 +1443,16 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		return &p, body, nil
 	}
-	hookChat := func() (*tele.Chat, string) {
+	resolveChat := func(tmuxTarget string) (*tele.Chat, string) {
+		if tmuxTarget != "" {
+			creds, err := config.LoadCredentials()
+			if err == nil && len(creds.RouteMap) > 0 {
+				if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
+					logger.Info(fmt.Sprintf("Route resolved: tmux=%s → chat=%d (from routeMap)", tmuxTarget, chatID))
+					return &tele.Chat{ID: chatID}, strconv.FormatInt(chatID, 10)
+				}
+			}
+		}
 		chatID := pairing.GetDefaultChatID()
 		if chatID == "" {
 			return nil, ""
@@ -1270,7 +1472,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			return
 		}
 		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
-		chat, chatID := hookChat()
+		chat, chatID := resolveChat(p.TmuxTarget)
 		switch event {
 		case "SessionStart":
 			if chat == nil || p.TmuxTarget == "" {
@@ -1590,6 +1792,7 @@ func runBot(cmd *cobra.Command, args []string) {
 				w.WriteHeader(200)
 				return
 			}
+			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 			if len(permChunks) > 1 {
 				pages.store(sent.ID, p.SessionID, &pageEntry{
 					chunks:     permChunks,
@@ -1597,12 +1800,12 @@ func runBot(cmd *cobra.Command, args []string) {
 					project:    p.Project,
 					tmuxTarget: p.TmuxTarget,
 					permRows:   permBtnRows,
+				chatID:     chatIDInt,
 				})
 			}
 			logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d)", toolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks)))
 			logger.Info(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
 			suggestionsRaw, _ := json.Marshal(suggestions)
-			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 			ch := pendingPerms.create(sent.ID, p.TmuxTarget, suggestionsRaw, text, chatIDInt)
 			// Block until resolved
 			select {
@@ -1665,14 +1868,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			http.Error(w, "page out of range", 400)
 			return
 		}
-		chatID := pairing.GetDefaultChatID()
-		if chatID == "" {
-			http.Error(w, "no paired chat", 400)
-			return
-		}
-		chat := &tele.Chat{ID: int64(0)}
-		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-		chat.ID = chatIDInt
+		chat := &tele.Chat{ID: entry.chatID}
 		var text string
 		if entry.permRows != nil {
 			text = entry.chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.chunks))
@@ -1721,9 +1917,6 @@ func runBot(cmd *cobra.Command, args []string) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		tool := r.URL.Query().Get("tool")
 		action := r.URL.Query().Get("action")
-		respondChatID := pairing.GetDefaultChatID()
-		respondChatIDInt, _ := strconv.ParseInt(respondChatID, 10, 64)
-		editChat := &tele.Chat{ID: respondChatIDInt}
 		switch tool {
 		case "AskUserQuestion":
 			if action == "text" {
@@ -1742,6 +1935,7 @@ func runBot(cmd *cobra.Command, args []string) {
 					return
 				}
 				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d text=%s", msgID, truncateStr(value, 200)))
+				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
 				bot.Edit(editMsg, entry.msgText)
 			} else if action == "submit" {
@@ -1756,6 +1950,7 @@ func runBot(cmd *cobra.Command, args []string) {
 					return
 				}
 				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d answers=%v", msgID, answers))
+				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
 				bot.Edit(editMsg, entry.msgText)
 			} else {
@@ -1775,6 +1970,7 @@ func runBot(cmd *cobra.Command, args []string) {
 					qm.selectedOptions[optIdx] = !qm.selectedOptions[optIdx]
 					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d state=%v label=%s", msgID, qIdx, optIdx, qm.selectedOptions[optIdx], qm.optionLabels[optIdx]))
 					newMarkup := rebuildAskMarkup(entry)
+					editChat := &tele.Chat{ID: entry.chatID}
 					editMsg := &tele.Message{ID: msgID, Chat: editChat}
 					bot.Edit(editMsg, entry.msgText, newMarkup)
 				} else {
@@ -1792,11 +1988,13 @@ func runBot(cmd *cobra.Command, args []string) {
 							return
 						}
 						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d q=%d opt=%d label=%s answers=%v", msgID, qIdx, optIdx, qm.optionLabels[optIdx], answers))
+						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
 						bot.Edit(editMsg, entry.msgText)
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
+						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
 						bot.Edit(editMsg, entry.msgText, newMarkup)
 					}
@@ -1808,6 +2006,68 @@ func runBot(cmd *cobra.Command, args []string) {
 		}
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
+	})
+	mux.HandleFunc("/route/bind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			TmuxTarget string `json:"tmux_target"`
+			ChatID     int64  `json:"chat_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		creds.RouteMap[req.TmuxTarget] = req.ChatID
+		if err := config.SaveCredentials(creds); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		logger.Info(fmt.Sprintf("Route bound via API: tmux=%s → chat=%d", req.TmuxTarget, req.ChatID))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("/route/unbind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			TmuxTarget string `json:"tmux_target"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		delete(creds.RouteMap, req.TmuxTarget)
+		if err := config.SaveCredentials(creds); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		logger.Info(fmt.Sprintf("Route unbound via API: tmux=%s", req.TmuxTarget))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("/route/list", func(w http.ResponseWriter, r *http.Request) {
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"routes": creds.RouteMap})
 	})
 	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

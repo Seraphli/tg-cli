@@ -66,7 +66,7 @@ else
   start_claude
   trap cleanup_sessions EXIT
 
-  for phase in "$SCRIPT_DIR"/phases/phase[2-8]_*.sh; do
+  for phase in "$SCRIPT_DIR"/phases/phase[2-9]_*.sh; do
     run_phase "$phase"
   done
 fi
