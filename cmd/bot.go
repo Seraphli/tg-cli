@@ -784,8 +784,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_status", Description: "Check bot and pairing status"},
 		tele.Command{Text: "bot_perm_default", Description: "Switch to default mode"},
 		tele.Command{Text: "bot_perm_plan", Description: "Switch to plan mode"},
-		tele.Command{Text: "bot_perm_autoedit", Description: "Switch to auto-edit mode"},
-		tele.Command{Text: "bot_perm_fullauto", Description: "Switch to full-auto mode"},
+		tele.Command{Text: "bot_perm_auto", Description: "Switch to auto-edit mode"},
+		tele.Command{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
 		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
 		tele.Command{Text: "bind", Description: "Bind a tmux session to this chat"},
@@ -978,8 +978,8 @@ func runBot(cmd *cobra.Command, args []string) {
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
 				creds, _ := config.LoadCredentials()
 				var targets []string
-				for t, chatID := range creds.RouteMap {
-					if chatID == c.Chat().ID {
+				for t, cid := range creds.RouteMap {
+					if cid == c.Chat().ID {
 						targets = append(targets, t)
 					}
 				}
@@ -992,6 +992,13 @@ func runBot(cmd *cobra.Command, args []string) {
 				target, err := injector.ParseTarget(targets[0])
 				if err != nil || !injector.SessionExists(target) {
 					return c.Reply("❌ tmux session not found.")
+				}
+				// Check for bot commands before injecting as text
+				if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
+					return handlePermCommand(c, target)
+				}
+				if c.Message().Text == "/bot_capture" {
+					return handleCaptureCommand(c, target)
 				}
 				if err := injector.InjectText(target, c.Message().Text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -1015,40 +1022,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			if !injector.SessionExists(target) {
 				return c.Reply("❌ tmux session not found.")
 			}
-			cmd := strings.TrimPrefix(c.Message().Text, "/bot_perm_")
-			switch cmd {
-			case "status":
-				content, err := injector.CapturePane(target)
-				if err != nil {
-					return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
-				}
-				return c.Reply(fmt.Sprintf("📋 Pane content:\n%s", content))
-			case "default", "plan", "autoedit", "fullauto":
-				modeIndex := map[string]int{
-					"default":  0,
-					"plan":     1,
-					"autoedit": 2,
-					"fullauto": 3,
-				}
-				injector.SendKeys(target, "Escape")
-				time.Sleep(200 * time.Millisecond)
-				injector.SendKeys(target, "BTab")
-				time.Sleep(500 * time.Millisecond)
-				for i := 0; i < 4; i++ {
-					injector.SendKeys(target, "Up")
-					time.Sleep(100 * time.Millisecond)
-				}
-				idx := modeIndex[cmd]
-				for i := 0; i < idx; i++ {
-					injector.SendKeys(target, "Down")
-					time.Sleep(100 * time.Millisecond)
-				}
-				// Select
-				injector.SendKeys(target, "Enter")
-				return c.Reply(fmt.Sprintf("🔐 Switching to %s mode...", cmd))
-			default:
-				return c.Reply("❌ Unknown permission command. Use: default, plan, autoedit, fullauto, status")
-			}
+			return handlePermCommand(c, target)
 		}
 		if c.Message().Text == "/bot_capture" && c.Message().ReplyTo != nil {
 			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
@@ -1059,14 +1033,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			if !injector.SessionExists(target) {
 				return c.Reply("❌ tmux session not found.")
 			}
-			content, err := injector.CapturePane(target)
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
-			}
-			if content == "" {
-				return c.Reply("(empty pane)")
-			}
-			return c.Reply(content)
+			return handleCaptureCommand(c, target)
 		}
 		if replyTo := c.Message().ReplyTo; replyTo != nil {
 			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
@@ -2123,6 +2090,77 @@ func runBot(cmd *cobra.Command, args []string) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"content": content})
 	})
+	mux.HandleFunc("/perm/switch", func(w http.ResponseWriter, r *http.Request) {
+		targetStr := r.URL.Query().Get("target")
+		mode := r.URL.Query().Get("mode")
+		if targetStr == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "target required"})
+			return
+		}
+		if mode == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "mode required"})
+			return
+		}
+		t, err := injector.ParseTarget(targetStr)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		if !injector.SessionExists(t) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "session not found"})
+			return
+		}
+		logger.Info(fmt.Sprintf("Perm switch API: target=%s mode=%s", injector.FormatTarget(t), mode))
+		finalMode, err := switchPermMode(t, mode)
+		if err != nil {
+			logger.Info(fmt.Sprintf("Perm switch API failed: %v", err))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": finalMode})
+	})
+	mux.HandleFunc("/perm/status", func(w http.ResponseWriter, r *http.Request) {
+		targetStr := r.URL.Query().Get("target")
+		if targetStr == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "target required"})
+			return
+		}
+		t, err := injector.ParseTarget(targetStr)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		if !injector.SessionExists(t) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "session not found"})
+			return
+		}
+		mode, content, err := detectPermMode(t)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": mode, "content": content})
+	})
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -2178,4 +2216,92 @@ func runBot(cmd *cobra.Command, args []string) {
 	}
 	logger.Info(fmt.Sprintf("Starting tg-cli bot... version=%s binary_md5=%s", Version, binaryMD5))
 	bot.Start()
+}
+
+// detectPermMode captures pane content and detects the current CC permission mode.
+// Returns (mode, rawContent, error). Mode is one of: "default", "plan", "auto", "bypass", "unknown".
+func detectPermMode(t injector.TmuxTarget) (string, string, error) {
+	content, err := injector.CapturePane(t)
+	if err != nil {
+		return "", "", err
+	}
+	// Only check the bottom 5 lines where CC TUI mode indicator appears.
+	// Searching full pane causes false positives from conversation content.
+	lines := strings.Split(content, "\n")
+	if len(lines) > 5 {
+		lines = lines[len(lines)-5:]
+	}
+	bottom := strings.ToLower(strings.Join(lines, "\n"))
+	switch {
+	case strings.Contains(bottom, "bypass"):
+		return "bypass", content, nil
+	case strings.Contains(bottom, "plan"):
+		return "plan", content, nil
+	case strings.Contains(bottom, "accept edits"):
+		return "auto", content, nil
+	default:
+		return "default", content, nil
+	}
+}
+
+// switchPermMode cycles BTab until the target mode is reached.
+// Returns the final mode name or error if target mode is not available.
+func switchPermMode(t injector.TmuxTarget, targetMode string) (string, error) {
+	startMode, _, err := detectPermMode(t)
+	if err != nil {
+		return "", fmt.Errorf("detect mode: %w", err)
+	}
+	if startMode == targetMode {
+		return startMode, nil
+	}
+	for i := 0; i < 10; i++ {
+		injector.SendKeys(t, "BTab")
+		time.Sleep(500 * time.Millisecond)
+		currentMode, _, err := detectPermMode(t)
+		if err != nil {
+			return "", fmt.Errorf("detect mode after BTab: %w", err)
+		}
+		if currentMode == targetMode {
+			return currentMode, nil
+		}
+		// If we've cycled back to the starting mode, target is not available
+		if i > 0 && currentMode == startMode {
+			return "", fmt.Errorf("mode %q not available in BTab cycle (cycled back to %q)", targetMode, startMode)
+		}
+	}
+	return "", fmt.Errorf("failed to reach mode %q after 10 BTab presses", targetMode)
+}
+
+// handlePermCommand handles /bot_perm_<cmd> — detects or switches CC permission mode via BTab cycling.
+func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
+	cmd := strings.TrimPrefix(c.Message().Text, "/bot_perm_")
+	if at := strings.Index(cmd, "@"); at != -1 {
+		cmd = cmd[:at]
+	}
+	if cmd == "status" {
+		mode, content, err := detectPermMode(target)
+		if err != nil {
+			return c.Reply(fmt.Sprintf("❌ Detect mode failed: %v", err))
+		}
+		_ = content
+		return c.Reply(fmt.Sprintf("🔐 Current mode: %s", mode))
+	}
+	// All other values are treated as target mode
+	finalMode, err := switchPermMode(target, cmd)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Switch failed: %v", err))
+	}
+	return c.Reply(fmt.Sprintf("🔐 Switched to %s mode", finalMode))
+}
+
+// handleCaptureCommand handles /bot_capture — captures pane content and replies with it.
+func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
+	}
+	if content == "" {
+		return c.Reply("(empty pane)")
+	}
+	return c.Reply(content)
 }
