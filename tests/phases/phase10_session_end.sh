@@ -4,15 +4,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 9: Exit + SessionEnd verification ---"
+echo "--- Phase 10: Exit + SessionEnd verification ---"
 
 ensure_infrastructure
 
 LOG_BEFORE_EXIT=$(wc -l < "$LOG_FILE")
-pane_log "[Phase 9] BEFORE /exit"
+pane_log "[Phase 10] BEFORE /exit"
 inject_prompt "/exit"
 sleep 5
-pane_log "[Phase 9] 5s AFTER /exit"
+pane_log "[Phase 10] 5s AFTER /exit"
 
 ELAPSED=0
 SESSION_END_FOUND=false
@@ -28,7 +28,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for SessionEnd... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-pane_log "[Phase 9] AFTER SessionEnd detected"
+pane_log "[Phase 10] AFTER SessionEnd detected"
 
 if [ "$SESSION_END_FOUND" = true ]; then
   pass "SessionEnd notification received after /exit"
