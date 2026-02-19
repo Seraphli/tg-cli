@@ -788,6 +788,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
 		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
+		tele.Command{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
 		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
 		tele.Command{Text: "bot_bind", Description: "Bind a tmux session to this chat"},
 		tele.Command{Text: "bot_unbind", Description: "Unbind a tmux session from this chat"},
@@ -1001,6 +1002,9 @@ func runBot(cmd *cobra.Command, args []string) {
 				if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
 					return handleCaptureCommand(c, target)
 				}
+				if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") {
+					return handleEscapeCommand(c, target)
+				}
 				if err := injector.InjectText(target, c.Message().Text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
@@ -1035,6 +1039,17 @@ func runBot(cmd *cobra.Command, args []string) {
 				return c.Reply("❌ tmux session not found.")
 			}
 			return handleCaptureCommand(c, target)
+		}
+		if (c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@")) && c.Message().ReplyTo != nil {
+			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info found.")
+			}
+			target := *targetPtr
+			if !injector.SessionExists(target) {
+				return c.Reply("❌ tmux session not found.")
+			}
+			return handleEscapeCommand(c, target)
 		}
 		if replyTo := c.Message().ReplyTo; replyTo != nil {
 			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
@@ -2091,6 +2106,28 @@ func runBot(cmd *cobra.Command, args []string) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"content": content})
 	})
+	mux.HandleFunc("/escape", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "target required", http.StatusBadRequest)
+			return
+		}
+		t, err := injector.ParseTarget(target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !injector.SessionExists(t) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if err := injector.SendKeys(t, "Escape"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
 	mux.HandleFunc("/perm/switch", func(w http.ResponseWriter, r *http.Request) {
 		targetStr := r.URL.Query().Get("target")
 		mode := r.URL.Query().Get("mode")
@@ -2309,4 +2346,12 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 		content = "...(truncated, showing last 4000 chars)\n\n" + content[len(content)-maxLen:]
 	}
 	return c.Reply(content)
+}
+
+// handleEscapeCommand handles /bot_escape — sends Escape key to interrupt Claude Code.
+func handleEscapeCommand(c tele.Context, target injector.TmuxTarget) error {
+	if err := injector.SendKeys(target, "Escape"); err != nil {
+		return c.Reply(fmt.Sprintf("❌ Escape failed: %v", err))
+	}
+	return c.Reply("⏹ Escape sent")
 }
