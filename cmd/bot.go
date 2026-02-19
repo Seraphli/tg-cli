@@ -788,8 +788,9 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
 		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
-		tele.Command{Text: "bind", Description: "Bind a tmux session to this chat"},
-		tele.Command{Text: "unbind", Description: "Unbind a tmux session from this chat"},
+		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
+		tele.Command{Text: "bot_bind", Description: "Bind a tmux session to this chat"},
+		tele.Command{Text: "bot_unbind", Description: "Unbind a tmux session from this chat"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
