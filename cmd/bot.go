@@ -998,7 +998,7 @@ func runBot(cmd *cobra.Command, args []string) {
 				if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
 					return handlePermCommand(c, target)
 				}
-				if c.Message().Text == "/bot_capture" {
+				if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
 					return handleCaptureCommand(c, target)
 				}
 				if err := injector.InjectText(target, c.Message().Text); err != nil {
@@ -1025,7 +1025,7 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 			return handlePermCommand(c, target)
 		}
-		if c.Message().Text == "/bot_capture" && c.Message().ReplyTo != nil {
+		if (c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@")) && c.Message().ReplyTo != nil {
 			targetPtr, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info found.")
@@ -2303,6 +2303,10 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	}
 	if content == "" {
 		return c.Reply("(empty pane)")
+	}
+	const maxLen = 4000
+	if len(content) > maxLen {
+		content = "...(truncated, showing last 4000 chars)\n\n" + content[len(content)-maxLen:]
 	}
 	return c.Reply(content)
 }
