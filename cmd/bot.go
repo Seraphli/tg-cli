@@ -114,6 +114,8 @@ func runBot(cmd *cobra.Command, args []string) {
 	bot.SetCommands(commands)
 	// Register all Telegram handlers
 	registerTGHandlers(bot, &creds)
+	// Scan pending directory to rebuild in-memory state after restart
+	scanPendingDir(bot, &creds)
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	registerHTTPHooks(mux, bot, &creds, port)

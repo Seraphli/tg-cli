@@ -248,6 +248,122 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     fail "Free-text AskUserQuestion not triggered within ${TIMEOUT}s"
   fi
 
+  # --- Group direct free-text test (via /group/text API) ---
+  # Extract tmux_target from SessionStart log (same pattern as Phase 8)
+  TMUX_TARGET=""
+  SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "Notification sent.*SessionStart" | head -1 || true)
+  if [ -n "$SESSION_START_LINE" ]; then
+    TMUX_TARGET=$(echo "$SESSION_START_LINE" | grep -oP 'tmux=\K[^[:space:]]+' || true)
+  fi
+  if [ -z "$TMUX_TARGET" ]; then
+    fail "Could not extract tmux_target from SessionStart log for group-text test"
+  fi
+
+  LOG_BEFORE_GT=$(wc -l < "$LOG_FILE")
+
+  pane_log "[Phase 5] BEFORE sending group-text AskUserQuestion prompt"
+
+  # Send prompt for group direct text question
+  inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Group Test' and two options: 'Yes' with description 'Agree', 'No' with description 'Disagree'. Question: 'Do you agree?'"
+
+  sleep 5
+  pane_log "[Phase 5] 5s AFTER sending group-text prompt"
+
+  # Wait for AskUserQuestion notification
+  ELAPSED=0
+  GT_FOUND=false
+  GT_MSG_ID=""
+  while [ $ELAPSED -lt $TIMEOUT ]; do
+    LOG_NOW=$(wc -l < "$LOG_FILE")
+    if [ "$LOG_NOW" -gt "$LOG_BEFORE_GT" ]; then
+      NEW_LOGS=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE")
+      if echo "$NEW_LOGS" | grep "AskUserQuestion sent" > /dev/null 2>&1; then
+        GT_FOUND=true
+        GT_MSG_ID=$(echo "$NEW_LOGS" | grep -oP 'AskUserQuestion sent.*msg_id=\K[0-9]+' | head -1)
+        break
+      fi
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+  done
+
+  if [ "$GT_FOUND" = true ] && [ -n "$GT_MSG_ID" ]; then
+    pass "Group-text AskUserQuestion notification sent (msg_id=$GT_MSG_ID)"
+
+    pane_log "[Phase 5] BEFORE group-text API call"
+
+    # Record log position BEFORE sending
+    LOG_BEFORE_GT_STOP=$(wc -l < "$LOG_FILE")
+
+    # Use /group/text API to send answer (simulates group direct message)
+    # URL-encode TMUX_TARGET because it contains '%' (e.g., %749) which would be decoded by Go's HTTP server
+    ENCODED_TARGET=$(printf '%s' "$TMUX_TARGET" | jq -sRr @uri)
+    API_URL="http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=group+direct+answer"
+    echo "  API call: GET $API_URL"
+    GT_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+    GT_CODE=$(echo "$GT_RESP" | tail -1)
+    GT_BODY=$(echo "$GT_RESP" | head -1)
+    if [ "$GT_CODE" = "200" ] && [ "$GT_BODY" = "resolved" ]; then
+      pass "Group direct text resolved via /group/text API"
+    else
+      fail "Group text API returned code=$GT_CODE body=$GT_BODY"
+    fi
+
+    sleep 5
+    pane_log "[Phase 5] 5s AFTER group-text API call"
+
+    # Verify bot log shows resolution via group text API
+    GT_RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | grep "AskUserQuestion resolved via group text API" | head -1)
+    if [ -n "$GT_RESOLVE_LOG" ]; then
+      pass "AskUserQuestion resolved via group text API logged"
+    else
+      fail "AskUserQuestion group text API resolution not found in log"
+    fi
+
+    # Wait for Stop notification
+    ELAPSED=0
+    GT_STOP_FOUND=false
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_GT_STOP" ]; then
+        if tail -n +"$((LOG_BEFORE_GT_STOP + 1))" "$LOG_FILE" | grep "Notification sent.*Stop.*body_len=" > /dev/null 2>&1; then
+          GT_STOP_FOUND=true
+          break
+        fi
+      fi
+      sleep 2
+      ELAPSED=$((ELAPSED + 2))
+    done
+
+    if [ "$GT_STOP_FOUND" = true ]; then
+      pass "Stop notification received after group direct text answer"
+
+      # Verify transcript contains group direct answer
+      GT_TRANSCRIPT_PATH=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | \
+        grep -oP '"transcript_path":"[^"]*"' | tail -1 | cut -d'"' -f4 || true)
+
+      if [ -n "$GT_TRANSCRIPT_PATH" ] && [ -f "$GT_TRANSCRIPT_PATH" ]; then
+        GT_ACTUAL=$(cat "$GT_TRANSCRIPT_PATH" | while IFS= read -r line; do
+          echo "$line" | jq -r '
+            select(.toolUseResult.answers != null) |
+            .toolUseResult.answers | to_entries[] |
+            select(.value == "group direct answer") | .value
+          ' 2>/dev/null
+        done | tail -1)
+        if [ "$GT_ACTUAL" = "group direct answer" ]; then
+          pass "CC received group direct answer 'group direct answer' in transcript"
+        else
+          fail "CC transcript group-text answer is '$GT_ACTUAL', expected 'group direct answer'"
+        fi
+      else
+        fail "Group-text transcript path not found or file missing"
+      fi
+    else
+      fail "Stop notification not found after group direct text answer within ${TIMEOUT}s"
+    fi
+  else
+    fail "Group-text AskUserQuestion not triggered within ${TIMEOUT}s"
+  fi
+
 else
   fail "AskUserQuestion not triggered within ${TIMEOUT}s"
 fi

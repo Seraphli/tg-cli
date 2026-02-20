@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -58,6 +62,40 @@ func detectTmuxTarget() string {
 	return tmuxPane
 }
 
+// generateUUID generates a random hex UUID using crypto/rand
+func generateUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// PendingFileHook is a local copy of PendingFile struct for hook.go process
+type PendingFileHook struct {
+	UUID      string          `json:"uuid"`
+	Event     string          `json:"event"`
+	ToolName  string          `json:"tool_name"`
+	Status    string          `json:"status"`
+	Payload   json.RawMessage `json:"payload"`
+	TgMsgID   int             `json:"tg_msg_id"`
+	TgChatID  int64           `json:"tg_chat_id"`
+	SessionID string          `json:"session_id"`
+	CCOutput  json.RawMessage `json:"cc_output"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// writePendingFileHook atomically writes a pending file (hook.go local version)
+func writePendingFileHook(path string, pf *PendingFileHook) error {
+	data, err := json.MarshalIndent(pf, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 func runHook(cmd *cobra.Command, args []string) {
 	hookLog("version=%s", Version)
 	data, err := io.ReadAll(os.Stdin)
@@ -95,9 +133,66 @@ func runHook(cmd *cobra.Command, args []string) {
 	}
 	// Marshal enriched payload
 	enrichedJSON, _ := json.Marshal(payload)
+
+	// PermissionRequest: use file-based communication instead of blocking HTTP
+	toolName, _ := payload["tool_name"].(string)
+	if event == "PermissionRequest" {
+		uuid := generateUUID()
+		dir := "/tmp/tg-cli/pending/"
+		os.MkdirAll(dir, 0755)
+		pendingPath := filepath.Join(dir, uuid+".json")
+
+		// 1. Write pending file
+		pf := PendingFileHook{
+			UUID:      uuid,
+			Event:     event,
+			ToolName:  toolName,
+			Status:    "pending",
+			Payload:   enrichedJSON,
+			CreatedAt: time.Now(),
+		}
+		if err := writePendingFileHook(pendingPath, &pf); err != nil {
+			hookExit(1, fmt.Sprintf("write pending file error: %v", err))
+		}
+		hookLog("pending file created: %s", pendingPath)
+
+		// 2. Signal handler for cleanup
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-sigCh
+			os.Remove(pendingPath)
+			hookExit(0, "signal cleanup")
+		}()
+
+		// 3. Notify bot (fire-and-forget, 5s timeout)
+		notifyClient := &http.Client{Timeout: 5 * time.Second}
+		notifyURL := fmt.Sprintf("http://127.0.0.1:%d/pending/notify?uuid=%s", port, uuid)
+		hookLog("POST %s (fire-and-forget)", notifyURL)
+		notifyClient.Post(notifyURL, "application/json", bytes.NewReader(enrichedJSON))
+
+		// 4. Poll for status=answered
+		hookLog("polling for answer...")
+		for {
+			data, err := os.ReadFile(pendingPath)
+			if err == nil && len(data) > 0 {
+				var pf PendingFileHook
+				if json.Unmarshal(data, &pf) == nil {
+					if pf.Status == "answered" && pf.CCOutput != nil {
+						hookLog("answered: %s", string(pf.CCOutput))
+						fmt.Print(string(pf.CCOutput))
+						os.Remove(pendingPath)
+						hookExit(0, "answered")
+					}
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	// Other events: use existing HTTP POST
 	url := fmt.Sprintf("http://127.0.0.1:%d/hook/%s", port, event)
 	hookLog("POST %s body: %s", url, string(enrichedJSON))
-	// POST to /hook/{event}
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Post(url, "application/json", bytes.NewReader(enrichedJSON))
 	if err != nil {
