@@ -40,16 +40,23 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if port == 0 {
 		port = 12500
 	}
-	exePath, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get executable path: %v\n", err)
-		os.Exit(1)
-	}
-	hookCommand := fmt.Sprintf("%s hook --port %d", exePath, port)
-	if config.ConfigDir != "" {
-		hookCommand = fmt.Sprintf("%s --config-dir %s hook --port %d", exePath, config.ConfigDir, port)
-	}
 	home, _ := os.UserHomeDir()
+	var hookBin string
+	if config.ConfigDir != "" {
+		// Custom instance: use the binary installed under that config dir
+		hookBin = filepath.Join(config.ConfigDir, "bin", "tg-cli")
+	} else {
+		// Default instance: use the service binary
+		hookBin = filepath.Join(home, ".tg-cli", "bin", "tg-cli")
+	}
+	if _, err := os.Stat(hookBin); err != nil {
+		// Fallback to current executable if service binary not found
+		hookBin, _ = os.Executable()
+	}
+	hookCommand := fmt.Sprintf("%s hook --port %d", hookBin, port)
+	if config.ConfigDir != "" {
+		hookCommand = fmt.Sprintf("%s --config-dir %s hook --port %d", hookBin, config.ConfigDir, port)
+	}
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	if setupSettingsFlag != "" {
 		settingsPath = setupSettingsFlag

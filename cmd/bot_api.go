@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -66,17 +67,34 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		decision := r.URL.Query().Get("decision")
+		uuid, uuidOk := pendingPerms.getUUID(msgID)
+		if !uuidOk {
+			uuid, uuidOk = pendingFiles.get(msgID)
+		}
+		msgText := pendingPerms.getMsgText(msgID)
+		permChatID := pendingPerms.getChatID(msgID)
+		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(msgID))
 		d, err := resolvePermission(msgID, decision, nil)
 		if err != nil {
 			http.Error(w, err.Error(), 404)
 			return
 		}
-		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s", msgID, decision))
-		msgText := pendingPerms.getMsgText(msgID)
-		permChatID := pendingPerms.getChatID(msgID)
+		if uuidOk {
+			var updatedPerms []interface{}
+			if d.UpdatedPermissions != nil {
+				var perms []interface{}
+				json.Unmarshal(d.UpdatedPermissions, &perms)
+				updatedPerms = perms
+			}
+			ccOutput := buildPermCCOutput(d.Behavior, d.Message, updatedPerms)
+			if err := writePendingAnswer(uuid, ccOutput); err != nil {
+				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+			}
+		}
+		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 		if permChatID != 0 && msgText != "" {
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			bot.Edit(editMsg, msgText)
+			bot.Edit(editMsg, msgText, buildFrozenPermMarkup(decision, sugLabels))
 		}
 		respJSON, _ := json.Marshal(d)
 		w.Header().Set("Content-Type", "application/json")
@@ -95,39 +113,79 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					http.Error(w, "not found", 404)
 					return
 				}
+				if entry.resolved {
+					http.Error(w, "already answered", 400)
+					return
+				}
+				uuid, ok := pendingFiles.get(msgID)
+				if !ok {
+					http.Error(w, "pending file not found", 404)
+					return
+				}
+				path := filepath.Join(pendingDir(), uuid+".json")
+				pf, err := readPendingFile(path)
+				if err != nil {
+					http.Error(w, "failed to read pending file", 500)
+					return
+				}
 				answers := make(map[string]string)
 				if len(entry.questions) > 0 {
 					answers[entry.questions[0].questionText] = value
 				}
-				if !pendingAsks.resolve(msgID, answers) {
-					http.Error(w, "no pending ask", 404)
+				ccOutput := buildAskCCOutput(pf.Payload, answers)
+				if err := writePendingAnswer(uuid, ccOutput); err != nil {
+					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+					http.Error(w, "failed to save answer", 500)
 					return
 				}
-				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d text=%s", msgID, truncateStr(value, 200)))
+				toolNotifs.markResolved(msgID)
+				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(value, 200)))
 				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				bot.Edit(editMsg, entry.msgText)
+				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
 			} else if action == "submit" {
 				entry, ok := toolNotifs.get(msgID)
 				if !ok {
 					http.Error(w, "not found", 404)
 					return
 				}
-				answers := buildAnswers(entry)
-				if !pendingAsks.resolve(msgID, answers) {
-					http.Error(w, "no pending ask", 404)
+				if entry.resolved {
+					http.Error(w, "already answered", 400)
 					return
 				}
-				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d answers=%v", msgID, answers))
+				uuid, ok := pendingFiles.get(msgID)
+				if !ok {
+					http.Error(w, "pending file not found", 404)
+					return
+				}
+				path := filepath.Join(pendingDir(), uuid+".json")
+				pf, err := readPendingFile(path)
+				if err != nil {
+					http.Error(w, "failed to read pending file", 500)
+					return
+				}
+				answers := buildAnswers(entry)
+				ccOutput := buildAskCCOutput(pf.Payload, answers)
+				if err := writePendingAnswer(uuid, ccOutput); err != nil {
+					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+					http.Error(w, "failed to save answer", 500)
+					return
+				}
+				toolNotifs.markResolved(msgID)
+				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
 				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				bot.Edit(editMsg, entry.msgText)
+				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 			} else {
 				qIdx, _ := strconv.Atoi(r.URL.Query().Get("question"))
 				optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
 				entry, ok := toolNotifs.get(msgID)
 				if !ok {
 					http.Error(w, "not found", 404)
+					return
+				}
+				if entry.resolved {
+					http.Error(w, "already answered", 400)
 					return
 				}
 				if qIdx >= len(entry.questions) {
@@ -151,15 +209,29 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 						}
 					}
 					if !hasSubmit {
-						answers := buildAnswers(entry)
-						if !pendingAsks.resolve(msgID, answers) {
-							http.Error(w, "no pending ask", 404)
+						uuid, ok := pendingFiles.get(msgID)
+						if !ok {
+							http.Error(w, "pending file not found", 404)
 							return
 						}
-						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d q=%d opt=%d label=%s answers=%v", msgID, qIdx, optIdx, qm.optionLabels[optIdx], answers))
+						path := filepath.Join(pendingDir(), uuid+".json")
+						pf, err := readPendingFile(path)
+						if err != nil {
+							http.Error(w, "failed to read pending file", 500)
+							return
+						}
+						answers := buildAnswers(entry)
+						ccOutput := buildAskCCOutput(pf.Payload, answers)
+						if err := writePendingAnswer(uuid, ccOutput); err != nil {
+							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+							http.Error(w, "failed to save answer", 500)
+							return
+						}
+						toolNotifs.markResolved(msgID)
+						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d uuid=%s q=%d opt=%d label=%s answers=%v", msgID, uuid, qIdx, optIdx, qm.optionLabels[optIdx], answers))
 						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						bot.Edit(editMsg, entry.msgText)
+						bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
@@ -313,6 +385,55 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("/group/text", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		text := r.URL.Query().Get("text")
+		if target == "" || text == "" {
+			http.Error(w, "missing target or text", 400)
+			return
+		}
+		msgID, entry, ok := toolNotifs.findByTmuxTarget(target)
+		if !ok {
+			// No pending AskUserQuestion — inject text
+			t, err := injector.ParseTarget(target)
+			if err != nil {
+				http.Error(w, "invalid target", 400)
+				return
+			}
+			if err := injector.InjectText(t, text); err != nil {
+				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
+				return
+			}
+			logger.Info(fmt.Sprintf("Group text API injected: target=%s text=%s", target, truncateStr(text, 200)))
+			fmt.Fprintf(w, "injected")
+			return
+		}
+		uuid, uuidOk := pendingFiles.get(msgID)
+		if !uuidOk {
+			http.Error(w, "pending file not found", 404)
+			return
+		}
+		path := filepath.Join(pendingDir(), uuid+".json")
+		pf, err := readPendingFile(path)
+		if err != nil {
+			http.Error(w, "failed to read pending file", 500)
+			return
+		}
+		answers := make(map[string]string)
+		if len(entry.questions) > 0 {
+			answers[entry.questions[0].questionText] = text
+		}
+		ccOutput := buildAskCCOutput(pf.Payload, answers)
+		if err := writePendingAnswer(uuid, ccOutput); err != nil {
+			http.Error(w, "failed to write answer", 500)
+			return
+		}
+		toolNotifs.markResolved(msgID)
+		logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+		fmt.Fprintf(w, "resolved")
 	})
 	mux.HandleFunc("/perm/switch", func(w http.ResponseWriter, r *http.Request) {
 		targetStr := r.URL.Query().Get("target")

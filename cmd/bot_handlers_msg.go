@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -107,6 +106,30 @@ func registerMessageHandlers(bot *tele.Bot) {
 				if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") {
 					return handleEscapeCommand(c, target)
 				}
+				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+					uuid, uuidOk := pendingFiles.get(msgID)
+					if uuidOk {
+						path := filepath.Join(pendingDir(), uuid+".json")
+						pf, err := readPendingFile(path)
+						if err == nil {
+							answers := make(map[string]string)
+							if len(entry.questions) > 0 {
+								answers[entry.questions[0].questionText] = c.Message().Text
+							}
+							ccOutput := buildAskCCOutput(pf.Payload, answers)
+							if err := writePendingAnswer(uuid, ccOutput); err != nil {
+								logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+							} else {
+								toolNotifs.markResolved(msgID)
+								logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(c.Message().Text, 200)))
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+								bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+							}
+							reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+							return nil
+						}
+					}
+				}
 				if err := injector.InjectText(target, c.Message().Text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
@@ -142,19 +165,31 @@ func registerMessageHandlers(bot *tele.Bot) {
 		}
 		if replyTo := c.Message().ReplyTo; replyTo != nil {
 			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-				pendingPerms.resolve(replyTo.ID, permDecision{
+				uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
+				if !uuidOk {
+					uuid, uuidOk = pendingFiles.get(replyTo.ID)
+				}
+				sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
+				d := permDecision{
 					Behavior: "deny",
 					Message:  "User provided custom input: " + c.Message().Text,
-				})
+				}
+				pendingPerms.resolve(replyTo.ID, d)
+				if uuidOk {
+					ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
+					if err := writePendingAnswer(uuid, ccOutput); err != nil {
+						logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+					}
+				}
 				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-				bot.Edit(editMsg, replyTo.Text)
+				bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
 				targetPtr, err := extractTmuxTarget(replyTo.Text)
 				if err == nil && targetPtr != nil {
 					target := *targetPtr
 					if injector.SessionExists(target) {
 						injector.InjectText(target, c.Message().Text)
 					}
-					logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s text=%s", replyTo.ID, injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
+					logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s uuid=%s text=%s", replyTo.ID, injector.FormatTarget(target), uuid, truncateStr(c.Message().Text, 200)))
 					reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(target))
 				}
 				return nil
@@ -166,28 +201,28 @@ func registerMessageHandlers(bot *tele.Bot) {
 				}
 				switch entry.toolName {
 				case "AskUserQuestion":
-					pendingAsks.mu.Lock()
-					_, isPending := pendingAsks.entries[replyTo.ID]
-					pendingAsks.mu.Unlock()
-					if isPending {
-						answers := make(map[string]string)
-						if len(entry.questions) > 0 {
-							answers[entry.questions[0].questionText] = c.Message().Text
+					if !entry.resolved {
+						uuid, ok := pendingFiles.get(replyTo.ID)
+						if ok {
+							path := filepath.Join(pendingDir(), uuid+".json")
+							pf, err := readPendingFile(path)
+							if err == nil {
+								answers := make(map[string]string)
+								if len(entry.questions) > 0 {
+									answers[entry.questions[0].questionText] = c.Message().Text
+								}
+								ccOutput := buildAskCCOutput(pf.Payload, answers)
+								if err := writePendingAnswer(uuid, ccOutput); err != nil {
+									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+								} else {
+									toolNotifs.markResolved(replyTo.ID)
+									logger.Info(fmt.Sprintf("AskUserQuestion custom text via reply: msg_id=%d uuid=%s text=%s", replyTo.ID, uuid, truncateStr(c.Message().Text, 200)))
+									editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
+									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+								}
+							}
 						}
-						pendingAsks.resolve(replyTo.ID, answers)
-						logger.Info(fmt.Sprintf("AskUserQuestion custom text via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(c.Message().Text, 200)))
 					} else {
-						numOptions := 0
-						if len(entry.questions) > 0 {
-							numOptions = entry.questions[0].numOptions
-						}
-						for i := 0; i < numOptions; i++ {
-							injector.SendKeys(target, "Down")
-							time.Sleep(100 * time.Millisecond)
-						}
-						time.Sleep(100 * time.Millisecond)
-						injector.SendKeys(target, "Enter")
-						time.Sleep(1000 * time.Millisecond)
 						injector.InjectText(target, c.Message().Text)
 					}
 				}
@@ -239,6 +274,33 @@ func registerMessageHandlers(bot *tele.Bot) {
 				if err != nil || text == "" {
 					return c.Reply("❌ Transcription failed or empty.")
 				}
+				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+					uuid, uuidOk := pendingFiles.get(msgID)
+					if uuidOk {
+						path := filepath.Join(pendingDir(), uuid+".json")
+						pf, err := readPendingFile(path)
+						if err == nil {
+							answers := make(map[string]string)
+							if len(entry.questions) > 0 {
+								answers[entry.questions[0].questionText] = text
+							}
+							ccOutput := buildAskCCOutput(pf.Payload, answers)
+							if err := writePendingAnswer(uuid, ccOutput); err != nil {
+								logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+							} else {
+								toolNotifs.markResolved(msgID)
+								logger.Info(fmt.Sprintf("AskUserQuestion custom voice via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+								bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
+							}
+							sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+							if sentMsg != nil {
+								reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
+							}
+							return nil
+						}
+					}
+				}
 				if err := injector.InjectText(target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
@@ -262,21 +324,71 @@ func registerMessageHandlers(bot *tele.Bot) {
 			return c.Reply("❌ Transcription produced empty text.")
 		}
 		if replyTo := c.Message().ReplyTo; replyTo != nil {
+			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
+				uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
+				if !uuidOk {
+					uuid, uuidOk = pendingFiles.get(replyTo.ID)
+				}
+				sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
+				d := permDecision{
+					Behavior: "deny",
+					Message:  "User provided voice input: " + text,
+				}
+				pendingPerms.resolve(replyTo.ID, d)
+				if uuidOk {
+					ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
+					if err := writePendingAnswer(uuid, ccOutput); err != nil {
+						logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+					}
+				}
+				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
+				bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
+				targetPtr, err := extractTmuxTarget(replyTo.Text)
+				if err == nil && targetPtr != nil {
+					target := *targetPtr
+					if injector.SessionExists(target) {
+						injector.InjectText(target, text)
+					}
+					logger.Info(fmt.Sprintf("Permission denied via voice reply, text injected: msg_id=%d target=%s uuid=%s text=%s", replyTo.ID, injector.FormatTarget(target), uuid, truncateStr(text, 200)))
+					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+					if sentMsg != nil {
+						reactAndTrack(bot, c.Message().Chat, sentMsg, injector.FormatTarget(target))
+					}
+				}
+				return nil
+			}
 			if entry, ok := toolNotifs.get(replyTo.ID); ok {
 				switch entry.toolName {
 				case "AskUserQuestion":
+					if entry.resolved {
+						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: already resolved: msg_id=%d", replyTo.ID))
+						return c.Reply("❌ Question already answered.")
+					}
+					uuid, ok := pendingFiles.get(replyTo.ID)
+					if !ok {
+						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: pending file not found: msg_id=%d", replyTo.ID))
+						return c.Reply("❌ Question expired.")
+					}
+					path := filepath.Join(pendingDir(), uuid+".json")
+					pf, err := readPendingFile(path)
+					if err != nil {
+						logger.Error(fmt.Sprintf("Failed to read pending file: %v", err))
+						return c.Reply("❌ Failed to read pending file.")
+					}
 					answers := make(map[string]string)
 					if len(entry.questions) > 0 {
 						answers[entry.questions[0].questionText] = text
 					}
-					if !pendingAsks.resolve(replyTo.ID, answers) {
-						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: pendingAsk not found (already resolved/expired): msg_id=%d", replyTo.ID))
-						return c.Reply("❌ Question already answered or expired.")
+					ccOutput := buildAskCCOutput(pf.Payload, answers)
+					if err := writePendingAnswer(uuid, ccOutput); err != nil {
+						logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+						return c.Reply("❌ Failed to save answer.")
 					}
-					logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d text=%s", replyTo.ID, truncateStr(text, 200)))
+					toolNotifs.markResolved(replyTo.ID)
+					logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d uuid=%s text=%s", replyTo.ID, uuid, truncateStr(text, 200)))
 					editChat := &tele.Chat{ID: entry.chatID}
 					editMsg := &tele.Message{ID: replyTo.ID, Chat: editChat}
-					bot.Edit(editMsg, entry.msgText)
+					bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
 					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
 					if sentMsg != nil {
 						reactAndTrack(bot, c.Message().Chat, sentMsg, entry.tmuxTarget)

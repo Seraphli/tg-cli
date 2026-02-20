@@ -370,6 +370,136 @@ func rebuildAskMarkup(entry *toolNotifyEntry) *tele.ReplyMarkup {
 	return markup
 }
 
+// buildFrozenMarkup creates a frozen version of the inline keyboard markup after user selection.
+// Shows selected options with ✅ prefix, no Submit/Chat buttons.
+// Buttons remain visible but handler checks resolved flag.
+func buildFrozenMarkup(entry *toolNotifyEntry, footer string) *tele.ReplyMarkup {
+	markup := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	if len(entry.questions) == 1 && !entry.questions[0].multiSelect {
+		// Single question, single select - show all options with ✅ on selected
+		q := entry.questions[0]
+		var buttons []tele.Btn
+		for i, label := range q.optionLabels {
+			displayLabel := label
+			if q.selectedOption == i {
+				displayLabel = "✅ " + label
+			}
+			buttons = append(buttons, markup.Data(displayLabel, "tool", fmt.Sprintf("AskUserQuestion|0:%d", i)))
+		}
+		for i := 0; i < len(buttons); i += 2 {
+			if i+1 < len(buttons) {
+				rows = append(rows, markup.Row(buttons[i], buttons[i+1]))
+			} else {
+				rows = append(rows, markup.Row(buttons[i]))
+			}
+		}
+	} else {
+		// Multi-question or multiSelect - show all options with ✅ on selected
+		for qIdx, q := range entry.questions {
+			for optIdx, label := range q.optionLabels {
+				displayLabel := label
+				if len(entry.questions) > 1 {
+					displayLabel = fmt.Sprintf("Q%d: %s", qIdx+1, label)
+				}
+				if q.multiSelect && q.selectedOptions[optIdx] {
+					displayLabel = "✅ " + displayLabel
+				} else if !q.multiSelect && q.selectedOption == optIdx {
+					displayLabel = "✅ " + displayLabel
+				}
+				rows = append(rows, markup.Row(markup.Data(displayLabel, "tool", fmt.Sprintf("AskUserQuestion|%d:%d", qIdx, optIdx))))
+			}
+		}
+	}
+
+	if footer != "" {
+		rows = append(rows, markup.Row(markup.Data(footer, "tool", "noop")))
+	}
+	markup.Inline(rows...)
+	return markup
+}
+
+// parseSuggestionLabels extracts human-readable labels from suggestion JSON
+func parseSuggestionLabels(suggestionsRaw json.RawMessage) []string {
+	var suggestions []json.RawMessage
+	json.Unmarshal(suggestionsRaw, &suggestions)
+	var labels []string
+	for _, s := range suggestions {
+		var sug struct {
+			Type         string   `json:"type"`
+			Tool         string   `json:"tool"`
+			AllowPattern string   `json:"allow_pattern"`
+			Mode         string   `json:"mode"`
+			Directories  []string `json:"directories"`
+			Rules        []struct {
+				ToolName    string `json:"toolName"`
+				RuleContent string `json:"ruleContent"`
+			} `json:"rules"`
+		}
+		json.Unmarshal(s, &sug)
+		var label string
+		switch sug.Type {
+		case "setMode":
+			label = "✅ " + sug.Mode
+		case "addDirectories":
+			dir := ""
+			if len(sug.Directories) > 0 {
+				dir = sug.Directories[0]
+			}
+			label = "✅ Allow dir: " + dir
+		default:
+			toolName := sug.Tool
+			allowPattern := sug.AllowPattern
+			if toolName == "" && len(sug.Rules) > 0 {
+				toolName = sug.Rules[0].ToolName
+				if allowPattern == "" {
+					allowPattern = sug.Rules[0].RuleContent
+				}
+			}
+			label = "✅ Always Allow"
+			if toolName != "" {
+				label += " " + toolName
+			}
+			if allowPattern != "" && allowPattern != "*" {
+				label += " (" + allowPattern + ")"
+			}
+		}
+		labels = append(labels, label)
+	}
+	return labels
+}
+
+// buildFrozenPermMarkup creates frozen markup for PermissionRequest showing the selected decision.
+func buildFrozenPermMarkup(selectedDecision string, suggestions []string) *tele.ReplyMarkup {
+	markup := &tele.ReplyMarkup{}
+	var rows []tele.Row
+
+	allowLabel := "Allow"
+	denyLabel := "Deny"
+	if selectedDecision == "allow" {
+		allowLabel = "✅ Allow"
+	} else if selectedDecision == "deny" {
+		denyLabel = "✅ Deny"
+	}
+
+	rows = append(rows, markup.Row(
+		markup.Data(allowLabel, "perm", "allow"),
+		markup.Data(denyLabel, "perm", "deny"),
+	))
+
+	for i, sug := range suggestions {
+		label := sug
+		if selectedDecision == fmt.Sprintf("s%d", i) {
+			label = "✅ " + sug
+		}
+		rows = append(rows, markup.Row(markup.Data(label, "perm", fmt.Sprintf("s%d", i))))
+	}
+
+	markup.Inline(rows...)
+	return markup
+}
+
 func selectToolOption(msgID int, optIdx int) error {
 	entry, ok := toolNotifs.get(msgID)
 	if !ok {
@@ -535,4 +665,212 @@ func resolveChat(tmuxTarget string) (*tele.Chat, string) {
 	}
 	chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 	return &tele.Chat{ID: chatIDInt}, chatID
+}
+
+// PendingFile represents a pending CC event stored as a file
+type PendingFile struct {
+	UUID        string          `json:"uuid"`
+	Event       string          `json:"event"`
+	ToolName    string          `json:"tool_name"`
+	Status      string          `json:"status"`
+	Payload     json.RawMessage `json:"payload"`
+	TgMsgID     int             `json:"tg_msg_id"`
+	TgChatID    int64           `json:"tg_chat_id"`
+	SessionID   string          `json:"session_id"`
+	TmuxTarget  string          `json:"tmux_target"`
+	CCOutput    json.RawMessage `json:"cc_output"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+// pendingDir returns /tmp/tg-cli/pending/, creating it if needed
+func pendingDir() string {
+	dir := "/tmp/tg-cli/pending"
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// readPendingFile reads and unmarshals a pending file
+func readPendingFile(path string) (*PendingFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var pf PendingFile
+	if err := json.Unmarshal(data, &pf); err != nil {
+		return nil, err
+	}
+	return &pf, nil
+}
+
+// writePendingFile atomically writes a pending file
+func writePendingFile(path string, pf *PendingFile) error {
+	data, err := json.MarshalIndent(pf, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// writePendingAnswer updates pending file with answer and status=answered
+func writePendingAnswer(uuid string, ccOutput json.RawMessage) error {
+	path := filepath.Join(pendingDir(), uuid+".json")
+	pf, err := readPendingFile(path)
+	if err != nil {
+		return fmt.Errorf("read pending file: %w", err)
+	}
+	pf.Status = "answered"
+	pf.CCOutput = ccOutput
+	return writePendingFile(path, pf)
+}
+
+// buildAskCCOutput builds CC output for AskUserQuestion
+func buildAskCCOutput(payload json.RawMessage, answers map[string]string) json.RawMessage {
+	var p map[string]interface{}
+	json.Unmarshal(payload, &p)
+	toolInput, _ := p["tool_input"].(map[string]interface{})
+	questions, _ := toolInput["questions"].([]interface{})
+	output := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": "PermissionRequest",
+			"decision": map[string]interface{}{
+				"behavior": "allow",
+				"updatedInput": map[string]interface{}{
+					"questions": questions,
+					"answers":   answers,
+				},
+			},
+		},
+	}
+	result, _ := json.Marshal(output)
+	return result
+}
+
+// buildPermCCOutput builds CC output for PermissionRequest
+func buildPermCCOutput(decision string, message string, updatedPerms []interface{}) json.RawMessage {
+	output := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": "PermissionRequest",
+			"decision": map[string]interface{}{
+				"behavior": decision,
+			},
+		},
+	}
+	decisionMap := output["hookSpecificOutput"].(map[string]interface{})["decision"].(map[string]interface{})
+	if message != "" {
+		decisionMap["message"] = message
+	}
+	if updatedPerms != nil {
+		decisionMap["updatedPermissions"] = updatedPerms
+	}
+	result, _ := json.Marshal(output)
+	return result
+}
+
+// scanPendingDir scans pending directory on bot startup to rebuild in-memory state
+func scanPendingDir(bot *tele.Bot, creds *config.Credentials) {
+	dir := pendingDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		logger.Debug(fmt.Sprintf("scanPendingDir: skip (dir not readable): %v", err))
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		uuid := strings.TrimSuffix(entry.Name(), ".json")
+		path := filepath.Join(dir, entry.Name())
+		pf, err := readPendingFile(path)
+		if err != nil {
+			logger.Error(fmt.Sprintf("scanPendingDir: failed to read %s: %v", entry.Name(), err))
+			continue
+		}
+		switch pf.Status {
+		case "pending":
+			// Bot wasn't running when hook wrote the file — process it now
+			logger.Info(fmt.Sprintf("scanPendingDir: processing pending request %s", uuid))
+			go processPendingRequest(bot, creds, uuid)
+		case "sent":
+			// Rebuild in-memory state so button clicks work after restart
+			logger.Info(fmt.Sprintf("scanPendingDir: rebuilding in-memory state for %s (status=sent)", uuid))
+			if err := rebuildInMemoryState(bot, pf, path); err != nil {
+				logger.Error(fmt.Sprintf("scanPendingDir: failed to rebuild state for %s: %v", uuid, err))
+			}
+		case "answered":
+			// Orphaned file — hook should have cleaned it up
+			logger.Info(fmt.Sprintf("scanPendingDir: removing orphaned answered file %s", uuid))
+			os.Remove(path)
+		default:
+			logger.Error(fmt.Sprintf("scanPendingDir: unknown status %q in %s", pf.Status, uuid))
+		}
+	}
+}
+
+// rebuildInMemoryState reconstructs in-memory maps from a status=sent pending file
+func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
+	var p hookPayload
+	if err := json.Unmarshal(pf.Payload, &p); err != nil {
+		return fmt.Errorf("unmarshal payload: %w", err)
+	}
+	if pf.ToolName == "AskUserQuestion" {
+		var askInput struct {
+			Questions []struct {
+				Header   string `json:"header"`
+				Question string `json:"question"`
+				Options  []struct {
+					Label       string `json:"label"`
+					Description string `json:"description"`
+				} `json:"options"`
+				MultiSelect bool `json:"multiSelect"`
+			} `json:"questions"`
+		}
+		if err := json.Unmarshal(p.ToolInput, &askInput); err != nil {
+			return fmt.Errorf("unmarshal tool_input: %w", err)
+		}
+		if len(askInput.Questions) == 0 {
+			return fmt.Errorf("no questions in payload")
+		}
+		var qMetas []questionMeta
+		for _, q := range askInput.Questions {
+			var labels []string
+			for _, o := range q.Options {
+				labels = append(labels, o.Label)
+			}
+			qMetas = append(qMetas, questionMeta{
+				questionText: q.Question, header: q.Header,
+				numOptions: len(q.Options), optionLabels: labels,
+				multiSelect: q.MultiSelect, selectedOptions: make(map[int]bool),
+				selectedOption: -1,
+			})
+		}
+		var qSummaries []string
+		for _, q := range askInput.Questions {
+			var labels []string
+			for _, o := range q.Options {
+				labels = append(labels, o.Label)
+			}
+			qSummaries = append(qSummaries, fmt.Sprintf("%s:[%s]", q.Header, strings.Join(labels, ",")))
+		}
+		contentSummary := strings.Join(qSummaries, " | ")
+		toolNotifs.store(pf.TgMsgID, &toolNotifyEntry{
+			tmuxTarget: pf.TmuxTarget, toolName: "AskUserQuestion",
+			questions: qMetas, chatID: pf.TgChatID, msgText: "",
+			pendingUUID: pf.UUID,
+		})
+		pendingFiles.store(pf.TgMsgID, pf.UUID)
+		logger.Info(fmt.Sprintf("scanPendingDir: rebuilt AskUserQuestion state: msg_id=%d questions=%d tmux=%s content=%s uuid=%s", pf.TgMsgID, len(askInput.Questions), pf.TmuxTarget, contentSummary, pf.UUID))
+		return nil
+	}
+	// PermissionRequest: rebuild pendingPerms
+	var suggestions []json.RawMessage
+	json.Unmarshal(p.PermSuggestions, &suggestions)
+	suggestionsRaw, _ := json.Marshal(suggestions)
+	pendingPerms.create(pf.TgMsgID, pf.TmuxTarget, suggestionsRaw, "", pf.TgChatID, pf.UUID)
+	pendingFiles.store(pf.TgMsgID, pf.UUID)
+	logger.Info(fmt.Sprintf("scanPendingDir: rebuilt PermissionRequest state: msg_id=%d tool=%s tmux=%s uuid=%s", pf.TgMsgID, pf.ToolName, pf.TmuxTarget, pf.UUID))
+	return nil
 }

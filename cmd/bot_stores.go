@@ -101,43 +101,51 @@ type permDecision struct {
 
 type pendingPermStore struct {
 	mu          sync.RWMutex
-	entries     map[int]chan permDecision
 	targets     map[int]string
 	suggestions map[int]json.RawMessage
 	msgTexts    map[int]string
 	chatIDs     map[int]int64
+	uuids       map[int]string
 }
 
 var pendingPerms = &pendingPermStore{
-	entries:     make(map[int]chan permDecision),
 	targets:     make(map[int]string),
 	suggestions: make(map[int]json.RawMessage),
 	msgTexts:    make(map[int]string),
 	chatIDs:     make(map[int]int64),
+	uuids:       make(map[int]string),
 }
 
-func (ps *pendingPermStore) create(msgID int, tmuxTarget string, suggestionsJSON json.RawMessage, msgText string, chatID int64) chan permDecision {
+func (ps *pendingPermStore) create(msgID int, tmuxTarget string, suggestionsJSON json.RawMessage, msgText string, chatID int64, uuid string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	ch := make(chan permDecision, 1)
-	ps.entries[msgID] = ch
 	ps.targets[msgID] = tmuxTarget
 	ps.suggestions[msgID] = suggestionsJSON
 	ps.msgTexts[msgID] = msgText
 	ps.chatIDs[msgID] = chatID
-	return ch
+	ps.uuids[msgID] = uuid
 }
 
 func (ps *pendingPermStore) resolve(msgID int, d permDecision) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	ch, ok := ps.entries[msgID]
+	_, ok := ps.targets[msgID]
 	if !ok {
 		return false
 	}
-	ch <- d
-	delete(ps.entries, msgID)
+	delete(ps.targets, msgID)
+	delete(ps.suggestions, msgID)
+	delete(ps.msgTexts, msgID)
+	delete(ps.chatIDs, msgID)
+	delete(ps.uuids, msgID)
 	return true
+}
+
+func (ps *pendingPermStore) getUUID(msgID int) (string, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	uuid, ok := ps.uuids[msgID]
+	return uuid, ok
 }
 
 func (ps *pendingPermStore) getTarget(msgID int) (string, bool) {
@@ -168,11 +176,11 @@ func (ps *pendingPermStore) getChatID(msgID int) int64 {
 func (ps *pendingPermStore) cleanup(msgID int) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	delete(ps.entries, msgID)
 	delete(ps.targets, msgID)
 	delete(ps.suggestions, msgID)
 	delete(ps.msgTexts, msgID)
 	delete(ps.chatIDs, msgID)
+	delete(ps.uuids, msgID)
 }
 
 type questionMeta struct {
@@ -186,11 +194,13 @@ type questionMeta struct {
 }
 
 type toolNotifyEntry struct {
-	tmuxTarget string
-	toolName   string
-	questions  []questionMeta
-	chatID     int64
-	msgText    string
+	tmuxTarget  string
+	toolName    string
+	questions   []questionMeta
+	chatID      int64
+	msgText     string
+	pendingUUID string
+	resolved    bool
 }
 
 type toolNotifyStore struct {
@@ -215,41 +225,51 @@ func (ts *toolNotifyStore) get(msgID int) (*toolNotifyEntry, bool) {
 	return e, ok
 }
 
-type pendingAskEntry struct {
-	ch chan map[string]string
-}
-
-type pendingAskStore struct {
-	mu      sync.Mutex
-	entries map[int]*pendingAskEntry
-}
-
-var pendingAsks = &pendingAskStore{entries: make(map[int]*pendingAskEntry)}
-
-func (s *pendingAskStore) create(msgID int) chan map[string]string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ch := make(chan map[string]string, 1)
-	s.entries[msgID] = &pendingAskEntry{ch: ch}
-	return ch
-}
-
-func (s *pendingAskStore) resolve(msgID int, answers map[string]string) bool {
-	s.mu.Lock()
-	entry, ok := s.entries[msgID]
-	delete(s.entries, msgID)
-	s.mu.Unlock()
-	if !ok {
-		return false
+func (ts *toolNotifyStore) markResolved(msgID int) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if e, ok := ts.entries[msgID]; ok {
+		e.resolved = true
 	}
-	entry.ch <- answers
-	return true
 }
 
-func (s *pendingAskStore) cleanup(msgID int) {
-	s.mu.Lock()
-	delete(s.entries, msgID)
-	s.mu.Unlock()
+func (ts *toolNotifyStore) findByTmuxTarget(tmuxTarget string) (int, *toolNotifyEntry, bool) {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	for msgID, e := range ts.entries {
+		if e.tmuxTarget == tmuxTarget && e.toolName == "AskUserQuestion" && !e.resolved {
+			return msgID, e, true
+		}
+	}
+	return 0, nil, false
+}
+
+type pendingFileStore struct {
+	mu      sync.RWMutex
+	entries map[int]string
+}
+
+var pendingFiles = &pendingFileStore{
+	entries: make(map[int]string),
+}
+
+func (pfs *pendingFileStore) store(msgID int, uuid string) {
+	pfs.mu.Lock()
+	defer pfs.mu.Unlock()
+	pfs.entries[msgID] = uuid
+}
+
+func (pfs *pendingFileStore) get(msgID int) (string, bool) {
+	pfs.mu.RLock()
+	defer pfs.mu.RUnlock()
+	uuid, ok := pfs.entries[msgID]
+	return uuid, ok
+}
+
+func (pfs *pendingFileStore) delete(msgID int) {
+	pfs.mu.Lock()
+	defer pfs.mu.Unlock()
+	delete(pfs.entries, msgID)
 }
 
 type sessionCountStore struct {

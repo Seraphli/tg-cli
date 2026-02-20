@@ -1,10 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -48,12 +49,29 @@ func registerCallbackHandlers(bot *tele.Bot) {
 
 	bot.Handle(&tele.InlineButton{Unique: "perm"}, func(c tele.Context) error {
 		decision := c.Data()
-		_, err := resolvePermission(c.Message().ID, decision, nil)
+		uuid, uuidOk := pendingPerms.getUUID(c.Message().ID)
+		if !uuidOk {
+			uuid, uuidOk = pendingFiles.get(c.Message().ID)
+		}
+		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(c.Message().ID))
+		d, err := resolvePermission(c.Message().ID, decision, nil)
 		if err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
 		}
-		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s", c.Message().ID, decision))
-		bot.Edit(c.Message(), c.Message().Text)
+		if uuidOk {
+			var updatedPerms []interface{}
+			if d.UpdatedPermissions != nil {
+				var perms []interface{}
+				json.Unmarshal(d.UpdatedPermissions, &perms)
+				updatedPerms = perms
+			}
+			ccOutput := buildPermCCOutput(d.Behavior, d.Message, updatedPerms)
+			if err := writePendingAnswer(uuid, ccOutput); err != nil {
+				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+			}
+		}
+		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s uuid=%s", c.Message().ID, decision, uuid))
+		bot.Edit(c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabels))
 		displayText := decision
 		if strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
@@ -77,28 +95,48 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			if !ok {
 				return c.Respond(&tele.CallbackResponse{Text: "Expired"})
 			}
+			if entry.resolved {
+				return c.Respond(&tele.CallbackResponse{Text: "Already answered"})
+			}
 			if parts[1] == "chat" {
-				answers := map[string]string{"__chat": "true"}
-				if !pendingAsks.resolve(c.Message().ID, answers) {
-					target, _ := injector.ParseTarget(entry.tmuxTarget)
-					numOptions := 0
-					if len(entry.questions) > 0 {
-						numOptions = entry.questions[0].numOptions
-					}
-					for i := 0; i < numOptions+1; i++ {
-						injector.SendKeys(target, "Down")
-						time.Sleep(100 * time.Millisecond)
-					}
-					injector.SendKeys(target, "Enter")
+				uuid, ok := pendingFiles.get(c.Message().ID)
+				if !ok {
+					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 				}
-				logger.Info(fmt.Sprintf("AskUserQuestion 'Chat about this' selected: msg_id=%d", c.Message().ID))
+				path := filepath.Join(pendingDir(), uuid+".json")
+				pf, err := readPendingFile(path)
+				if err != nil {
+					return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+				}
+				answers := map[string]string{"__chat": "true"}
+				ccOutput := buildAskCCOutput(pf.Payload, answers)
+				if err := writePendingAnswer(uuid, ccOutput); err != nil {
+					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
+				}
+				toolNotifs.markResolved(c.Message().ID)
+				bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, "💬 Chat mode selected"))
+				logger.Info(fmt.Sprintf("AskUserQuestion 'Chat about this' selected: msg_id=%d uuid=%s", c.Message().ID, uuid))
 				return c.Respond(&tele.CallbackResponse{Text: "Chat mode"})
 			} else if parts[1] == "submit" {
-				answers := buildAnswers(entry)
-				if !pendingAsks.resolve(c.Message().ID, answers) {
-					return c.Respond(&tele.CallbackResponse{Text: "Already submitted"})
+				uuid, ok := pendingFiles.get(c.Message().ID)
+				if !ok {
+					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 				}
-				logger.Info(fmt.Sprintf("AskUserQuestion submitted: msg_id=%d answers=%v", c.Message().ID, answers))
+				path := filepath.Join(pendingDir(), uuid+".json")
+				pf, err := readPendingFile(path)
+				if err != nil {
+					return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+				}
+				answers := buildAnswers(entry)
+				ccOutput := buildAskCCOutput(pf.Payload, answers)
+				if err := writePendingAnswer(uuid, ccOutput); err != nil {
+					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
+				}
+				toolNotifs.markResolved(c.Message().ID)
+				bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
+				logger.Info(fmt.Sprintf("AskUserQuestion submitted: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 				return c.Respond(&tele.CallbackResponse{Text: "✅ Submitted"})
 			} else {
 				split := strings.SplitN(parts[1], ":", 2)
@@ -123,12 +161,24 @@ func registerCallbackHandlers(bot *tele.Bot) {
 						}
 					}
 					if !hasSubmit {
-						answers := buildAnswers(entry)
-						if !pendingAsks.resolve(c.Message().ID, answers) {
-							return c.Respond(&tele.CallbackResponse{Text: "Already submitted"})
+						uuid, ok := pendingFiles.get(c.Message().ID)
+						if !ok {
+							return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 						}
-						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved: msg_id=%d answers=%v", c.Message().ID, answers))
-						bot.Edit(c.Message(), c.Message().Text)
+						path := filepath.Join(pendingDir(), uuid+".json")
+						pf, err := readPendingFile(path)
+						if err != nil {
+							return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+						}
+						answers := buildAnswers(entry)
+						ccOutput := buildAskCCOutput(pf.Payload, answers)
+						if err := writePendingAnswer(uuid, ccOutput); err != nil {
+							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+							return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
+						}
+						toolNotifs.markResolved(c.Message().ID)
+						bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
+						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 						return c.Respond(&tele.CallbackResponse{Text: "✅ Selected"})
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.optionLabels[optIdx]))
