@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,42 @@ import (
 	"golang.org/x/term"
 	tele "gopkg.in/telebot.v3"
 )
+
+func startTypingLoop(ctx context.Context, bot *tele.Bot, creds *config.Credentials) {
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			anyUnboundRunning := false
+			sentChats := make(map[int64]bool)
+			for _, tmuxTarget := range sessionState.all() {
+				if !isSessionRunning(tmuxTarget) {
+					continue
+				}
+				if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
+					if !sentChats[chatID] {
+						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
+						sentChats[chatID] = true
+					}
+				} else {
+					anyUnboundRunning = true
+				}
+			}
+			if anyUnboundRunning {
+				defaultChatIDStr := pairing.GetDefaultChatID()
+				if defaultChatIDStr != "" {
+					chatID, _ := strconv.ParseInt(defaultChatIDStr, 10, 64)
+					if chatID != 0 && !sentChats[chatID] {
+						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
+					}
+				}
+			}
+		}
+	}
+}
 
 var BotCmd = &cobra.Command{
 	Use:   "bot",
@@ -124,6 +161,9 @@ func runBot(cmd *cobra.Command, args []string) {
 	srv := &http.Server{Addr: addr, Handler: mux}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	typingCtx, typingCancel := context.WithCancel(context.Background())
+	defer typingCancel()
+	go startTypingLoop(typingCtx, bot, &creds)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

@@ -52,6 +52,64 @@ inject_prompt() {
   return 0
 }
 
+wait_for_bot_ready() {
+  local timeout=${1:-$TIMEOUT}
+  local elapsed=0
+  while [ $elapsed -lt $timeout ]; do
+    if curl -sf -o /dev/null "http://127.0.0.1:$TEST_PORT/session/idle" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "WARN: wait_for_bot_ready timed out after ${timeout}s"
+  return 1
+}
+
+wait_for_cc_idle() {
+  local timeout=${1:-$TIMEOUT}
+  local target=${2:-}
+  local url="http://127.0.0.1:$TEST_PORT/session/idle"
+  if [ -n "$target" ]; then
+    local encoded_target
+    encoded_target=$(printf '%s' "$target" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+    url="${url}?target=${encoded_target}"
+  fi
+  local elapsed=0
+  while [ $elapsed -lt $timeout ]; do
+    local idle
+    idle=$(curl -sf "$url" 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null) || true
+    if [ "$idle" = "True" ]; then
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "WARN: wait_for_cc_idle timed out after ${timeout}s"
+  return 1
+}
+
+wait_for_pane_content() {
+  local pattern="$1"
+  local timeout=${2:-$TIMEOUT}
+  local target=${3:-$CLAUDE_PANE}
+  local encoded_target
+  encoded_target=$(printf '%s' "$target" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+  local elapsed=0
+  while [ $elapsed -lt $timeout ]; do
+    local content
+    content=$(curl -sf "http://127.0.0.1:$TEST_PORT/capture?target=${encoded_target}" 2>/dev/null) || true
+    if echo "$content" | grep -q "$pattern" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "WARN: wait_for_pane_content('$pattern') timed out after ${timeout}s"
+  return 1
+}
+
 ensure_credentials() {
   if [ ! -f "$CREDENTIALS" ]; then
     echo "ERROR: $CREDENTIALS not found. Complete pairing first."
@@ -71,7 +129,7 @@ start_bot() {
   tmux send-keys -t "$BOT_SESSION" \
     "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --debug" Enter
   echo "Waiting for bot to start..."
-  sleep 5
+  wait_for_bot_ready
 }
 
 start_claude() {
@@ -81,8 +139,8 @@ start_claude() {
   tmux send-keys -t "$CLAUDE_SESSION" \
     "claude --model haiku --allow-dangerously-skip-permissions --setting-sources local --settings $TEST_SETTINGS" Enter
   echo "Waiting for Claude to start..."
-  sleep 5
   # Check if trust dialog is present before sending Enter
+  sleep 5
   PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -qi "trust"; then
     tmux send-keys -t "$CLAUDE_SESSION" Enter
@@ -90,7 +148,8 @@ start_claude() {
   else
     echo "No trust dialog detected, skipping."
   fi
-  sleep 8
+  echo "Waiting for Claude to reach idle state..."
+  wait_for_cc_idle
 }
 
 setup_hooks() {

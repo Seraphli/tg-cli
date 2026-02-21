@@ -13,8 +13,7 @@ LOG_BEFORE_MQ=$(wc -l < "$LOG_FILE")
 # Send prompt that triggers multi-question AskUserQuestion
 pane_log "[Phase 6] BEFORE multiQ prompt"
 inject_prompt "First write a brief paragraph, then ask me TWO questions using AskUserQuestion tool with these exact parameters: questions array with 2 items. Question 1: header 'Preference', question 'Which do you prefer?', two options - 'Alpha' with description 'First choice', 'Beta' with description 'Second choice', multiSelect false. Question 2: header 'Colors', question 'Pick colors', three options - 'Red' with description 'Red color', 'Blue' with description 'Blue color', 'Green' with description 'Green color', multiSelect true."
-sleep 5
-pane_log "[Phase 6] 5s AFTER sending multiQ prompt"
+pane_log "[Phase 6] AFTER sending multiQ prompt"
 
 # Wait for AskUserQuestion notification
 ELAPSED=0
@@ -31,16 +30,16 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for multiQ AskUserQuestion... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-sleep 5
-pane_log "[Phase 6] 5s AFTER hook notification detected"
+wait_for_cc_idle
+pane_log "[Phase 6] AFTER hook notification detected (idle)"
 
 if [ "$MQ_FOUND" = true ]; then
   pass "Multi-question AskUserQuestion notification received"
 
   # Verify Update notification sent BEFORE AskUserQuestion
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(echo "$NEW_LOGS" | awk '/Notification sent.*PreToolUse/{print NR; exit}')
-  AQ_LINE=$(echo "$NEW_LOGS" | awk '/AskUserQuestion sent/{print NR; exit}')
+  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  AQ_LINE=$(awk '/AskUserQuestion sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -n "$UPDATE_LINE" ] && [ -n "$AQ_LINE" ]; then
     if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
       pass "Update notification sent BEFORE AskUserQuestion in Phase 6 (line $UPDATE_LINE < $AQ_LINE)"
@@ -52,7 +51,7 @@ if [ "$MQ_FOUND" = true ]; then
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
-  MQ_CONTENT=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep "AskUserQuestion sent" | grep -oP 'content=\K.+' | head -1)
+  MQ_CONTENT=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion sent" | grep -oP 'content=\K.+' || true)
   if [ -n "$MQ_CONTENT" ]; then
     pass "AskUserQuestion sent log contains content in Phase 6: $MQ_CONTENT"
   else
@@ -64,7 +63,7 @@ else
 fi
 
 # Extract msg_id from bot log
-MQ_MSG_ID=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -oP 'AskUserQuestion.*msg_id=\K[0-9]+' | head -1)
+MQ_MSG_ID=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -oPm1 'AskUserQuestion.*msg_id=\K[0-9]+' || true)
 echo "Multi-question msg_id: $MQ_MSG_ID"
 
 if [ -z "$MQ_MSG_ID" ]; then
@@ -113,7 +112,7 @@ else
   pane_log "[Phase 6] 2s AFTER Q2 toggle 1 API"
 
   # Verify option label in log (after API calls) — search within Phase 6 log range
-  LABEL_LOGS=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep "AskUserQuestion.*label=" | head -3)
+  LABEL_LOGS=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -m3 "AskUserQuestion.*label=" || true)
   if [ -n "$LABEL_LOGS" ]; then
     pass "AskUserQuestion option log contains label in Phase 6"
   else
@@ -135,8 +134,8 @@ else
   else
     fail "Submit API returned $SUBMIT_CODE"
   fi
-  sleep 5
-  pane_log "[Phase 6] 5s AFTER submit API"
+  wait_for_cc_idle
+  pane_log "[Phase 6] AFTER submit API (idle)"
 
   ELAPSED=0
   STOP6_FOUND=false
@@ -155,7 +154,7 @@ else
   pane_log "[Phase 6] AFTER Stop detected"
 
   if [ "$STOP6_FOUND" = true ]; then
-    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep -oP 'Notification sent.*Stop.*body_len=\K[0-9]+' | head -1)
+    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep -oPm1 'Notification sent.*Stop.*body_len=\K[0-9]+' || true)
     if [ -n "$BODY_LEN" ] && [ "$BODY_LEN" -gt 0 ]; then
       pass "Stop notification has content after multiQ (body_len=$BODY_LEN)"
     else

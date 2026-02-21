@@ -10,7 +10,7 @@ ensure_infrastructure
 
 # Extract tmux_target from SessionStart log
 TMUX_TARGET=""
-SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "Notification sent.*SessionStart" | head -1 || true)
+SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -m1 "Notification sent.*SessionStart" || true)
 if [ -n "$SESSION_START_LINE" ]; then
   # Extract tmux target like "session:window.pane" from the log body
   TMUX_TARGET=$(echo "$SESSION_START_LINE" | grep -oP 'tmux=\K[^[:space:]]+' || true)
@@ -49,8 +49,7 @@ fi
 LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
 pane_log "[Phase 8] BEFORE 'say test routing' prompt"
 inject_prompt "say test routing"
-sleep 5
-pane_log "[Phase 8] 5s AFTER routing prompt"
+pane_log "[Phase 8] AFTER routing prompt"
 
 # Wait for Stop notification
 ELAPSED=0
@@ -76,7 +75,7 @@ fi
 
 # Verify "Route resolved" log line exists
 if tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep "Route resolved: tmux=" > /dev/null 2>&1; then
-  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep "Route resolved: tmux=" | head -1)
+  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -m1 "Route resolved: tmux=" || true)
   pass "Route resolved log found: $ROUTE_LOG"
 else
   fail "Route resolved log not found"
@@ -112,8 +111,7 @@ ROUTE_COUNT_BEFORE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route
 
 pane_log "[Phase 8] BEFORE 'say test default' prompt"
 inject_prompt "say test default"
-sleep 5
-pane_log "[Phase 8] 5s AFTER default prompt"
+pane_log "[Phase 8] AFTER default prompt"
 
 # Wait for Stop notification
 ELAPSED=0

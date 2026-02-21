@@ -18,8 +18,7 @@ pane_log "[Phase 10] BEFORE sending AskUserQuestion prompt for escape test"
 # 1. Inject prompt to trigger AskUserQuestion
 inject_prompt "Ask me a question using AskUserQuestion tool with header 'Escape Test' and two options: 'Yes' with description 'Confirm', 'No' with description 'Deny'. Question: 'Continue?'"
 
-sleep 5
-pane_log "[Phase 10] 5s AFTER sending prompt"
+pane_log "[Phase 10] AFTER sending prompt"
 
 # 2. Wait for AskUserQuestion notification in bot log
 ELAPSED=0
@@ -44,7 +43,7 @@ fi
 
 pass "AskUserQuestion triggered for escape test"
 
-sleep 3
+wait_for_cc_idle
 
 # 3. Capture pane BEFORE escape — verify AskUserQuestion UI is visible
 BEFORE_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')
@@ -68,8 +67,9 @@ else
 fi
 
 # 5. Wait for TUI to update, then capture pane AFTER escape
-sleep 5
-pane_log "[Phase 10] 5s AFTER escape"
+wait_for_cc_idle
+wait_for_pane_content "User declined"
+pane_log "[Phase 10] AFTER escape (idle)"
 
 AFTER_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')
 

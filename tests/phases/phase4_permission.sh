@@ -14,8 +14,7 @@ LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[Phase 4] BEFORE permission prompt"
 inject_prompt "First write a brief paragraph explaining what you are about to do, then run this bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt"
-sleep 5
-pane_log "[Phase 4] 5s AFTER sending permission prompt"
+pane_log "[Phase 4] AFTER sending permission prompt"
 
 # Wait for permission request in bot log
 ELAPSED=0
@@ -26,7 +25,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   if [ "$LOG_NOW" -gt "$LOG_BEFORE_PERM" ]; then
     if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Permission request sent" > /dev/null 2>&1; then
       PERM_FOUND=true
-      PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -oP 'msg_id=\K[0-9]+' | head -1)
+      PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -oPm1 'msg_id=\K[0-9]+' || true)
       break
     fi
   fi
@@ -34,16 +33,16 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-sleep 5
-pane_log "[Phase 4] 5s AFTER permission detected"
+wait_for_cc_idle
+pane_log "[Phase 4] AFTER permission detected (idle)"
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
 
   # Verify Update notification sent BEFORE PermissionRequest
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(echo "$NEW_LOGS" | awk '/Notification sent.*PreToolUse/{print NR; exit}')
-  PERM_LINE=$(echo "$NEW_LOGS" | awk '/Permission request sent/{print NR; exit}')
+  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  PERM_LINE=$(awk '/Permission request sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -n "$UPDATE_LINE" ] && [ -n "$PERM_LINE" ]; then
     if [ "$UPDATE_LINE" -lt "$PERM_LINE" ]; then
       pass "Update sent BEFORE PermissionRequest (line $UPDATE_LINE < $PERM_LINE)"
@@ -66,11 +65,11 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   else
     fail "Permission decide API returned unexpected: $DECIDE_RESP"
   fi
-  sleep 5
-  pane_log "[Phase 4] 5s AFTER approve API call"
+  wait_for_cc_idle
+  pane_log "[Phase 4] AFTER approve API call (idle)"
 
   # Wait for Stop notification (Claude completes after permission approved)
-  sleep 10
+  wait_for_cc_idle
   LOG_AFTER_PERM=$(wc -l < "$LOG_FILE")
   if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Permission resolved" > /dev/null 2>&1; then
     pass "Permission resolved and logged"

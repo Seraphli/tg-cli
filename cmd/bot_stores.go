@@ -299,6 +299,47 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 	delete(s.locks, sessionID)
 }
 
+// sessionStateStore tracks active CC sessions and their tmux targets.
+type sessionStateStore struct {
+	mu       sync.RWMutex
+	sessions map[string]string // session_id -> tmux_target
+}
+
+var sessionState = &sessionStateStore{sessions: make(map[string]string)}
+
+func (s *sessionStateStore) add(sessionID, tmuxTarget string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[sessionID] = tmuxTarget
+}
+
+func (s *sessionStateStore) remove(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, sessionID)
+}
+
+func (s *sessionStateStore) all() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cp := make(map[string]string, len(s.sessions))
+	for k, v := range s.sessions {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *sessionStateStore) findByTarget(target string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for sid, t := range s.sessions {
+		if t == target {
+			return sid, true
+		}
+	}
+	return "", false
+}
+
 type reactionEntry struct {
 	chatID int64
 	msgID  int

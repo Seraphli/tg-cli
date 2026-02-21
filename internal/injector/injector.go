@@ -104,3 +104,14 @@ func CapturePane(target TmuxTarget) (string, error) {
 	}
 	return strings.TrimRight(string(out), "\n"), nil
 }
+
+// GetPaneTitle reads the tmux pane title via #{pane_title} format.
+// Idle CC shows "✳ <name>", running CC shows spinner characters.
+func GetPaneTitle(target TmuxTarget) (string, error) {
+	cmd := tmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_title}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
