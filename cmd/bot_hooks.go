@@ -303,6 +303,10 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			return
 		}
 		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
+		// Re-register session on any hook event (survives bot restart)
+		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
+			sessionState.add(p.SessionID, p.TmuxTarget)
+		}
 		chat, chatID := resolveChat(p.TmuxTarget)
 		switch event {
 		case "SessionStart":
