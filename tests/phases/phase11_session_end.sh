@@ -11,8 +11,7 @@ ensure_infrastructure
 LOG_BEFORE_EXIT=$(wc -l < "$LOG_FILE")
 pane_log "[Phase 11] BEFORE /exit"
 inject_prompt "/exit"
-sleep 5
-pane_log "[Phase 11] 5s AFTER /exit"
+pane_log "[Phase 11] AFTER /exit"
 
 ELAPSED=0
 SESSION_END_FOUND=false

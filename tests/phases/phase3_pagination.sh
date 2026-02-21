@@ -13,15 +13,14 @@ LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
 
 # Wait for Claude to settle after Phase 2
 echo "Waiting for Claude to settle..."
-sleep 3
+wait_for_cc_idle
 
 # Inject a long-output prompt to trigger pagination
 LONG_PROMPT="list the numbers from 1 to 100, each on its own line, in the format 'Number NNN: test line for pagination verification'"
 pane_log "[Phase 3] BEFORE injecting long prompt"
 inject_prompt "$LONG_PROMPT"
 echo "Long prompt injected, waiting for Claude to respond and trigger pagination..."
-sleep 5
-pane_log "[Phase 3] 5s AFTER injecting long prompt"
+pane_log "[Phase 3] AFTER injecting long prompt"
 
 # Wait for bot log to contain multi-page notification indicator
 ELAPSED=0
@@ -33,7 +32,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
     NEW_PAGE_LOGS=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE")
     if echo "$NEW_PAGE_LOGS" | grep -E "pages, msg_id=" > /dev/null 2>&1; then
       PAGINATION_FOUND=true
-      MSG_ID=$(echo "$NEW_PAGE_LOGS" | grep -oP 'msg_id=\K[0-9]+' | head -1)
+      MSG_ID=$(grep -oPm1 'msg_id=\K[0-9]+' <<< "$NEW_PAGE_LOGS" || true)
       break
     fi
   fi
@@ -42,8 +41,8 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for pagination... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-sleep 5
-pane_log "[Phase 3] 5s AFTER pagination detected"
+wait_for_cc_idle
+pane_log "[Phase 3] AFTER pagination detected (idle)"
 
 if [ "$PAGINATION_FOUND" = true ]; then
   pass "Long message triggered pagination (real Claude output)"

@@ -315,6 +315,10 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			})
 			bot.Send(chat, text)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
+			if p.SessionID != "" && p.TmuxTarget != "" {
+				sessionState.add(p.SessionID, p.TmuxTarget)
+				logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
+			}
 		case "SessionEnd":
 			if chat != nil {
 				text := notify.BuildNotificationText(notify.NotificationData{
@@ -322,6 +326,10 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				})
 				bot.Send(chat, text)
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
+			}
+			if p.SessionID != "" {
+				sessionState.remove(p.SessionID)
+				logger.Info(fmt.Sprintf("Session untracked: %s", p.SessionID))
 			}
 			pages.cleanupSession(p.SessionID)
 			sessionCounts.cleanup(p.SessionID)

@@ -15,8 +15,7 @@ pane_log "[Phase 5] BEFORE sending AskUserQuestion prompt"
 # Send prompt that should trigger AskUserQuestion
 inject_prompt "First write a brief paragraph explaining what you are about to do, then ask me a question using AskUserQuestion tool with header 'Test Header' and two options: 'Option A' with description 'First option desc', 'Option B' with description 'Second option desc'. Question: 'Which option?'"
 
-sleep 5
-pane_log "[Phase 5] 5s AFTER sending prompt"
+pane_log "[Phase 5] AFTER sending prompt"
 
 # Wait for AskUserQuestion notification
 ELAPSED=0
@@ -28,7 +27,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
     NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
     if echo "$NEW_LOGS" | grep "AskUserQuestion sent" > /dev/null 2>&1; then
       AQ_FOUND=true
-      AQ_MSG_ID=$(echo "$NEW_LOGS" | grep -oP 'AskUserQuestion sent.*msg_id=\K[0-9]+' | head -1)
+      AQ_MSG_ID=$(grep -oPm1 'AskUserQuestion sent.*msg_id=\K[0-9]+' <<< "$NEW_LOGS" || true)
       break
     fi
   fi
@@ -36,16 +35,16 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-sleep 5
-pane_log "[Phase 5] 5s AFTER hook notification"
+wait_for_cc_idle
+pane_log "[Phase 5] AFTER hook notification (idle)"
 
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
 
   # Verify Update notification sent BEFORE AskUserQuestion
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(echo "$NEW_LOGS" | awk '/Notification sent.*PreToolUse/{print NR; exit}')
-  AQ_LINE=$(echo "$NEW_LOGS" | awk '/AskUserQuestion sent/{print NR; exit}')
+  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  AQ_LINE=$(awk '/AskUserQuestion sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -n "$UPDATE_LINE" ] && [ -n "$AQ_LINE" ]; then
     if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
       pass "Update notification sent BEFORE AskUserQuestion (line $UPDATE_LINE < $AQ_LINE)"
@@ -57,7 +56,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
-  AQ_CONTENT=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "AskUserQuestion sent" | grep -oP 'content=\K.+' | head -1)
+  AQ_CONTENT=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion sent" | grep -oP 'content=\K.+' || true)
   if [ -n "$AQ_CONTENT" ]; then
     pass "AskUserQuestion sent log contains content: $AQ_CONTENT"
   else
@@ -84,8 +83,8 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     fail "AskUserQuestion select API returned $SELECT_CODE"
   fi
 
-  sleep 5
-  pane_log "[Phase 5] 5s AFTER option selection API"
+  wait_for_cc_idle
+  pane_log "[Phase 5] AFTER option selection API (idle)"
 
   # Verify bot logged the selection with label
   sleep 2
@@ -118,7 +117,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pane_log "[Phase 5] AFTER Stop detected"
 
   if [ "$STOP5_FOUND" = true ]; then
-    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -oP 'Notification sent.*Stop.*body_len=\K[0-9]+' | head -1)
+    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -oPm1 'Notification sent.*Stop.*body_len=\K[0-9]+' || true)
     if [ -n "$BODY_LEN" ] && [ "$BODY_LEN" -gt 0 ]; then
       pass "Stop notification has content after AskUserQuestion (body_len=$BODY_LEN)"
     else
@@ -161,8 +160,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   # Send prompt for free-text question (min 2 options required by AskUserQuestion)
   inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Free Text Test' and two options: 'Blue' with description 'The color blue', 'Red' with description 'The color red'. Question: 'What is your favorite color?'"
 
-  sleep 5
-  pane_log "[Phase 5] 5s AFTER sending free-text prompt"
+  pane_log "[Phase 5] AFTER sending free-text prompt"
 
   # Wait for AskUserQuestion notification
   ELAPSED=0
@@ -174,7 +172,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       NEW_LOGS=$(tail -n +"$((LOG_BEFORE_FT + 1))" "$LOG_FILE")
       if echo "$NEW_LOGS" | grep "AskUserQuestion sent" > /dev/null 2>&1; then
         FT_FOUND=true
-        FT_MSG_ID=$(echo "$NEW_LOGS" | grep -oP 'AskUserQuestion sent.*msg_id=\K[0-9]+' | head -1)
+        FT_MSG_ID=$(grep -oPm1 'AskUserQuestion sent.*msg_id=\K[0-9]+' <<< "$NEW_LOGS" || true)
         break
       fi
     fi
@@ -200,8 +198,8 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Free-text API returned $FT_CODE"
     fi
 
-    sleep 5
-    pane_log "[Phase 5] 5s AFTER free-text API call"
+    wait_for_cc_idle
+    pane_log "[Phase 5] AFTER free-text API call (idle)"
 
     # Wait for Stop notification
     ELAPSED=0
@@ -251,7 +249,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   # --- Group direct free-text test (via /group/text API) ---
   # Extract tmux_target from SessionStart log (same pattern as Phase 8)
   TMUX_TARGET=""
-  SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "Notification sent.*SessionStart" | head -1 || true)
+  SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -m1 "Notification sent.*SessionStart" || true)
   if [ -n "$SESSION_START_LINE" ]; then
     TMUX_TARGET=$(echo "$SESSION_START_LINE" | grep -oP 'tmux=\K[^[:space:]]+' || true)
   fi
@@ -266,8 +264,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   # Send prompt for group direct text question
   inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Group Test' and two options: 'Yes' with description 'Agree', 'No' with description 'Disagree'. Question: 'Do you agree?'"
 
-  sleep 5
-  pane_log "[Phase 5] 5s AFTER sending group-text prompt"
+  pane_log "[Phase 5] AFTER sending group-text prompt"
 
   # Wait for AskUserQuestion notification
   ELAPSED=0
@@ -279,7 +276,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       NEW_LOGS=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE")
       if echo "$NEW_LOGS" | grep "AskUserQuestion sent" > /dev/null 2>&1; then
         GT_FOUND=true
-        GT_MSG_ID=$(echo "$NEW_LOGS" | grep -oP 'AskUserQuestion sent.*msg_id=\K[0-9]+' | head -1)
+        GT_MSG_ID=$(grep -oPm1 'AskUserQuestion sent.*msg_id=\K[0-9]+' <<< "$NEW_LOGS" || true)
         break
       fi
     fi
@@ -309,11 +306,11 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Group text API returned code=$GT_CODE body=$GT_BODY"
     fi
 
-    sleep 5
-    pane_log "[Phase 5] 5s AFTER group-text API call"
+    wait_for_cc_idle
+    pane_log "[Phase 5] AFTER group-text API call (idle)"
 
     # Verify bot log shows resolution via group text API
-    GT_RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | grep "AskUserQuestion resolved via group text API" | head -1)
+    GT_RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion resolved via group text API" || true)
     if [ -n "$GT_RESOLVE_LOG" ]; then
       pass "AskUserQuestion resolved via group text API logged"
     else

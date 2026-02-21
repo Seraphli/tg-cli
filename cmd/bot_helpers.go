@@ -624,6 +624,26 @@ func handleEscapeCommand(c tele.Context, target injector.TmuxTarget) error {
 	return c.Reply("⏹ Escape sent")
 }
 
+func getPaneTitle(tmuxTarget string) string {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return ""
+	}
+	title, err := injector.GetPaneTitle(target)
+	if err != nil {
+		return ""
+	}
+	return title
+}
+
+func isSessionRunning(tmuxTarget string) bool {
+	title := getPaneTitle(tmuxTarget)
+	if title == "" {
+		return false
+	}
+	return !strings.HasPrefix(title, "✳")
+}
+
 // hookPayload represents the CC payload enriched by hook.go
 type hookPayload struct {
 	HookEventName   string          `json:"hook_event_name"`

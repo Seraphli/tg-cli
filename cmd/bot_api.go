@@ -475,6 +475,39 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": finalMode})
 	})
+	mux.HandleFunc("/session/idle", func(w http.ResponseWriter, r *http.Request) {
+		targetFilter := r.URL.Query().Get("target")
+		sessions := sessionState.all()
+
+		type sessionInfo struct {
+			Target string `json:"target"`
+			Idle   bool   `json:"idle"`
+		}
+		result := make(map[string]sessionInfo)
+		allIdle := len(sessions) > 0 // empty sessions = not idle
+
+		for sid, target := range sessions {
+			if targetFilter != "" && target != targetFilter {
+				continue
+			}
+			running := isSessionRunning(target)
+			if running {
+				allIdle = false
+			}
+			result[sid] = sessionInfo{Target: target, Idle: !running}
+		}
+
+		// If target filter specified but no match found, not idle
+		if targetFilter != "" && len(result) == 0 {
+			allIdle = false
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"idle":     allIdle,
+			"sessions": result,
+		})
+	})
 	mux.HandleFunc("/perm/status", func(w http.ResponseWriter, r *http.Request) {
 		targetStr := r.URL.Query().Get("target")
 		if targetStr == "" {
