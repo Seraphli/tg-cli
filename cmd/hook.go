@@ -81,6 +81,7 @@ type PendingFileHook struct {
 	SessionID string          `json:"session_id"`
 	CCOutput  json.RawMessage `json:"cc_output"`
 	CreatedAt time.Time       `json:"created_at"`
+	HookPID   int             `json:"hook_pid"`
 }
 
 // writePendingFileHook atomically writes a pending file (hook.go local version)
@@ -150,6 +151,7 @@ func runHook(cmd *cobra.Command, args []string) {
 			Status:    "pending",
 			Payload:   enrichedJSON,
 			CreatedAt: time.Now(),
+			HookPID:   os.Getpid(),
 		}
 		if err := writePendingFileHook(pendingPath, &pf); err != nil {
 			hookExit(1, fmt.Sprintf("write pending file error: %v", err))
@@ -160,7 +162,12 @@ func runHook(cmd *cobra.Command, args []string) {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 		go func() {
-			<-sigCh
+			sig := <-sigCh
+			hookLog("received signal: %v (ppid=%d)", sig, os.Getppid())
+			cancelClient := &http.Client{Timeout: 2 * time.Second}
+			cancelURL := fmt.Sprintf("http://127.0.0.1:%d/pending/cancel?uuid=%s", port, uuid)
+			hookLog("POST %s (cancel)", cancelURL)
+			cancelClient.Post(cancelURL, "", nil)
 			os.Remove(pendingPath)
 			hookExit(0, "signal cleanup")
 		}()
@@ -172,8 +179,9 @@ func runHook(cmd *cobra.Command, args []string) {
 		notifyClient.Post(notifyURL, "application/json", bytes.NewReader(enrichedJSON))
 
 		// 4. Poll for status=answered
-		hookLog("polling for answer...")
+		hookLog("polling for answer... (ppid=%d)", os.Getppid())
 		for {
+			hookLog("poll tick: ppid=%d", os.Getppid())
 			data, err := os.ReadFile(pendingPath)
 			if err == nil && len(data) > 0 {
 				var pf PendingFileHook

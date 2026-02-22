@@ -109,24 +109,28 @@ func registerMessageHandlers(bot *tele.Bot) {
 				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
 					uuid, uuidOk := pendingFiles.get(msgID)
 					if uuidOk {
-						path := filepath.Join(pendingDir(), uuid+".json")
-						pf, err := readPendingFile(path)
-						if err == nil {
-							answers := make(map[string]string)
-							if len(entry.questions) > 0 {
-								answers[entry.questions[0].questionText] = c.Message().Text
+						if handleStalePending(msgID, uuid, bot) {
+							// Stale: hook dead or file missing, fall through to InjectText
+						} else {
+							path := filepath.Join(pendingDir(), uuid+".json")
+							pf, err := readPendingFile(path)
+							if err == nil {
+								answers := make(map[string]string)
+								if len(entry.questions) > 0 {
+									answers[entry.questions[0].questionText] = c.Message().Text
+								}
+								ccOutput := buildAskCCOutput(pf.Payload, answers)
+								if err := writePendingAnswer(uuid, ccOutput); err != nil {
+									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+								} else {
+									toolNotifs.markResolved(msgID)
+									logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(c.Message().Text, 200)))
+									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+								}
+								reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+								return nil
 							}
-							ccOutput := buildAskCCOutput(pf.Payload, answers)
-							if err := writePendingAnswer(uuid, ccOutput); err != nil {
-								logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-							} else {
-								toolNotifs.markResolved(msgID)
-								logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(c.Message().Text, 200)))
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-								bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
-							}
-							reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
-							return nil
 						}
 					}
 				}
@@ -203,7 +207,14 @@ func registerMessageHandlers(bot *tele.Bot) {
 				case "AskUserQuestion":
 					if !entry.resolved {
 						uuid, ok := pendingFiles.get(replyTo.ID)
-						if ok {
+						if !ok {
+							// No pending file mapping, treat as stale
+							toolNotifs.markResolved(replyTo.ID)
+							injector.InjectText(target, c.Message().Text)
+						} else if handleStalePending(replyTo.ID, uuid, bot) {
+							// Stale: hook dead or file missing, inject user text
+							injector.InjectText(target, c.Message().Text)
+						} else {
 							path := filepath.Join(pendingDir(), uuid+".json")
 							pf, err := readPendingFile(path)
 							if err == nil {
@@ -277,27 +288,31 @@ func registerMessageHandlers(bot *tele.Bot) {
 				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
 					uuid, uuidOk := pendingFiles.get(msgID)
 					if uuidOk {
-						path := filepath.Join(pendingDir(), uuid+".json")
-						pf, err := readPendingFile(path)
-						if err == nil {
-							answers := make(map[string]string)
-							if len(entry.questions) > 0 {
-								answers[entry.questions[0].questionText] = text
+						if handleStalePending(msgID, uuid, bot) {
+							// Stale: hook dead or file missing, fall through to InjectText
+						} else {
+							path := filepath.Join(pendingDir(), uuid+".json")
+							pf, err := readPendingFile(path)
+							if err == nil {
+								answers := make(map[string]string)
+								if len(entry.questions) > 0 {
+									answers[entry.questions[0].questionText] = text
+								}
+								ccOutput := buildAskCCOutput(pf.Payload, answers)
+								if err := writePendingAnswer(uuid, ccOutput); err != nil {
+									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+								} else {
+									toolNotifs.markResolved(msgID)
+									logger.Info(fmt.Sprintf("AskUserQuestion custom voice via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
+								}
+								sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🏙️ %s", text))
+								if sentMsg != nil {
+									reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
+								}
+								return nil
 							}
-							ccOutput := buildAskCCOutput(pf.Payload, answers)
-							if err := writePendingAnswer(uuid, ccOutput); err != nil {
-								logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-							} else {
-								toolNotifs.markResolved(msgID)
-								logger.Info(fmt.Sprintf("AskUserQuestion custom voice via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-								bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
-							}
-							sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-							if sentMsg != nil {
-								reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
-							}
-							return nil
 						}
 					}
 				}
@@ -362,17 +377,29 @@ func registerMessageHandlers(bot *tele.Bot) {
 				case "AskUserQuestion":
 					if entry.resolved {
 						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: already resolved: msg_id=%d", replyTo.ID))
-						return c.Reply("❌ Question already answered.")
+						toolNotifs.markResolved(replyTo.ID)
+						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
+						injector.InjectText(staleTarget, text)
+						return nil
 					}
 					uuid, ok := pendingFiles.get(replyTo.ID)
 					if !ok {
-						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: pending file not found: msg_id=%d", replyTo.ID))
-						return c.Reply("❌ Question expired.")
+						// No pending file mapping, treat as stale
+						toolNotifs.markResolved(replyTo.ID)
+						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
+						injector.InjectText(staleTarget, text)
+						return nil
+					}
+					if handleStalePending(replyTo.ID, uuid, bot) {
+						// Stale: hook dead or file missing, inject voice text
+						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
+						injector.InjectText(staleTarget, text)
+						return nil
 					}
 					path := filepath.Join(pendingDir(), uuid+".json")
 					pf, err := readPendingFile(path)
 					if err != nil {
-						logger.Error(fmt.Sprintf("Failed to read pending file: %v", err))
+						// Unexpected read error after stale check passed
 						return c.Reply("❌ Failed to read pending file.")
 					}
 					answers := make(map[string]string)
@@ -389,7 +416,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 					editChat := &tele.Chat{ID: entry.chatID}
 					editMsg := &tele.Message{ID: replyTo.ID, Chat: editChat}
 					bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
-					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
+					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🏙️ %s", text))
 					if sentMsg != nil {
 						reactAndTrack(bot, c.Message().Chat, sentMsg, entry.tmuxTarget)
 					}

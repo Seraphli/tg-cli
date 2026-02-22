@@ -122,6 +122,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					http.Error(w, "pending file not found", 404)
 					return
 				}
+				if handleStalePending(msgID, uuid, bot) {
+					http.Error(w, "hook dead (stale pending)", 410)
+					return
+				}
 				path := filepath.Join(pendingDir(), uuid+".json")
 				pf, err := readPendingFile(path)
 				if err != nil {
@@ -414,6 +418,21 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, "pending file not found", 404)
 			return
 		}
+		if handleStalePending(msgID, uuid, bot) {
+			// Stale: hook dead or file missing, inject text instead
+			t, err := injector.ParseTarget(target)
+			if err != nil {
+				http.Error(w, "invalid target", 400)
+				return
+			}
+			if err := injector.InjectText(t, text); err != nil {
+				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
+				return
+			}
+			logger.Info(fmt.Sprintf("Group text API injected: target=%s text=%s", target, truncateStr(text, 200)))
+			fmt.Fprintf(w, "injected")
+			return
+		}
 		path := filepath.Join(pendingDir(), uuid+".json")
 		pf, err := readPendingFile(path)
 		if err != nil {
@@ -507,6 +526,37 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			"idle":     allIdle,
 			"sessions": result,
 		})
+	})
+	mux.HandleFunc("/pending/cancel", func(w http.ResponseWriter, r *http.Request) {
+		uuid := r.URL.Query().Get("uuid")
+		if uuid == "" {
+			http.Error(w, "missing uuid", 400)
+			return
+		}
+		msgID, found := pendingFiles.findByUUID(uuid)
+		if !found {
+			w.WriteHeader(200)
+			return
+		}
+		// Clean up AskUserQuestion state
+		if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
+			toolNotifs.markResolved(msgID)
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+			bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+			logger.Info(fmt.Sprintf("Pending cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
+		}
+		// Clean up PermissionRequest state — read data BEFORE resolve
+		if _, ok := pendingPerms.getTarget(msgID); ok {
+			permChatID := pendingPerms.getChatID(msgID)
+			permMsgText := pendingPerms.getMsgText(msgID)
+			sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(msgID))
+			pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
+			bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabels))
+			logger.Info(fmt.Sprintf("Permission cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
+		}
+		pendingFiles.remove(msgID)
+		w.WriteHeader(200)
 	})
 	mux.HandleFunc("/perm/status", func(w http.ResponseWriter, r *http.Request) {
 		targetStr := r.URL.Query().Get("target")

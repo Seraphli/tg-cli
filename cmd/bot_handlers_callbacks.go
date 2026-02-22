@@ -103,10 +103,14 @@ func registerCallbackHandlers(bot *tele.Bot) {
 				if !ok {
 					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 				}
+				if handleStalePending(c.Message().ID, uuid, bot) {
+					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
+				}
 				path := filepath.Join(pendingDir(), uuid+".json")
 				pf, err := readPendingFile(path)
 				if err != nil {
-					return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+					cleanupPendingState(c.Message().ID, uuid, bot, "file missing on chat button")
+					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
 				}
 				answers := map[string]string{"__chat": "true"}
 				ccOutput := buildAskCCOutput(pf.Payload, answers)
@@ -123,10 +127,14 @@ func registerCallbackHandlers(bot *tele.Bot) {
 				if !ok {
 					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 				}
+				if handleStalePending(c.Message().ID, uuid, bot) {
+					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
+				}
 				path := filepath.Join(pendingDir(), uuid+".json")
 				pf, err := readPendingFile(path)
 				if err != nil {
-					return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+					cleanupPendingState(c.Message().ID, uuid, bot, "file missing on submit button")
+					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
 				}
 				answers := buildAnswers(entry)
 				ccOutput := buildAskCCOutput(pf.Payload, answers)
@@ -165,10 +173,14 @@ func registerCallbackHandlers(bot *tele.Bot) {
 						if !ok {
 							return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
 						}
+						if handleStalePending(c.Message().ID, uuid, bot) {
+							return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
+						}
 						path := filepath.Join(pendingDir(), uuid+".json")
 						pf, err := readPendingFile(path)
 						if err != nil {
-							return c.Respond(&tele.CallbackResponse{Text: "Failed to read pending file"})
+							cleanupPendingState(c.Message().ID, uuid, bot, "file missing on option select")
+							return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
 						}
 						answers := buildAnswers(entry)
 						ccOutput := buildAskCCOutput(pf.Payload, answers)

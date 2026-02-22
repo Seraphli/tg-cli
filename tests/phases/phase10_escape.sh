@@ -87,3 +87,80 @@ if echo "$AFTER_ESCAPE" | grep "User declined" > /dev/null 2>&1; then
 else
   fail "CC did not show decline message after escape"
 fi
+
+# 6. Wait for Stop notification after Esc (CC produces Stop after cancel)
+echo "  Waiting for Stop notification after escape..."
+ELAPSED=0
+STOP_FOUND=false
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  NEW_LOGS=$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")
+  if echo "$NEW_LOGS" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+    STOP_FOUND=true
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+if [ "$STOP_FOUND" = true ]; then
+  pass "Stop notification received after escape"
+else
+  echo "  INFO: Stop notification not observed within ${TIMEOUT}s (non-fatal)"
+fi
+
+# 7. Wait for CC to be idle before sending follow-up
+wait_for_cc_idle
+
+# 8. Record log position before follow-up message
+LOG_BEFORE_FOLLOWUP=$(wc -l < "$LOG_FILE")
+
+# 9. Send follow-up message via /group/text API
+echo "  Sending follow-up message via /group/text API..."
+FOLLOWUP_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=post+escape+followup")
+
+echo "  /group/text response: $FOLLOWUP_RESP"
+
+# 10. Wait for "Group text API injected" (stale detection worked) or "AskUserQuestion resolved" (bug)
+ELAPSED=0
+FOLLOWUP_RESULT=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  NEW_FOLLOWUP=$(tail -n +"$((LOG_BEFORE_FOLLOWUP + 1))" "$LOG_FILE")
+  if echo "$NEW_FOLLOWUP" | grep "Group text API injected" > /dev/null 2>&1; then
+    FOLLOWUP_RESULT="injected"
+    break
+  fi
+  if echo "$NEW_FOLLOWUP" | grep "AskUserQuestion resolved via group text API" > /dev/null 2>&1; then
+    FOLLOWUP_RESULT="swallowed"
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+# 11. Assert follow-up message was injected (not swallowed)
+if [ "$FOLLOWUP_RESULT" = "injected" ]; then
+  pass "Follow-up message correctly injected into CC (stale detection worked)"
+elif [ "$FOLLOWUP_RESULT" = "swallowed" ]; then
+  fail "Follow-up message was swallowed as AskUserQuestion answer — stale detection did NOT work (bug)"
+else
+  fail "Follow-up message result unclear within ${TIMEOUT}s (API response: $FOLLOWUP_RESP)"
+fi
+
+# 12. Wait for UserPromptSubmit to confirm CC received the follow-up
+ELAPSED=0
+UPS_FOUND=false
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  NEW_UPS=$(tail -n +"$((LOG_BEFORE_FOLLOWUP + 1))" "$LOG_FILE")
+  if echo "$NEW_UPS" | grep "UserPromptSubmit" > /dev/null 2>&1; then
+    UPS_FOUND=true
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+if [ "$UPS_FOUND" = true ]; then
+  pass "CC received follow-up message (UserPromptSubmit triggered)"
+else
+  fail "CC did not receive follow-up message (no UserPromptSubmit within ${TIMEOUT}s)"
+fi

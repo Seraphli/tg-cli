@@ -83,6 +83,22 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   else
     fail "Permission debug log not found (expected 'Permission payload: toolInput=')"
   fi
+  # Wait for CC to complete the full turn (Bash execution + Stop hook)
+  ELAPSED=0
+  STOP4_FOUND=false
+  while [ $ELAPSED -lt $TIMEOUT ]; do
+    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+      STOP4_FOUND=true
+      break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+  done
+  if [ "$STOP4_FOUND" = true ]; then
+    pass "Phase 4 Stop notification received (CC turn complete)"
+  else
+    fail "Phase 4 Stop notification not received within ${TIMEOUT}s"
+  fi
 else
   fail "PermissionRequest not triggered within ${TIMEOUT}s"
 fi

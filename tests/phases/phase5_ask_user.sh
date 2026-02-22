@@ -7,6 +7,7 @@ echo ""
 echo "--- Phase 5: AskUserQuestion test ---"
 
 ensure_infrastructure
+wait_for_cc_idle
 
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
 

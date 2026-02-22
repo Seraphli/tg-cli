@@ -272,6 +272,23 @@ func (pfs *pendingFileStore) delete(msgID int) {
 	delete(pfs.entries, msgID)
 }
 
+func (s *pendingFileStore) findByUUID(uuid string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for msgID, u := range s.entries {
+		if u == uuid {
+			return msgID, true
+		}
+	}
+	return 0, false
+}
+
+func (s *pendingFileStore) remove(msgID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, msgID)
+}
+
 type sessionCountStore struct {
 	mu     sync.Mutex
 	counts map[string]int
