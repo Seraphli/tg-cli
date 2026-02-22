@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -713,17 +714,18 @@ func resolveChat(tmuxTarget string) (*tele.Chat, string) {
 
 // PendingFile represents a pending CC event stored as a file
 type PendingFile struct {
-	UUID        string          `json:"uuid"`
-	Event       string          `json:"event"`
-	ToolName    string          `json:"tool_name"`
-	Status      string          `json:"status"`
-	Payload     json.RawMessage `json:"payload"`
-	TgMsgID     int             `json:"tg_msg_id"`
-	TgChatID    int64           `json:"tg_chat_id"`
-	SessionID   string          `json:"session_id"`
-	TmuxTarget  string          `json:"tmux_target"`
-	CCOutput    json.RawMessage `json:"cc_output"`
-	CreatedAt   string          `json:"created_at"`
+	UUID       string          `json:"uuid"`
+	Event      string          `json:"event"`
+	ToolName   string          `json:"tool_name"`
+	Status     string          `json:"status"`
+	Payload    json.RawMessage `json:"payload"`
+	TgMsgID    int             `json:"tg_msg_id"`
+	TgChatID   int64           `json:"tg_chat_id"`
+	SessionID  string          `json:"session_id"`
+	TmuxTarget string          `json:"tmux_target"`
+	CCOutput   json.RawMessage `json:"cc_output"`
+	CreatedAt  string          `json:"created_at"`
+	HookPID    int             `json:"hook_pid"`
 }
 
 // pendingDir returns /tmp/tg-cli/pending/, creating it if needed
@@ -769,6 +771,49 @@ func writePendingAnswer(uuid string, ccOutput json.RawMessage) error {
 	pf.Status = "answered"
 	pf.CCOutput = ccOutput
 	return writePendingFile(path, pf)
+}
+
+// isHookAlive checks if the hook process with given PID is still running.
+func isHookAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// handleStalePending checks if a pending entry is stale (hook dead or file missing).
+// Returns true if stale (cleanup done), false if still alive.
+func handleStalePending(msgID int, uuid string, bot *tele.Bot) bool {
+	path := filepath.Join(pendingDir(), uuid+".json")
+	pf, err := readPendingFile(path)
+	if err != nil {
+		cleanupPendingState(msgID, uuid, bot, "file missing")
+		return true
+	}
+	if pf.Status == "sent" && !isHookAlive(pf.HookPID) {
+		os.Remove(path)
+		cleanupPendingState(msgID, uuid, bot, fmt.Sprintf("hook dead (pid=%d)", pf.HookPID))
+		return true
+	}
+	return false
+}
+
+// cleanupPendingState cleans up bot memory state and freezes TG buttons.
+func cleanupPendingState(msgID int, uuid string, bot *tele.Bot, reason string) {
+	if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
+		toolNotifs.markResolved(msgID)
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+	}
+	if _, ok := pendingPerms.getTarget(msgID); ok {
+		pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
+	}
+	pendingFiles.remove(msgID)
+	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }
 
 // buildAskCCOutput builds CC output for AskUserQuestion

@@ -81,6 +81,7 @@ wait_for_cc_idle() {
     idle=$(curl -sf "$url" 2>/dev/null \
       | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null) || true
     if [ "$idle" = "True" ]; then
+      sleep 5
       return 0
     fi
     sleep 2
