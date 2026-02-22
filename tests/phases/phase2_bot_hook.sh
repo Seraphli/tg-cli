@@ -76,3 +76,18 @@ if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "UserPromptSubmit pos
 else
   fail "UserPromptSubmit position not found in bot log"
 fi
+
+# Lenient context window check: if statusline fired during this session,
+# verify the notification text includes a correctly formatted Context line.
+# Short E2E sessions may not trigger statusline — absence is acceptable.
+CONTEXT_LOG=$(tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "Context:" || true)
+if [ -n "$CONTEXT_LOG" ]; then
+  # Context data present — verify format matches "Context: N% (Xk/Xk)" or "Context: N% (X.XM/X.XM)"
+  if echo "$CONTEXT_LOG" | grep -E "Context: [0-9]+% \([0-9]+(\.[0-9]+)?[kM]/[0-9]+(\.[0-9]+)?[kM]\)" > /dev/null 2>&1; then
+    pass "Context window usage present and correctly formatted in notification"
+  else
+    fail "Context window usage found but format is incorrect: $CONTEXT_LOG"
+  fi
+else
+  pass "Context window usage absent (statusline not triggered in short session — OK)"
+fi

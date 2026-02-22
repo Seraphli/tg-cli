@@ -158,6 +158,43 @@ func runSetup(cmd *cobra.Command, args []string) {
 		hooks[event] = filtered
 	}
 	settings["hooks"] = hooks
+	// Register statusLine command so CC statusbar shows context window usage
+	var statusLineCmd string
+	if config.ConfigDir != "" {
+		statusLineCmd = fmt.Sprintf("%s --config-dir %s statusline", hookBin, config.ConfigDir)
+	} else {
+		statusLineCmd = fmt.Sprintf("%s statusline", hookBin)
+	}
+	if setupUninstallFlag {
+		// Remove tg-cli statusline from statusLine config
+		if existing, ok := settings["statusLine"].(map[string]interface{}); ok {
+			if cmd, ok := existing["command"].(string); ok {
+				prefix := statusLineCmd + " | "
+				if strings.HasPrefix(cmd, prefix) {
+					existing["command"] = strings.TrimPrefix(cmd, prefix)
+					settings["statusLine"] = existing
+				} else if cmd == statusLineCmd {
+					delete(settings, "statusLine")
+				}
+			}
+		}
+	} else {
+		existing, ok := settings["statusLine"].(map[string]interface{})
+		if !ok {
+			// No existing statusLine — set ours directly
+			settings["statusLine"] = map[string]interface{}{
+				"type":    "command",
+				"command": statusLineCmd,
+			}
+		} else if cmd, ok := existing["command"].(string); ok {
+			if !strings.Contains(cmd, "tg-cli statusline") {
+				// Prepend our command and pipe to existing
+				existing["command"] = statusLineCmd + " | " + cmd
+				settings["statusLine"] = existing
+			}
+			// If already contains tg-cli statusline: skip (idempotent)
+		}
+	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to marshal settings: %v\n", err)
