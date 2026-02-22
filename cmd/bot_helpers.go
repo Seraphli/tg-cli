@@ -175,21 +175,49 @@ func truncateStr(s string, maxRunes int) string {
 	return s
 }
 
+func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize int, ok bool) {
+	path := filepath.Join(os.TempDir(), "tg-cli", "context", sessionID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	var ctx map[string]interface{}
+	if err := json.Unmarshal(data, &ctx); err != nil {
+		return 0, 0, 0, false
+	}
+	pct, pctOk := ctx["used_percentage"].(float64)
+	size, sizeOk := ctx["context_window_size"].(float64)
+	if !pctOk || !sizeOk {
+		return 0, 0, 0, false
+	}
+	currentUsage, cuOk := ctx["current_usage"].(map[string]interface{})
+	if !cuOk {
+		return 0, 0, 0, false
+	}
+	inputTokens, _ := currentUsage["input_tokens"].(float64)
+	cacheCreation, _ := currentUsage["cache_creation_input_tokens"].(float64)
+	cacheRead, _ := currentUsage["cache_read_input_tokens"].(float64)
+	return int(pct), int(inputTokens + cacheCreation + cacheRead), int(size), true
+}
+
 func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, tmuxTarget, body string) {
-	headerLen := notify.HeaderLen(notify.NotificationData{
-		Event:      event,
-		Project:    project,
-		TmuxTarget: tmuxTarget,
-	})
+	nd := notify.NotificationData{
+		Event:          event,
+		Project:        project,
+		TmuxTarget:     tmuxTarget,
+		ContextUsedPct: -1,
+	}
+	if usedPct, usedTokens, windowSize, ok := readContextUsage(sessionID); ok {
+		nd.ContextUsedPct = usedPct
+		nd.ContextUsedTokens = usedTokens
+		nd.ContextWindowSize = windowSize
+	}
+	headerLen := notify.HeaderLen(nd)
 	maxBodyRunes := 4000 - headerLen - 100
 	chunks := splitBody(body, maxBodyRunes)
 	if len(chunks) <= 1 {
-		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:      event,
-			Project:    project,
-			Body:       body,
-			TmuxTarget: tmuxTarget,
-		})
+		nd.Body = body
+		text := notify.BuildNotificationText(nd)
 		_, err := b.Send(chat, text)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
@@ -198,14 +226,10 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			logger.Info(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
 	} else {
-		text := notify.BuildNotificationText(notify.NotificationData{
-			Event:      event,
-			Project:    project,
-			Body:       chunks[0],
-			TmuxTarget: tmuxTarget,
-			Page:       1,
-			TotalPages: len(chunks),
-		})
+		nd.Body = chunks[0]
+		nd.Page = 1
+		nd.TotalPages = len(chunks)
+		text := notify.BuildNotificationText(nd)
 		kb := buildPageKeyboard(1, len(chunks))
 		sent, err := b.Send(chat, text, kb)
 		if err != nil {

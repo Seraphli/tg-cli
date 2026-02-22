@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "1.2.3"
+var version = "1.3.0"
 var configDir string
 
 func main() {
@@ -28,6 +28,7 @@ func main() {
 	rootCmd.AddCommand(cmd.SetupCmd)
 	rootCmd.AddCommand(cmd.ServiceCmd)
 	rootCmd.AddCommand(cmd.VoiceCmd)
+	rootCmd.AddCommand(cmd.StatuslineCmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

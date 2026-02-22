@@ -6,12 +6,15 @@ import (
 )
 
 type NotificationData struct {
-	Event      string
-	Project    string
-	Body       string
-	TmuxTarget string
-	Page       int // 0 = no pagination
-	TotalPages int
+	Event             string
+	Project           string
+	Body              string
+	TmuxTarget        string
+	Page              int // 0 = no pagination
+	TotalPages        int
+	ContextUsedPct    int // -1 means no data
+	ContextWindowSize int
+	ContextUsedTokens int
 }
 
 type PermissionData struct {
@@ -42,6 +45,13 @@ type QuestionData struct {
 	Questions  []QuestionEntry
 }
 
+func formatTokens(v float64) string {
+	if v >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", v/1_000_000)
+	}
+	return fmt.Sprintf("%.1fk", v/1000)
+}
+
 func BuildNotificationText(data NotificationData) string {
 	var emoji, status string
 	switch {
@@ -68,6 +78,12 @@ func BuildNotificationText(data NotificationData) string {
 	}
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+data.TmuxTarget)
+	}
+	if data.ContextUsedPct >= 0 {
+		used := float64(data.ContextUsedTokens)
+		usedStr := formatTokens(used)
+		totalStr := fmt.Sprintf("%dk", data.ContextWindowSize/1000)
+		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
 	}
 	if data.Body != "" {
 		lines = append(lines, "", "💬 Claude:", data.Body)
