@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	tele "gopkg.in/telebot.v3"
 )
@@ -58,6 +59,7 @@ type pageEntry struct {
 	chunks     []string
 	event      string
 	project    string
+	cwd        string
 	tmuxTarget string
 	permRows   []tele.Row // non-nil for permission messages
 	chatID     int64
@@ -316,18 +318,24 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 	delete(s.locks, sessionID)
 }
 
-// sessionStateStore tracks active CC sessions and their tmux targets.
-type sessionStateStore struct {
-	mu       sync.RWMutex
-	sessions map[string]string // session_id -> tmux_target
+// sessionInfo holds the tmux target and working directory for a CC session.
+type sessionInfo struct {
+	tmuxTarget string
+	cwd        string
 }
 
-var sessionState = &sessionStateStore{sessions: make(map[string]string)}
+// sessionStateStore tracks active CC sessions and their associated info.
+type sessionStateStore struct {
+	mu       sync.RWMutex
+	sessions map[string]sessionInfo // session_id -> sessionInfo
+}
 
-func (s *sessionStateStore) add(sessionID, tmuxTarget string) {
+var sessionState = &sessionStateStore{sessions: make(map[string]sessionInfo)}
+
+func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[sessionID] = tmuxTarget
+	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd}
 }
 
 func (s *sessionStateStore) remove(sessionID string) {
@@ -336,10 +344,10 @@ func (s *sessionStateStore) remove(sessionID string) {
 	delete(s.sessions, sessionID)
 }
 
-func (s *sessionStateStore) all() map[string]string {
+func (s *sessionStateStore) all() map[string]sessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	cp := make(map[string]string, len(s.sessions))
+	cp := make(map[string]sessionInfo, len(s.sessions))
 	for k, v := range s.sessions {
 		cp[k] = v
 	}
@@ -349,12 +357,42 @@ func (s *sessionStateStore) all() map[string]string {
 func (s *sessionStateStore) findByTarget(target string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for sid, t := range s.sessions {
-		if t == target {
+	for sid, info := range s.sessions {
+		if info.tmuxTarget == target {
 			return sid, true
 		}
 	}
 	return "", false
+}
+
+// findByCWD returns the sessionInfo for the first active session with matching CWD, or nil.
+func (s *sessionStateStore) findByCWD(cwd string) *sessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, info := range s.sessions {
+		if info.cwd == cwd {
+			cp := info
+			return &cp
+		}
+	}
+	return nil
+}
+
+// findByPaneID returns the sessionInfo for the first session whose tmuxTarget parses to the given pane ID.
+func (s *sessionStateStore) findByPaneID(paneID string) *sessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, info := range s.sessions {
+		t, err := injector.ParseTarget(info.tmuxTarget)
+		if err != nil {
+			continue
+		}
+		if t.PaneID == paneID {
+			cp := info
+			return &cp
+		}
+	}
+	return nil
 }
 
 type reactionEntry struct {

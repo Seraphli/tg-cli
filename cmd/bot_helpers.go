@@ -201,10 +201,11 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	return int(pct), int(inputTokens + cacheCreation + cacheRead), int(size), true
 }
 
-func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, tmuxTarget, body string) {
+func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body string) {
 	nd := notify.NotificationData{
 		Event:          event,
 		Project:        project,
+		CWD:            cwd,
 		TmuxTarget:     tmuxTarget,
 		ContextUsedPct: -1,
 	}
@@ -240,6 +241,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 				chunks:     chunks,
 				event:      event,
 				project:    project,
+				cwd:        cwd,
 				tmuxTarget: tmuxTarget,
 				chatID:     chat.ID,
 			})
@@ -276,6 +278,7 @@ func buildPageKeyboardWithExtra(currentPage, totalPages int, extraRows []tele.Ro
 }
 
 // extractTmuxTarget extracts tmux target from notification text.
+// If the parsed target has no socket, attempts to restore it from sessionState.
 func extractTmuxTarget(text string) (*injector.TmuxTarget, error) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -284,6 +287,14 @@ func extractTmuxTarget(text string) (*injector.TmuxTarget, error) {
 			target, err := injector.ParseTarget(raw)
 			if err != nil {
 				return nil, err
+			}
+			if target.Socket == "" {
+				if info := sessionState.findByPaneID(target.PaneID); info != nil {
+					full, _ := injector.ParseTarget(info.tmuxTarget)
+					if full.Socket != "" {
+						target.Socket = full.Socket
+					}
+				}
 			}
 			return &target, nil
 		}
@@ -694,12 +705,18 @@ func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
 	return &p, body, nil
 }
 
-func resolveChat(tmuxTarget string) (*tele.Chat, string) {
-	if tmuxTarget != "" {
-		creds, err := config.LoadCredentials()
-		if err == nil && len(creds.RouteMap) > 0 {
+func resolveChat(tmuxTarget, cwd string) (*tele.Chat, string) {
+	creds, err := config.LoadCredentials()
+	if err == nil {
+		if cwd != "" && len(creds.ProjectRouteMap) > 0 {
+			if chatID, ok := creds.ProjectRouteMap[cwd]; ok {
+				logger.Info(fmt.Sprintf("Route resolved: cwd=%s → chat=%d (project route)", cwd, chatID))
+				return &tele.Chat{ID: chatID}, strconv.FormatInt(chatID, 10)
+			}
+		}
+		if tmuxTarget != "" && len(creds.RouteMap) > 0 {
 			if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
-				logger.Info(fmt.Sprintf("Route resolved: tmux=%s → chat=%d (from routeMap)", tmuxTarget, chatID))
+				logger.Info(fmt.Sprintf("Route resolved: tmux=%s → chat=%d (tmux route)", tmuxTarget, chatID))
 				return &tele.Chat{ID: chatID}, strconv.FormatInt(chatID, 10)
 			}
 		}
@@ -710,6 +727,43 @@ func resolveChat(tmuxTarget string) (*tele.Chat, string) {
 	}
 	chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 	return &tele.Chat{ID: chatIDInt}, chatID
+}
+
+// checkSessionAlive checks if a tmux session still exists; cleans up dead sessions.
+func checkSessionAlive(tmuxTarget string, bot *tele.Bot) bool {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return false
+	}
+	if injector.SessionExists(target) {
+		return true
+	}
+	cleanDeadSession(tmuxTarget, bot)
+	return false
+}
+
+// cleanDeadSession cleans up state and notifies the user when a tmux session dies.
+func cleanDeadSession(tmuxTarget string, bot *tele.Bot) {
+	paneID := tmuxTarget
+	if idx := strings.Index(paneID, "@"); idx != -1 {
+		paneID = paneID[:idx]
+	}
+	if sid, found := sessionState.findByTarget(tmuxTarget); found {
+		sessionState.remove(sid)
+		pages.cleanupSession(sid)
+		sessionCounts.cleanup(sid)
+		cleanPendingFilesBySession(sid)
+	}
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return
+	}
+	if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
+		delete(creds.RouteMap, tmuxTarget)
+		config.SaveCredentials(creds)
+		bot.Send(&tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
+		logger.Info(fmt.Sprintf("Auto-unbound dead session: tmux=%s chat=%d", tmuxTarget, chatID))
+	}
 }
 
 // PendingFile represents a pending CC event stored as a file

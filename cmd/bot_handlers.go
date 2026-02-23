@@ -4,13 +4,29 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
+
+var bindPending sync.Map // msgID (int) -> bindPendingInfo
+
+type bindPendingInfo struct {
+	tmuxTarget string
+	cwd        string
+	chatID     int64
+}
+
+var unbindPending sync.Map // msgID (int) -> unbindPendingInfo
+
+type unbindPendingInfo struct {
+	cwd string
+}
 
 // registerTGHandlers registers all Telegram bot handlers
 func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
@@ -106,7 +122,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return c.Send("❌ Not paired. Use /bot_pair first.")
 		}
 		creds, _ := config.LoadCredentials()
-		if len(creds.RouteMap) == 0 {
+		if len(creds.RouteMap) == 0 && len(creds.ProjectRouteMap) == 0 {
 			return c.Send("No active route bindings.")
 		}
 		var lines []string
@@ -115,7 +131,18 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if chat, err := bot.ChatByID(chatID); err == nil && chat.Title != "" {
 				chatName = chat.Title
 			}
-			lines = append(lines, fmt.Sprintf("📟 %s → %s", tmux, chatName))
+			paneID := tmux
+			if idx := strings.Index(paneID, "@"); idx != -1 {
+				paneID = paneID[:idx]
+			}
+			lines = append(lines, fmt.Sprintf("📟 %s → %s", paneID, chatName))
+		}
+		for cwd, chatID := range creds.ProjectRouteMap {
+			chatName := fmt.Sprintf("%d", chatID)
+			if chat, err := bot.ChatByID(chatID); err == nil && chat.Title != "" {
+				chatName = chat.Title
+			}
+			lines = append(lines, fmt.Sprintf("📂 %s → %s", notify.CompressPath(cwd), chatName))
 		}
 		return c.Send("🗺 Route bindings:\n" + strings.Join(lines, "\n"))
 	})
@@ -140,12 +167,27 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 		}
+		info := sessionState.findByPaneID(target.PaneID)
+		if info != nil && info.cwd != "" {
+			// Show choice buttons
+			sel := &tele.ReplyMarkup{}
+			btnTmux := sel.Data("📟 Tmux", "bind", "tmux")
+			btnProject := sel.Data("📂 Project", "bind", "project")
+			sel.Inline(sel.Row(btnTmux, btnProject))
+			sent, err := bot.Send(c.Chat(), fmt.Sprintf("Choose binding type:\n📟 %s\n📂 %s", tmuxStr, notify.CompressPath(info.cwd)), sel)
+			if err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
+			}
+			bindPending.Store(sent.ID, bindPendingInfo{tmuxTarget: tmuxStr, cwd: info.cwd, chatID: c.Chat().ID})
+			return nil
+		}
+		// No CWD available — bind tmux directly
 		creds.RouteMap[tmuxStr] = c.Chat().ID
 		if err := config.SaveCredentials(creds); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 		}
 		logger.Info(fmt.Sprintf("Route bound: tmux=%s → chat=%d by user=%s", tmuxStr, c.Chat().ID, userID))
-		return c.Reply(fmt.Sprintf("✅ Bound session to this chat.\n📟 %s", tmuxStr))
+		return c.Reply(fmt.Sprintf("✅ Bound tmux session to this chat.\n📟 %s", tmuxStr))
 	})
 
 	bot.Handle("/bot_unbind", func(c tele.Context) error {
@@ -165,15 +207,31 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 		}
-		if _, ok := creds.RouteMap[tmuxStr]; !ok {
-			return c.Reply("❌ This session is not bound to any chat.")
+		// Check tmux route first — direct unbind
+		if _, ok := creds.RouteMap[tmuxStr]; ok {
+			delete(creds.RouteMap, tmuxStr)
+			if err := config.SaveCredentials(creds); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+			}
+			logger.Info(fmt.Sprintf("Route unbound (tmux): tmux=%s by user=%s", tmuxStr, userID))
+			return c.Reply(fmt.Sprintf("✅ Unbound tmux session.\n📟 %s", tmuxStr))
 		}
-		delete(creds.RouteMap, tmuxStr)
-		if err := config.SaveCredentials(creds); err != nil {
-			return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+		// Check project route — needs confirmation
+		if info := sessionState.findByPaneID(target.PaneID); info != nil && info.cwd != "" {
+			if _, ok := creds.ProjectRouteMap[info.cwd]; ok {
+				sel := &tele.ReplyMarkup{}
+				btnYes := sel.Data("✅ Yes, unbind", "unbind_confirm", "yes")
+				btnNo := sel.Data("❌ Cancel", "unbind_confirm", "no")
+				sel.Inline(sel.Row(btnYes, btnNo))
+				sent, err := bot.Send(c.Chat(), fmt.Sprintf("Unbind project route?\n📂 %s\n⚠️ This affects all sessions in this project.", notify.CompressPath(info.cwd)), sel)
+				if err != nil {
+					return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
+				}
+				unbindPending.Store(sent.ID, unbindPendingInfo{cwd: info.cwd})
+				return nil
+			}
 		}
-		logger.Info(fmt.Sprintf("Route unbound: tmux=%s by user=%s", tmuxStr, userID))
-		return c.Reply(fmt.Sprintf("✅ Unbound session. Messages will go to default chat.\n📟 %s", tmuxStr))
+		return c.Reply("❌ No binding found for this session.")
 	})
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)

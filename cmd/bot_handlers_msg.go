@@ -15,13 +15,32 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// resolveGroupTarget finds the unique bound tmux target for a group chat
+// resolveGroupTarget finds the unique bound tmux target for a group chat.
+// Checks both direct tmux routes and project routes with active sessions.
 func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
 	creds, _ := config.LoadCredentials()
 	var targets []string
+	// Direct tmux routes
 	for t, cid := range creds.RouteMap {
 		if cid == chatID {
 			targets = append(targets, t)
+		}
+	}
+	// Project routes: find active sessions with matching CWD
+	for cwd, cid := range creds.ProjectRouteMap {
+		if cid == chatID {
+			if info := sessionState.findByCWD(cwd); info != nil {
+				found := false
+				for _, t := range targets {
+					if t == info.tmuxTarget {
+						found = true
+						break
+					}
+				}
+				if !found {
+					targets = append(targets, info.tmuxTarget)
+				}
+			}
 		}
 	}
 	if len(targets) == 0 {
@@ -133,6 +152,9 @@ func registerMessageHandlers(bot *tele.Bot) {
 							}
 						}
 					}
+				}
+				if !checkSessionAlive(tmuxStr, bot) {
+					return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 				}
 				if err := injector.InjectText(target, c.Message().Text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -246,6 +268,9 @@ func registerMessageHandlers(bot *tele.Bot) {
 		if err != nil {
 			return c.Reply("❌ No tmux session info found in the original message.")
 		}
+		if !checkSessionAlive(injector.FormatTarget(target), bot) {
+			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
+		}
 		if err := injector.InjectText(target, c.Message().Text); err != nil {
 			logger.Error(fmt.Sprintf("Injection failed: %v", err))
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -315,6 +340,9 @@ func registerMessageHandlers(bot *tele.Bot) {
 							}
 						}
 					}
+				}
+				if !checkSessionAlive(tmuxStr, bot) {
+					return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 				}
 				if err := injector.InjectText(target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -427,6 +455,9 @@ func registerMessageHandlers(bot *tele.Bot) {
 		target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
 		if err != nil {
 			return c.Reply("❌ No tmux session info found in the original message.")
+		}
+		if !checkSessionAlive(injector.FormatTarget(target), bot) {
+			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
 		if err := injector.InjectText(target, text); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))

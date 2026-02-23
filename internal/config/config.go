@@ -7,10 +7,11 @@ import (
 )
 
 type Credentials struct {
-	BotToken     string           `json:"botToken"`
-	PairingAllow PairingAllow     `json:"pairingAllow"`
-	Port         int              `json:"port"`
-	RouteMap     map[string]int64 `json:"routeMap,omitempty"`
+	BotToken        string           `json:"botToken"`
+	PairingAllow    PairingAllow     `json:"pairingAllow"`
+	Port            int              `json:"port"`
+	RouteMap        map[string]int64 `json:"routeMap,omitempty"`
+	ProjectRouteMap map[string]int64 `json:"projectRouteMap,omitempty"`
 }
 
 type PairingAllow struct {
@@ -68,6 +69,9 @@ func LoadCredentials() (Credentials, error) {
 	}
 	if creds.RouteMap == nil {
 		creds.RouteMap = make(map[string]int64)
+	}
+	if creds.ProjectRouteMap == nil {
+		creds.ProjectRouteMap = make(map[string]int64)
 	}
 	return creds, nil
 }

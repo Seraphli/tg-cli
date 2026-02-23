@@ -55,7 +55,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	pf.SessionID = p.SessionID
 	pf.TmuxTarget = p.TmuxTarget
 	pf.ToolName = p.ToolName
-	chat, chatID := resolveChat(p.TmuxTarget)
+	chat, chatID := resolveChat(p.TmuxTarget, p.CWD)
 	if chat == nil {
 		logger.Info(fmt.Sprintf("No chat for pending request %s, skipping", uuid))
 		return
@@ -63,7 +63,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	// Send intermediate text (PreToolUse Update) before question/permission message
 	if updateBody := processTranscriptUpdates(p.SessionID, p.TranscriptPath); updateBody != "" {
 		chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-		sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, updateBody)
+		sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.CWD, p.TmuxTarget, updateBody)
 		logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", uuid, chatIDInt))
 	}
 	if p.ToolName == "AskUserQuestion" {
@@ -103,7 +103,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 			})
 		}
 		text := notify.BuildQuestionText(notify.QuestionData{
-			Project: p.Project, TmuxTarget: p.TmuxTarget, Questions: questionEntries,
+			Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget, Questions: questionEntries,
 		})
 		markup := &tele.ReplyMarkup{}
 		var rows []tele.Row
@@ -178,7 +178,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	json.Unmarshal(p.ToolInput, &toolInput)
 	logger.Info(fmt.Sprintf("Permission payload: toolInput=%s suggestions=%s", string(p.ToolInput), string(p.PermSuggestions)))
 	text := notify.BuildPermissionText(notify.PermissionData{
-		Project: p.Project, TmuxTarget: p.TmuxTarget,
+		Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
 		ToolName: p.ToolName, ToolInput: toolInput,
 	})
 	markup := &tele.ReplyMarkup{}
@@ -259,6 +259,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 			chunks:     permChunks,
 			event:      "PermissionRequest",
 			project:    p.Project,
+			cwd:        p.CWD,
 			tmuxTarget: p.TmuxTarget,
 			permRows:   permBtnRows,
 			chatID:     chatIDInt,
@@ -305,9 +306,9 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
 		// Re-register session on any hook event (survives bot restart)
 		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
-			sessionState.add(p.SessionID, p.TmuxTarget)
+			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
 		}
-		chat, chatID := resolveChat(p.TmuxTarget)
+		chat, chatID := resolveChat(p.TmuxTarget, p.CWD)
 		switch event {
 		case "SessionStart":
 			if chat == nil || p.TmuxTarget == "" {
@@ -315,18 +316,18 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				return
 			}
 			text := notify.BuildNotificationText(notify.NotificationData{
-				Event: "SessionStart", Project: p.Project, TmuxTarget: p.TmuxTarget,
+				Event: "SessionStart", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
 			})
 			bot.Send(chat, text)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			if p.SessionID != "" && p.TmuxTarget != "" {
-				sessionState.add(p.SessionID, p.TmuxTarget)
+				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
 				logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
 			}
 		case "SessionEnd":
 			if chat != nil {
 				text := notify.BuildNotificationText(notify.NotificationData{
-					Event: "SessionEnd", Project: p.Project, TmuxTarget: p.TmuxTarget,
+					Event: "SessionEnd", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
 				})
 				bot.Send(chat, text)
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
@@ -355,7 +356,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		case "Stop":
 			if chat != nil {
 				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
-				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.TmuxTarget, body)
+				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.CWD, p.TmuxTarget, body)
 			}
 		case "PreToolUse":
 			// PreToolUse: send intermediate notification
@@ -364,7 +365,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			if chat != nil && p.ToolName != "AskUserQuestion" {
 				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
 				if body != "" {
-					sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.TmuxTarget, body)
+					sendEventNotification(bot, chat, chatID, p.SessionID, "PreToolUse", p.Project, p.CWD, p.TmuxTarget, body)
 				}
 			}
 		case "PermissionRequest":
@@ -378,7 +379,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			// Unknown event — send notification if possible
 			if chat != nil {
 				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
-				sendEventNotification(bot, chat, chatID, p.SessionID, event, p.Project, p.TmuxTarget, body)
+				sendEventNotification(bot, chat, chatID, p.SessionID, event, p.Project, p.CWD, p.TmuxTarget, body)
 			}
 		}
 		w.WriteHeader(200)

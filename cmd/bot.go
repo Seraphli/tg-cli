@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	"github.com/spf13/cobra"
@@ -22,24 +23,39 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-func startTypingLoop(ctx context.Context, bot *tele.Bot, creds *config.Credentials) {
-	ticker := time.NewTicker(4 * time.Second)
+func startTypingLoop(ctx context.Context, bot *tele.Bot) {
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				continue
+			}
 			anyUnboundRunning := false
 			sentChats := make(map[int64]bool)
-			for _, tmuxTarget := range sessionState.all() {
-				if !isSessionRunning(tmuxTarget) {
+			for _, info := range sessionState.all() {
+				if !isSessionRunning(info.tmuxTarget) {
 					continue
 				}
-				if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
+				// Check tmux route first
+				if chatID, ok := creds.RouteMap[info.tmuxTarget]; ok {
 					if !sentChats[chatID] {
 						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
 						sentChats[chatID] = true
+					}
+				} else if info.cwd != "" {
+					// Check project route map
+					if chatID, ok := creds.ProjectRouteMap[info.cwd]; ok {
+						if !sentChats[chatID] {
+							bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
+							sentChats[chatID] = true
+						}
+					} else {
+						anyUnboundRunning = true
 					}
 				} else {
 					anyUnboundRunning = true
@@ -52,6 +68,27 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot, creds *config.Credentia
 					if chatID != 0 && !sentChats[chatID] {
 						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
 					}
+				}
+			}
+		}
+	}
+}
+
+func startLivenessLoop(ctx context.Context, bot *tele.Bot) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, info := range sessionState.all() {
+				target, err := injector.ParseTarget(info.tmuxTarget)
+				if err != nil {
+					continue
+				}
+				if !injector.SessionExists(target) {
+					cleanDeadSession(info.tmuxTarget, bot)
 				}
 			}
 		}
@@ -163,7 +200,8 @@ func runBot(cmd *cobra.Command, args []string) {
 	defer stop()
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
-	go startTypingLoop(typingCtx, bot, &creds)
+	go startTypingLoop(typingCtx, bot)
+	go startLivenessLoop(typingCtx, bot)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

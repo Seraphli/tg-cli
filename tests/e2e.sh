@@ -34,7 +34,11 @@ echo "Results file: $E2E_RESULTS_FILE"
 run_phase() {
   local script="$1"
   echo ""
-  bash "$script" || true
+  local rc=0
+  bash "$script" || rc=$?
+  if [ $rc -ne 0 ]; then
+    fail "Phase $(basename "$script") crashed with exit code $rc"
+  fi
 }
 
 if [ -n "$PHASE_NUM" ]; then

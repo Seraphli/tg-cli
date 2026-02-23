@@ -20,7 +20,7 @@ ELAPSED=0
 MQ_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
   if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_MQ" ]; then
-    if tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep "AskUserQuestion.*sent" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep "AskUserQuestion sent: msg_id=" > /dev/null 2>&1; then
       MQ_FOUND=true
       break
     fi
@@ -51,7 +51,7 @@ if [ "$MQ_FOUND" = true ]; then
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
-  MQ_CONTENT=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion sent" | grep -oP 'content=\K.+' || true)
+  MQ_CONTENT=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion sent: msg_id=" | grep -oP 'content=\K.+' || true)
   if [ -n "$MQ_CONTENT" ]; then
     pass "AskUserQuestion sent log contains content in Phase 6: $MQ_CONTENT"
   else
