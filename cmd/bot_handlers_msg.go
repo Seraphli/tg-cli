@@ -96,186 +96,196 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 	return target, nil
 }
 
-// registerMessageHandlers registers OnText and OnVoice handlers
-func registerMessageHandlers(bot *tele.Bot) {
-	bot.Handle(tele.OnText, func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /bot_pair first.")
-		}
-		if c.Message().ReplyTo == nil {
-			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-				tmuxStr, target, err := resolveGroupTarget(c.Chat().ID)
-				if err != nil {
-					if err.Error() == "no targets bound" {
-						return nil
-					}
-					if err.Error() == "multiple sessions bound" {
-						return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
-					}
-					return c.Reply("❌ tmux session not found.")
-				}
-				if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
-					return handlePermCommand(c, target)
-				}
-				if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
-					return handleCaptureCommand(c, target)
-				}
-				if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") {
-					return handleEscapeCommand(c, target)
-				}
-				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-					uuid, uuidOk := pendingFiles.get(msgID)
-					if uuidOk {
-						if handleStalePending(msgID, uuid, bot) {
-							// Stale: hook dead or file missing, fall through to InjectText
-						} else {
-							path := filepath.Join(pendingDir(), uuid+".json")
-							pf, err := readPendingFile(path)
-							if err == nil {
-								answers := make(map[string]string)
-								if len(entry.questions) > 0 {
-									answers[entry.questions[0].questionText] = c.Message().Text
-								}
-								ccOutput := buildAskCCOutput(pf.Payload, answers)
-								if err := writePendingAnswer(uuid, ccOutput); err != nil {
-									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-								} else {
-									toolNotifs.markResolved(msgID)
-									logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(c.Message().Text, 200)))
-									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
-								}
-								reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
-								return nil
-							}
-						}
-					}
-				}
-				if !checkSessionAlive(tmuxStr, bot) {
-					return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
-				}
-				if err := injector.InjectText(target, c.Message().Text); err != nil {
-					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
-				}
-				logger.Info(fmt.Sprintf("Group quick reply: target=%s text=%s", tmuxStr, truncateStr(c.Message().Text, 200)))
-				bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
-					Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-				})
-				reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
-				return nil
+// processUserInput handles the shared logic for OnText and OnVoice after routing.
+// text is the raw transcribed or typed text; isVoice indicates input method.
+// voicePrefix is prepended to injected text when isVoice is true.
+func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string) error {
+	answerLabel := "✅ Text answer"
+	if isVoice {
+		answerLabel = "✅ Voice answer"
+	}
+	injectionText := text
+	if isVoice {
+		injectionText = voicePrefix + " " + text
+	}
+	// sendFeedback sends the appropriate feedback message for a group or reply context
+	sendFeedback := func(tmuxTarget string) {
+		if isVoice {
+			sentMsg, _ := bot.Reply(c.Message(), voicePrefix+" "+text)
+			if sentMsg != nil {
+				reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxTarget)
 			}
+		} else {
+			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxTarget)
+		}
+	}
+
+	// Group path: no reply, group/supergroup chat
+	if c.Message().ReplyTo == nil {
+		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
-		if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
-			target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
-			if err != nil {
-				return c.Reply("❌ No tmux session info found.")
-			}
-			return handlePermCommand(c, target)
-		}
-		if (c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@")) && c.Message().ReplyTo != nil {
-			target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
-			if err != nil {
-				return c.Reply("❌ No tmux session info found.")
-			}
-			return handleCaptureCommand(c, target)
-		}
-		if (c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@")) && c.Message().ReplyTo != nil {
-			target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
-			if err != nil {
-				return c.Reply("❌ No tmux session info found.")
-			}
-			return handleEscapeCommand(c, target)
-		}
-		if replyTo := c.Message().ReplyTo; replyTo != nil {
-			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-				uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
-				if !uuidOk {
-					uuid, uuidOk = pendingFiles.get(replyTo.ID)
-				}
-				sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
-				d := permDecision{
-					Behavior: "deny",
-					Message:  "User provided custom input: " + c.Message().Text,
-				}
-				pendingPerms.resolve(replyTo.ID, d)
-				if uuidOk {
-					ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
-					if err := writePendingAnswer(uuid, ccOutput); err != nil {
-						logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-					}
-				}
-				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-				bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
-				targetPtr, err := extractTmuxTarget(replyTo.Text)
-				if err == nil && targetPtr != nil {
-					target := *targetPtr
-					if injector.SessionExists(target) {
-						injector.InjectText(target, c.Message().Text)
-					}
-					logger.Info(fmt.Sprintf("Permission denied via text reply, text injected: msg_id=%d target=%s uuid=%s text=%s", replyTo.ID, injector.FormatTarget(target), uuid, truncateStr(c.Message().Text, 200)))
-					reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(target))
-				}
-				return nil
-			}
-			if entry, ok := toolNotifs.get(replyTo.ID); ok {
-				target, err := injector.ParseTarget(entry.tmuxTarget)
-				if err != nil || !injector.SessionExists(target) {
-					return c.Reply("❌ tmux session not found.")
-				}
-				switch entry.toolName {
-				case "AskUserQuestion":
-					if !entry.resolved {
-						uuid, ok := pendingFiles.get(replyTo.ID)
-						if !ok {
-							// No pending file mapping, treat as stale
-							toolNotifs.markResolved(replyTo.ID)
-							injector.InjectText(target, c.Message().Text)
-						} else if handleStalePending(replyTo.ID, uuid, bot) {
-							// Stale: hook dead or file missing, inject user text
-							injector.InjectText(target, c.Message().Text)
-						} else {
-							path := filepath.Join(pendingDir(), uuid+".json")
-							pf, err := readPendingFile(path)
-							if err == nil {
-								answers := make(map[string]string)
-								if len(entry.questions) > 0 {
-									answers[entry.questions[0].questionText] = c.Message().Text
-								}
-								ccOutput := buildAskCCOutput(pf.Payload, answers)
-								if err := writePendingAnswer(uuid, ccOutput); err != nil {
-									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-								} else {
-									toolNotifs.markResolved(replyTo.ID)
-									logger.Info(fmt.Sprintf("AskUserQuestion custom text via reply: msg_id=%d uuid=%s text=%s", replyTo.ID, uuid, truncateStr(c.Message().Text, 200)))
-									editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
-									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
-								}
-							}
-						}
-					} else {
-						injector.InjectText(target, c.Message().Text)
-					}
-				}
-				logger.Info(fmt.Sprintf("Tool text reply: tool=%s msg_id=%d target=%s text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, truncateStr(c.Message().Text, 200)))
-				reactAndTrack(bot, c.Message().Chat, c.Message(), entry.tmuxTarget)
-				return nil
-			}
-		}
-		target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+		tmuxStr, target, err := resolveGroupTarget(c.Chat().ID)
 		if err != nil {
-			return c.Reply("❌ No tmux session info found in the original message.")
+			if err.Error() == "no targets bound" {
+				return nil
+			}
+			if err.Error() == "multiple sessions bound" {
+				return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+			}
+			return c.Reply("❌ tmux session not found.")
 		}
-		if !checkSessionAlive(injector.FormatTarget(target), bot) {
+		if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+			uuid, uuidOk := pendingFiles.get(msgID)
+			if uuidOk {
+				if handleStalePending(msgID, uuid, bot) {
+					// Stale: hook dead or file missing, fall through to InjectText
+				} else {
+					path := filepath.Join(pendingDir(), uuid+".json")
+					pf, err := readPendingFile(path)
+					if err == nil {
+						answers := make(map[string]string)
+						if len(entry.questions) > 0 {
+							answers[entry.questions[0].questionText] = text
+						}
+						ccOutput := buildAskCCOutput(pf.Payload, answers)
+						if err := writePendingAnswer(uuid, ccOutput); err != nil {
+							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+						} else {
+							toolNotifs.markResolved(msgID)
+							logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+							bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+						}
+						sendFeedback(tmuxStr)
+						return nil
+					}
+				}
+			}
+		}
+		if !checkSessionAlive(tmuxStr, bot) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
-		if err := injector.InjectText(target, c.Message().Text); err != nil {
-			logger.Error(fmt.Sprintf("Injection failed: %v", err))
+		if err := injector.InjectText(target, injectionText); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
-		logger.Info(fmt.Sprintf("Injected text to %s text=%s", injector.FormatTarget(target), truncateStr(c.Message().Text, 200)))
+		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, truncateStr(text, 200)))
+		sendFeedback(tmuxStr)
+		return nil
+	}
+
+	// Reply path: ReplyTo != nil
+	replyTo := c.Message().ReplyTo
+	if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
+		uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
+		if !uuidOk {
+			uuid, uuidOk = pendingFiles.get(replyTo.ID)
+		}
+		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
+		denyMsg := "User provided custom input: " + text
+		if isVoice {
+			denyMsg = "User provided voice input: " + text
+		}
+		d := permDecision{
+			Behavior: "deny",
+			Message:  denyMsg,
+		}
+		pendingPerms.resolve(replyTo.ID, d)
+		if uuidOk {
+			ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
+			if err := writePendingAnswer(uuid, ccOutput); err != nil {
+				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+			}
+		}
+		editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
+		bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
+		targetPtr, err := extractTmuxTarget(replyTo.Text)
+		if err == nil && targetPtr != nil {
+			target := *targetPtr
+			if injector.SessionExists(target) {
+				injector.InjectText(target, injectionText)
+			}
+			logger.Info(fmt.Sprintf("Permission denied via reply, text injected: msg_id=%d target=%s uuid=%s voice=%v text=%s", replyTo.ID, injector.FormatTarget(target), uuid, isVoice, truncateStr(text, 200)))
+			sendFeedback(injector.FormatTarget(target))
+		}
+		return nil
+	}
+
+	if entry, ok := toolNotifs.get(replyTo.ID); ok {
+		target, err := injector.ParseTarget(entry.tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			return c.Reply("❌ tmux session not found.")
+		}
+		switch entry.toolName {
+		case "AskUserQuestion":
+			if entry.resolved {
+				toolNotifs.markResolved(replyTo.ID)
+				injector.InjectText(target, injectionText)
+				return nil
+			}
+			uuid, ok := pendingFiles.get(replyTo.ID)
+			if !ok {
+				// No pending file mapping, treat as stale
+				toolNotifs.markResolved(replyTo.ID)
+				injector.InjectText(target, injectionText)
+				return nil
+			}
+			if handleStalePending(replyTo.ID, uuid, bot) {
+				// Stale: hook dead or file missing, inject text
+				injector.InjectText(target, injectionText)
+				return nil
+			}
+			path := filepath.Join(pendingDir(), uuid+".json")
+			pf, err := readPendingFile(path)
+			if err != nil {
+				if !isVoice {
+					// For text: fall through to log+react below
+					break
+				}
+				// For voice: unexpected read error after stale check
+				return c.Reply("❌ Failed to read pending file.")
+			}
+			answers := make(map[string]string)
+			if len(entry.questions) > 0 {
+				answers[entry.questions[0].questionText] = text
+			}
+			ccOutput := buildAskCCOutput(pf.Payload, answers)
+			if err := writePendingAnswer(uuid, ccOutput); err != nil {
+				logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+			} else {
+				toolNotifs.markResolved(replyTo.ID)
+				logger.Info(fmt.Sprintf("AskUserQuestion custom reply: msg_id=%d uuid=%s voice=%v text=%s", replyTo.ID, uuid, isVoice, truncateStr(text, 200)))
+				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
+				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+				sendFeedback(entry.tmuxTarget)
+				return nil
+			}
+		}
+		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
+		reactAndTrack(bot, c.Message().Chat, c.Message(), entry.tmuxTarget)
+		return nil
+	}
+
+	// General reply path
+	target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+	if err != nil {
+		return c.Reply("❌ No tmux session info found in the original message.")
+	}
+	if !checkSessionAlive(injector.FormatTarget(target), bot) {
+		return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
+	}
+	if err := injector.InjectText(target, injectionText); err != nil {
+		logger.Error(fmt.Sprintf("Injection failed: %v", err))
+		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+	}
+	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
+	if isVoice {
+		tmuxStr := injector.FormatTarget(target)
+		sentMsg, _ := bot.Reply(c.Message(), voicePrefix+" "+text)
+		if sentMsg != nil {
+			reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
+		}
+	} else {
 		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
 			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
 		}); err != nil {
@@ -285,7 +295,67 @@ func registerMessageHandlers(bot *tele.Bot) {
 			tmuxStr := injector.FormatTarget(target)
 			reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
 		}
-		return nil
+	}
+	return nil
+}
+
+// registerMessageHandlers registers OnText and OnVoice handlers
+func registerMessageHandlers(bot *tele.Bot) {
+	cfg, _ := config.LoadAppConfig()
+	voicePrefix := cfg.VoicePrefix
+
+	bot.Handle(tele.OnText, func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Send("Not paired. Use /bot_pair first.")
+		}
+		if c.Message().ReplyTo == nil {
+			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+				isCmd := strings.HasPrefix(c.Message().Text, "/bot_perm_") ||
+					c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
+					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@")
+				if isCmd {
+					_, target, err := resolveGroupTarget(c.Chat().ID)
+					if err != nil {
+						if err.Error() == "multiple sessions bound" {
+							return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+						}
+						return c.Reply("❌ tmux session not found.")
+					}
+					if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
+						return handlePermCommand(c, target)
+					}
+					if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
+						return handleCaptureCommand(c, target)
+					}
+					return handleEscapeCommand(c, target)
+				}
+			}
+		} else {
+			if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
+				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				if err != nil {
+					return c.Reply("❌ No tmux session info found.")
+				}
+				return handlePermCommand(c, target)
+			}
+			if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
+				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				if err != nil {
+					return c.Reply("❌ No tmux session info found.")
+				}
+				return handleCaptureCommand(c, target)
+			}
+			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") {
+				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				if err != nil {
+					return c.Reply("❌ No tmux session info found.")
+				}
+				return handleEscapeCommand(c, target)
+			}
+		}
+		return processUserInput(c, bot, c.Message().Text, false, voicePrefix)
 	})
 
 	bot.Handle(tele.OnVoice, func(c tele.Context) error {
@@ -295,69 +365,14 @@ func registerMessageHandlers(bot *tele.Bot) {
 			return c.Send("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
-			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-				tmuxStr, target, err := resolveGroupTarget(c.Chat().ID)
-				if err != nil {
-					if err.Error() == "no targets bound" {
-						return nil
-					}
-					if err.Error() == "multiple sessions bound" {
-						return c.Reply("❌ Multiple sessions bound. Reply to a specific notification.")
-					}
-					return c.Reply("❌ tmux session not found.")
-				}
-				text, err := transcribeVoice(bot, c.Message().Voice.FileID)
-				if err != nil || text == "" {
-					return c.Reply("❌ Transcription failed or empty.")
-				}
-				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-					uuid, uuidOk := pendingFiles.get(msgID)
-					if uuidOk {
-						if handleStalePending(msgID, uuid, bot) {
-							// Stale: hook dead or file missing, fall through to InjectText
-						} else {
-							path := filepath.Join(pendingDir(), uuid+".json")
-							pf, err := readPendingFile(path)
-							if err == nil {
-								answers := make(map[string]string)
-								if len(entry.questions) > 0 {
-									answers[entry.questions[0].questionText] = text
-								}
-								ccOutput := buildAskCCOutput(pf.Payload, answers)
-								if err := writePendingAnswer(uuid, ccOutput); err != nil {
-									logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-								} else {
-									toolNotifs.markResolved(msgID)
-									logger.Info(fmt.Sprintf("AskUserQuestion custom voice via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-									bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
-								}
-								sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🏙️ %s", text))
-								if sentMsg != nil {
-									reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
-								}
-								return nil
-							}
-						}
-					}
-				}
-				if !checkSessionAlive(tmuxStr, bot) {
-					return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
-				}
-				if err := injector.InjectText(target, text); err != nil {
-					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
-				}
-				logger.Info(fmt.Sprintf("Group voice quick reply: target=%s text=%s", tmuxStr, truncateStr(text, 200)))
-				sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-				if sentMsg != nil {
-					bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
-						Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-					})
-					reactionTracker.record(tmuxStr, c.Chat().ID, sentMsg.ID)
-				}
+			if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 				return nil
 			}
-			return nil
+			text, err := transcribeVoice(bot, c.Message().Voice.FileID)
+			if err != nil || text == "" {
+				return c.Reply("❌ Transcription failed or empty.")
+			}
+			return processUserInput(c, bot, text, true, voicePrefix)
 		}
 		text, err := transcribeVoice(bot, c.Message().Voice.FileID)
 		if err != nil {
@@ -366,114 +381,6 @@ func registerMessageHandlers(bot *tele.Bot) {
 		if text == "" {
 			return c.Reply("❌ Transcription produced empty text.")
 		}
-		if replyTo := c.Message().ReplyTo; replyTo != nil {
-			if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-				uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
-				if !uuidOk {
-					uuid, uuidOk = pendingFiles.get(replyTo.ID)
-				}
-				sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
-				d := permDecision{
-					Behavior: "deny",
-					Message:  "User provided voice input: " + text,
-				}
-				pendingPerms.resolve(replyTo.ID, d)
-				if uuidOk {
-					ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
-					if err := writePendingAnswer(uuid, ccOutput); err != nil {
-						logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-					}
-				}
-				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-				bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
-				targetPtr, err := extractTmuxTarget(replyTo.Text)
-				if err == nil && targetPtr != nil {
-					target := *targetPtr
-					if injector.SessionExists(target) {
-						injector.InjectText(target, text)
-					}
-					logger.Info(fmt.Sprintf("Permission denied via voice reply, text injected: msg_id=%d target=%s uuid=%s text=%s", replyTo.ID, injector.FormatTarget(target), uuid, truncateStr(text, 200)))
-					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-					if sentMsg != nil {
-						reactAndTrack(bot, c.Message().Chat, sentMsg, injector.FormatTarget(target))
-					}
-				}
-				return nil
-			}
-			if entry, ok := toolNotifs.get(replyTo.ID); ok {
-				switch entry.toolName {
-				case "AskUserQuestion":
-					if entry.resolved {
-						logger.Info(fmt.Sprintf("AskUserQuestion voice reply: already resolved: msg_id=%d", replyTo.ID))
-						toolNotifs.markResolved(replyTo.ID)
-						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
-						injector.InjectText(staleTarget, text)
-						return nil
-					}
-					uuid, ok := pendingFiles.get(replyTo.ID)
-					if !ok {
-						// No pending file mapping, treat as stale
-						toolNotifs.markResolved(replyTo.ID)
-						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
-						injector.InjectText(staleTarget, text)
-						return nil
-					}
-					if handleStalePending(replyTo.ID, uuid, bot) {
-						// Stale: hook dead or file missing, inject voice text
-						staleTarget, _ := injector.ParseTarget(entry.tmuxTarget)
-						injector.InjectText(staleTarget, text)
-						return nil
-					}
-					path := filepath.Join(pendingDir(), uuid+".json")
-					pf, err := readPendingFile(path)
-					if err != nil {
-						// Unexpected read error after stale check passed
-						return c.Reply("❌ Failed to read pending file.")
-					}
-					answers := make(map[string]string)
-					if len(entry.questions) > 0 {
-						answers[entry.questions[0].questionText] = text
-					}
-					ccOutput := buildAskCCOutput(pf.Payload, answers)
-					if err := writePendingAnswer(uuid, ccOutput); err != nil {
-						logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-						return c.Reply("❌ Failed to save answer.")
-					}
-					toolNotifs.markResolved(replyTo.ID)
-					logger.Info(fmt.Sprintf("AskUserQuestion custom voice via reply: msg_id=%d uuid=%s text=%s", replyTo.ID, uuid, truncateStr(text, 200)))
-					editChat := &tele.Chat{ID: entry.chatID}
-					editMsg := &tele.Message{ID: replyTo.ID, Chat: editChat}
-					bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Voice answer"))
-					sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🏙️ %s", text))
-					if sentMsg != nil {
-						reactAndTrack(bot, c.Message().Chat, sentMsg, entry.tmuxTarget)
-					}
-					return nil
-				}
-			}
-		}
-		target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
-		if err != nil {
-			return c.Reply("❌ No tmux session info found in the original message.")
-		}
-		if !checkSessionAlive(injector.FormatTarget(target), bot) {
-			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
-		}
-		if err := injector.InjectText(target, text); err != nil {
-			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
-		}
-		logger.Info(fmt.Sprintf("Injected voice transcription to %s text=%s", injector.FormatTarget(target), truncateStr(text, 200)))
-		sentMsg, _ := bot.Reply(c.Message(), fmt.Sprintf("🎙️ %s", text))
-		if sentMsg != nil {
-			if err := bot.React(c.Message().Chat, sentMsg, tele.ReactionOptions{
-				Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-			}); err != nil {
-				logger.Debug(fmt.Sprintf("React failed: %v", err))
-			} else {
-				tmuxStr := injector.FormatTarget(target)
-				reactionTracker.record(tmuxStr, c.Chat().ID, sentMsg.ID)
-			}
-		}
-		return nil
+		return processUserInput(c, bot, text, true, voicePrefix)
 	})
 }
