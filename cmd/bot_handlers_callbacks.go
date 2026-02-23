@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
@@ -33,6 +34,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			text = notify.BuildNotificationText(notify.NotificationData{
 				Event:      entry.event,
 				Project:    entry.project,
+				CWD:        entry.cwd,
 				Body:       entry.chunks[pageNum-1],
 				TmuxTarget: entry.tmuxTarget,
 				Page:       pageNum,
@@ -49,6 +51,10 @@ func registerCallbackHandlers(bot *tele.Bot) {
 
 	bot.Handle(&tele.InlineButton{Unique: "perm"}, func(c tele.Context) error {
 		decision := c.Data()
+		// Check session alive before resolving permission
+		if permTarget, ok := pendingPerms.getTarget(c.Message().ID); ok && permTarget != "" && !checkSessionAlive(permTarget, bot) {
+			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
+		}
 		uuid, uuidOk := pendingPerms.getUUID(c.Message().ID)
 		if !uuidOk {
 			uuid, uuidOk = pendingFiles.get(c.Message().ID)
@@ -94,6 +100,10 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			entry, ok := toolNotifs.get(c.Message().ID)
 			if !ok {
 				return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+			}
+			// Check session alive before processing tool response
+			if entry.tmuxTarget != "" && !checkSessionAlive(entry.tmuxTarget, bot) {
+				return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
 			}
 			if entry.resolved {
 				return c.Respond(&tele.CallbackResponse{Text: "Already answered"})
@@ -204,6 +214,66 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if entry, ok := toolNotifs.get(c.Message().ID); ok {
 			reactAndTrack(bot, c.Message().Chat, c.Message(), entry.tmuxTarget)
 		}
+		return c.Respond()
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "bind"}, func(c tele.Context) error {
+		val, ok := bindPending.Load(c.Message().ID)
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+		}
+		bp := val.(bindPendingInfo)
+		bindType := c.Data() // "tmux" or "project"
+		bindPending.Delete(c.Message().ID)
+
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			return c.Respond()
+		}
+		var resultMsg string
+		if bindType == "tmux" {
+			creds.RouteMap[bp.tmuxTarget] = bp.chatID
+			resultMsg = fmt.Sprintf("✅ Bound tmux session to this chat.\n📟 %s", bp.tmuxTarget)
+			logger.Info(fmt.Sprintf("Route bound (tmux): tmux=%s → chat=%d", bp.tmuxTarget, bp.chatID))
+		} else {
+			creds.ProjectRouteMap[bp.cwd] = bp.chatID
+			resultMsg = fmt.Sprintf("✅ Bound project to this chat.\n📂 %s", notify.CompressPath(bp.cwd))
+			logger.Info(fmt.Sprintf("Route bound (project): cwd=%s → chat=%d", bp.cwd, bp.chatID))
+		}
+		if err := config.SaveCredentials(creds); err != nil {
+			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
+			return c.Respond()
+		}
+		bot.Edit(c.Message(), resultMsg)
+		return c.Respond()
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
+		action := c.Data() // "yes" or "no"
+		val, ok := unbindPending.Load(c.Message().ID)
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+		}
+		up := val.(unbindPendingInfo)
+		unbindPending.Delete(c.Message().ID)
+
+		if action != "yes" {
+			bot.Edit(c.Message(), "❌ Unbind cancelled.")
+			return c.Respond()
+		}
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			return c.Respond()
+		}
+		delete(creds.ProjectRouteMap, up.cwd)
+		if err := config.SaveCredentials(creds); err != nil {
+			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
+			return c.Respond()
+		}
+		logger.Info(fmt.Sprintf("Route unbound (project): cwd=%s", up.cwd))
+		bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(up.cwd)))
 		return c.Respond()
 	})
 }

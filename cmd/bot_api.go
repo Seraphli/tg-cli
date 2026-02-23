@@ -46,6 +46,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			text = notify.BuildNotificationText(notify.NotificationData{
 				Event:      entry.event,
 				Project:    entry.project,
+				CWD:        entry.cwd,
 				Body:       entry.chunks[pageNum-1],
 				TmuxTarget: entry.tmuxTarget,
 				Page:       pageNum,
@@ -67,6 +68,13 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		decision := r.URL.Query().Get("decision")
+		// Pre-check session liveness before processing the decision
+		if tmuxTarget, ok := pendingPerms.getTarget(msgID); ok && tmuxTarget != "" {
+			if !checkSessionAlive(tmuxTarget, bot) {
+				http.Error(w, "session disconnected", 410)
+				return
+			}
+		}
 		uuid, uuidOk := pendingPerms.getUUID(msgID)
 		if !uuidOk {
 			uuid, uuidOk = pendingFiles.get(msgID)
@@ -104,6 +112,13 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		tool := r.URL.Query().Get("tool")
 		action := r.URL.Query().Get("action")
+		// Pre-check session liveness before processing the response
+		if entry, ok := toolNotifs.get(msgID); ok && entry.tmuxTarget != "" {
+			if !checkSessionAlive(entry.tmuxTarget, bot) {
+				http.Error(w, "session disconnected", 410)
+				return
+			}
+		}
 		switch tool {
 		case "AskUserQuestion":
 			if action == "text" {
@@ -260,6 +275,8 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		var req struct {
 			TmuxTarget string `json:"tmux_target"`
 			ChatID     int64  `json:"chat_id"`
+			CWD        string `json:"cwd"`
+			Type       string `json:"type"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -270,12 +287,20 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		creds.RouteMap[req.TmuxTarget] = req.ChatID
+		if req.Type == "project" {
+			if req.CWD == "" {
+				http.Error(w, "cwd required for project binding", http.StatusBadRequest)
+				return
+			}
+			creds.ProjectRouteMap[req.CWD] = req.ChatID
+		} else {
+			creds.RouteMap[req.TmuxTarget] = req.ChatID
+		}
 		if err := config.SaveCredentials(creds); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Route bound via API: tmux=%s → chat=%d", req.TmuxTarget, req.ChatID))
+		logger.Info(fmt.Sprintf("Route bound via API: type=%s tmux=%s cwd=%s → chat=%d", req.Type, req.TmuxTarget, req.CWD, req.ChatID))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -286,6 +311,8 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		var req struct {
 			TmuxTarget string `json:"tmux_target"`
+			CWD        string `json:"cwd"`
+			Type       string `json:"type"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -296,12 +323,16 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		delete(creds.RouteMap, req.TmuxTarget)
+		if req.Type == "project" {
+			delete(creds.ProjectRouteMap, req.CWD)
+		} else {
+			delete(creds.RouteMap, req.TmuxTarget)
+		}
 		if err := config.SaveCredentials(creds); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Route unbound via API: tmux=%s", req.TmuxTarget))
+		logger.Info(fmt.Sprintf("Route unbound via API: type=%s tmux=%s cwd=%s", req.Type, req.TmuxTarget, req.CWD))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -312,7 +343,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"routes": creds.RouteMap})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"routes":        creds.RouteMap,
+			"project_routes": creds.ProjectRouteMap,
+		})
 	})
 	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -498,22 +532,22 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		targetFilter := r.URL.Query().Get("target")
 		sessions := sessionState.all()
 
-		type sessionInfo struct {
+		type sessionIdleEntry struct {
 			Target string `json:"target"`
 			Idle   bool   `json:"idle"`
 		}
-		result := make(map[string]sessionInfo)
+		result := make(map[string]sessionIdleEntry)
 		allIdle := len(sessions) > 0 // empty sessions = not idle
 
-		for sid, target := range sessions {
-			if targetFilter != "" && target != targetFilter {
+		for sid, info := range sessions {
+			if targetFilter != "" && info.tmuxTarget != targetFilter {
 				continue
 			}
-			running := isSessionRunning(target)
+			running := isSessionRunning(info.tmuxTarget)
 			if running {
 				allIdle = false
 			}
-			result[sid] = sessionInfo{Target: target, Idle: !running}
+			result[sid] = sessionIdleEntry{Target: info.tmuxTarget, Idle: !running}
 		}
 
 		// If target filter specified but no match found, not idle

@@ -2,12 +2,14 @@ package notify
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
 type NotificationData struct {
 	Event             string
 	Project           string
+	CWD               string
 	Body              string
 	TmuxTarget        string
 	Page              int // 0 = no pagination
@@ -19,6 +21,7 @@ type NotificationData struct {
 
 type PermissionData struct {
 	Project    string
+	CWD        string
 	TmuxTarget string
 	ToolName   string
 	ToolInput  map[string]interface{}
@@ -38,6 +41,7 @@ type QuestionEntry struct {
 
 type QuestionData struct {
 	Project    string
+	CWD        string
 	TmuxTarget string
 	Header     string
 	Question   string
@@ -45,11 +49,46 @@ type QuestionData struct {
 	Questions  []QuestionEntry
 }
 
+// CompressPath shortens a filesystem path by abbreviating intermediate components to their first character.
+func CompressPath(path string) string {
+	home, _ := os.UserHomeDir()
+	if home != "" && strings.HasPrefix(path, home) {
+		path = "~" + path[len(home):]
+	}
+	sep := string(os.PathSeparator)
+	parts := strings.Split(path, sep)
+	if len(parts) <= 2 {
+		return path
+	}
+	for i := 1; i < len(parts)-1; i++ {
+		if len(parts[i]) > 0 {
+			parts[i] = string([]rune(parts[i])[0])
+		}
+	}
+	return strings.Join(parts, sep)
+}
+
+// formatPaneID extracts the pane ID from a tmux target string (strips the /tmp/... suffix after '@').
+func formatPaneID(tmuxTarget string) string {
+	if idx := strings.Index(tmuxTarget, "@"); idx != -1 {
+		return tmuxTarget[:idx]
+	}
+	return tmuxTarget
+}
+
 func formatTokens(v float64) string {
 	if v >= 1_000_000 {
 		return fmt.Sprintf("%.1fM", v/1_000_000)
 	}
 	return fmt.Sprintf("%.1fk", v/1000)
+}
+
+// projectDisplay returns a display string for the project: compressed CWD if available, else raw project.
+func projectDisplay(project, cwd string) string {
+	if cwd != "" {
+		return CompressPath(cwd)
+	}
+	return project
 }
 
 func BuildNotificationText(data NotificationData) string {
@@ -74,10 +113,10 @@ func BuildNotificationText(data NotificationData) string {
 	}
 	lines := []string{
 		statusLine,
-		"Project: " + data.Project,
+		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+data.TmuxTarget)
+		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
 	}
 	if data.ContextUsedPct >= 0 {
 		used := float64(data.ContextUsedTokens)
@@ -100,10 +139,10 @@ func HeaderLen(data NotificationData) int {
 func BuildPermissionText(data PermissionData) string {
 	lines := []string{
 		"🔐 Permission Request",
-		"Project: " + data.Project,
+		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+data.TmuxTarget)
+		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
 	}
 	lines = append(lines, "", "🔧 Tool: "+data.ToolName)
 	// Show key fields from tool_input
@@ -123,10 +162,10 @@ func BuildPermissionText(data PermissionData) string {
 func BuildQuestionText(data QuestionData) string {
 	lines := []string{
 		"❓ Question",
-		"Project: " + data.Project,
+		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+data.TmuxTarget)
+		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
 	}
 	if len(data.Questions) > 1 {
 		for qIdx, q := range data.Questions {
