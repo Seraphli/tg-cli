@@ -97,6 +97,7 @@ type AppConfig struct {
 	Language      string `json:"language"`
 	FFmpegPath    string `json:"ffmpegPath"`
 	WhisperPrompt string `json:"whisperPrompt"`
+	VoicePrefix   string `json:"voicePrefix"`
 }
 
 func GetConfigPath() string {
@@ -109,7 +110,7 @@ func LoadAppConfig() (AppConfig, error) {
 	}
 	path := GetConfigPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return AppConfig{FFmpegPath: "ffmpeg"}, nil
+		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️"}, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -121,6 +122,9 @@ func LoadAppConfig() (AppConfig, error) {
 	}
 	if cfg.FFmpegPath == "" {
 		cfg.FFmpegPath = "ffmpeg"
+	}
+	if cfg.VoicePrefix == "" {
+		cfg.VoicePrefix = "🗣️"
 	}
 	return cfg, nil
 }
