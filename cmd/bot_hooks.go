@@ -15,6 +15,35 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+// cancelPendingFilesBySession marks all pending files for a session as cancelled.
+// Called when bot receives subsequent events (Stop/PreToolUse/UserPromptSubmit),
+// indicating user answered in TUI and CC has moved on.
+func cancelPendingFilesBySession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	dir := pendingDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		pf, err := readPendingFile(path)
+		if err != nil {
+			continue
+		}
+		if pf.SessionID == sessionID && pf.Status == "sent" {
+			pf.Status = "cancelled"
+			writePendingFile(path, pf)
+			logger.Info(fmt.Sprintf("Cancelled pending file: %s (session=%s)", entry.Name(), sessionID))
+		}
+	}
+}
+
 // cleanPendingFilesBySession removes all pending files for a session
 func cleanPendingFilesBySession(sessionID string) {
 	dir := pendingDir()
@@ -348,6 +377,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			cleanPendingFilesBySession(p.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
 		case "UserPromptSubmit":
+			cancelPendingFilesBySession(p.SessionID)
 			if p.SessionID != "" && p.TranscriptPath != "" {
 				lock := sessionCounts.getLock(p.SessionID)
 				lock.Lock()
@@ -361,11 +391,13 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				logger.Debug(fmt.Sprintf("Cleared reactions for tmux target: %s", p.TmuxTarget))
 			}
 		case "Stop":
+			cancelPendingFilesBySession(p.SessionID)
 			if chat != nil {
 				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
 				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.CWD, p.TmuxTarget, body)
 			}
 		case "PreToolUse":
+			cancelPendingFilesBySession(p.SessionID)
 			// PreToolUse: send intermediate notification
 			// Skip processTranscriptUpdates for AskUserQuestion — /pending/notify handler will call it
 			// to avoid race condition where both paths compete for sessionCounts

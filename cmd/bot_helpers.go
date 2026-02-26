@@ -823,9 +823,10 @@ type PendingFile struct {
 	HookPID    int             `json:"hook_pid"`
 }
 
-// pendingDir returns /tmp/tg-cli/pending/, creating it if needed
+// pendingDir returns /tmp/<config-dir-basename>/pending, creating it if needed
 func pendingDir() string {
-	dir := "/tmp/tg-cli/pending"
+	base := filepath.Base(config.GetConfigDir())
+	dir := filepath.Join("/tmp", base, "pending")
 	os.MkdirAll(dir, 0755)
 	return dir
 }
