@@ -139,7 +139,7 @@ func runHook(cmd *cobra.Command, args []string) {
 	toolName, _ := payload["tool_name"].(string)
 	if event == "PermissionRequest" {
 		uuid := generateUUID()
-		dir := "/tmp/tg-cli/pending/"
+		dir := filepath.Join("/tmp", filepath.Base(config.GetConfigDir()), "pending")
 		os.MkdirAll(dir, 0755)
 		pendingPath := filepath.Join(dir, uuid+".json")
 
@@ -191,6 +191,11 @@ func runHook(cmd *cobra.Command, args []string) {
 						fmt.Print(string(pf.CCOutput))
 						os.Remove(pendingPath)
 						hookExit(0, "answered")
+					}
+					if pf.Status == "cancelled" {
+						hookLog("cancelled by bot (session continued in TUI)")
+						os.Remove(pendingPath)
+						hookExit(0, "cancelled")
 					}
 				}
 			}
