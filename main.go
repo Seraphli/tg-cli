@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "1.5.1"
+var version = "1.5.2"
 var configDir string
 
 func main() {
