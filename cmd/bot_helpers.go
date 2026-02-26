@@ -183,6 +183,8 @@ func truncateStr(s string, maxRunes int) string {
 	return s
 }
 
+const autoCompactPct = 80
+
 func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize int, ok bool) {
 	path := filepath.Join(os.TempDir(), "tg-cli", "context", sessionID+".json")
 	data, err := os.ReadFile(path)
@@ -193,9 +195,8 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	if err := json.Unmarshal(data, &ctx); err != nil {
 		return 0, 0, 0, false
 	}
-	pct, pctOk := ctx["used_percentage"].(float64)
 	size, sizeOk := ctx["context_window_size"].(float64)
-	if !pctOk || !sizeOk {
+	if !sizeOk {
 		return 0, 0, 0, false
 	}
 	currentUsage, cuOk := ctx["current_usage"].(map[string]interface{})
@@ -205,7 +206,10 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	inputTokens, _ := currentUsage["input_tokens"].(float64)
 	cacheCreation, _ := currentUsage["cache_creation_input_tokens"].(float64)
 	cacheRead, _ := currentUsage["cache_read_input_tokens"].(float64)
-	return int(pct), int(inputTokens + cacheCreation + cacheRead), int(size), true
+	used := inputTokens + cacheCreation + cacheRead
+	effectiveLimit := size * autoCompactPct / 100
+	pct := int(used / effectiveLimit * 100)
+	return pct, int(used), int(effectiveLimit), true
 }
 
 func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body string) {
@@ -644,6 +648,31 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 }
 
 // handleCaptureCommand handles /bot_capture — captures pane content and replies with it.
+func shortenSeparators(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		runes := []rune(trimmed)
+		if len(runes) < 10 {
+			continue
+		}
+		sepCount := 0
+		for _, r := range runes {
+			switch {
+			case r >= 0x2500 && r <= 0x257F:
+				sepCount++
+			case r == '-' || r == '=' || r == '_':
+				sepCount++
+			}
+		}
+		if sepCount*100/len(runes) >= 80 {
+			firstSep := runes[0]
+			lines[i] = string([]rune{firstSep, firstSep, firstSep})
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	logger.Debug(fmt.Sprintf("handleCaptureCommand: target=%v", target))
 	content, err := injector.CapturePane(target)
@@ -654,6 +683,7 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	if content == "" {
 		return c.Reply("(empty pane)")
 	}
+	content = shortenSeparators(content)
 	const maxLen = 4000
 	if len(content) > maxLen {
 		content = "...(truncated, showing last 4000 chars)\n\n" + content[len(content)-maxLen:]

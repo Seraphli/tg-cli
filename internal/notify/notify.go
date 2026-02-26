@@ -121,7 +121,7 @@ func BuildNotificationText(data NotificationData) string {
 	if data.ContextUsedPct >= 0 {
 		used := float64(data.ContextUsedTokens)
 		usedStr := formatTokens(used)
-		totalStr := fmt.Sprintf("%dk", data.ContextWindowSize/1000)
+		totalStr := formatTokens(float64(data.ContextWindowSize))
 		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
 	}
 	if data.Body != "" {
