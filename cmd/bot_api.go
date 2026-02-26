@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -344,7 +345,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"routes":        creds.RouteMap,
+			"routes":         creds.RouteMap,
 			"project_routes": creds.ProjectRouteMap,
 		})
 	})
@@ -431,6 +432,8 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, "missing target or text", 400)
 			return
 		}
+		// Strip socket prefix so the target matches stored pane IDs
+		target = notify.FormatPaneID(target)
 		msgID, entry, ok := toolNotifs.findByTmuxTarget(target)
 		if !ok {
 			// No pending AskUserQuestion — inject text
@@ -622,5 +625,74 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": mode, "content": content})
+	})
+	mux.HandleFunc("/resume/list", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "missing target", 400)
+			return
+		}
+		parsed, err := injector.ParseTarget(target)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		tmuxStr := injector.FormatTarget(parsed)
+		info := sessionState.findInfoByTarget(tmuxStr)
+		if info == nil {
+			http.Error(w, "no session found for target", 400)
+			return
+		}
+		currentSID, _ := sessionState.findByTarget(tmuxStr)
+		sessions, err := listProjectSessions(info.cwd, 8, currentSID)
+		if err != nil {
+			http.Error(w, "failed to list sessions: "+err.Error(), 500)
+			return
+		}
+		type sessionJSON struct {
+			ID       string `json:"id"`
+			Prompt   string `json:"prompt"`
+			Source   string `json:"source"`
+			Modified string `json:"modified"`
+		}
+		var result []sessionJSON
+		for _, s := range sessions {
+			result = append(result, sessionJSON{
+				ID:       s.SessionID,
+				Prompt:   s.Summary,
+				Source:   s.SummarySource,
+				Modified: s.Modified.Format(time.RFC3339),
+			})
+		}
+		if result == nil {
+			result = []sessionJSON{}
+		}
+		logger.Info(fmt.Sprintf("Resume list: target=%s sessions=%d", tmuxStr, len(result)))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"sessions": result})
+	})
+	mux.HandleFunc("/resume/select", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		sessionID := r.URL.Query().Get("session_id")
+		if target == "" || sessionID == "" {
+			http.Error(w, "missing target or session_id", 400)
+			return
+		}
+		parsed, err := injector.ParseTarget(target)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if !checkSessionAlive(injector.FormatTarget(parsed), bot) {
+			http.Error(w, "session not alive", 410)
+			return
+		}
+		if err := injector.InjectText(parsed, "/resume "+sessionID); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		logger.Info(fmt.Sprintf("Resume injected via API: target=%s session=%s", injector.FormatTarget(parsed), sessionID))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
 	})
 }

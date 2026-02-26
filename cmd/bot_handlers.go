@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,90 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		})
 	}
 
+	bot.Handle("/resume", func(c tele.Context) error {
+		payload := strings.TrimSpace(c.Message().Payload)
+		// Resolve target: reply-to or group
+		var target injector.TmuxTarget
+		var tmuxStr string
+		if c.Message().ReplyTo != nil {
+			t, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				if err.Error() == "no target found" {
+					return c.Send("❌ No tmux session info found in the original message.")
+				}
+				return c.Send("❌ tmux session not found. The Claude Code session may have ended.")
+			}
+			target = t
+			tmuxStr = injector.FormatTarget(t)
+		} else if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+			ts, t, err := resolveGroupTarget(c.Chat().ID)
+			if err != nil {
+				if err.Error() == "no targets bound" {
+					return c.Send("💡 Please reply to a notification message to target a session.")
+				}
+				if err.Error() == "multiple sessions bound" {
+					return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+				}
+				return c.Reply("❌ tmux session not found.")
+			}
+			target = t
+			tmuxStr = ts
+			logger.Debug(fmt.Sprintf("/resume: resolved tmuxStr=%s", tmuxStr))
+		} else {
+			return c.Send("💡 Please reply to a notification message to target a session.")
+		}
+		// With payload: inject /resume <payload> directly
+		if payload != "" {
+			if err := injector.InjectText(target, "/resume "+payload); err != nil {
+				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
+			}
+			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+			return nil
+		}
+		// Without payload: show session picker
+		var cwd string
+		info := sessionState.findInfoByTarget(tmuxStr)
+		logger.Debug(fmt.Sprintf("/resume: findInfoByTarget tmuxStr=%s found=%v", tmuxStr, info != nil))
+		if info != nil && info.cwd != "" {
+			cwd = info.cwd
+		} else {
+			// Fallback: get CWD directly from tmux pane
+			out, err := exec.Command("tmux", "display-message", "-p", "-t", tmuxStr, "#{pane_current_path}").Output()
+			if err == nil {
+				cwd = strings.TrimSpace(string(out))
+			}
+			logger.Debug(fmt.Sprintf("/resume: tmux fallback cwd=%s", cwd))
+		}
+		if cwd == "" {
+			return c.Send("❌ No working directory info available for this session.")
+		}
+		currentSID, _ := sessionState.findByTarget(tmuxStr)
+		sessions, err := listProjectSessions(cwd, 8, currentSID)
+		if err != nil || len(sessions) == 0 {
+			return c.Send("📂 No previous sessions found for this project.")
+		}
+		if len(sessions) == 0 {
+			return c.Send("📂 No other sessions found for this project.")
+		}
+		kb := buildResumeKeyboard(sessions)
+		var lines []string
+		lines = append(lines, "📟 "+notify.FormatPaneID(tmuxStr))
+		lines = append(lines, "")
+		for i, s := range sessions {
+			prefix := "🤖"
+			if s.SummarySource == "user" {
+				prefix = "👤"
+			}
+			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, truncateStr(s.Summary, 120), relativeTime(s.Modified)))
+		}
+		text := strings.Join(lines, "\n")
+		_, err = bot.Send(c.Chat(), text, kb)
+		if err != nil {
+			return c.Send(fmt.Sprintf("❌ Failed to send: %v", err))
+		}
+		return nil
+	})
+
 	bot.Handle("/start", func(c tele.Context) error {
 		return c.Send("tg-cli bot is running. Use /bot_pair to pair this chat.")
 	})
@@ -167,7 +252,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 		}
-		info := sessionState.findByPaneID(target.PaneID)
+		info := sessionState.findInfoByTarget(target.PaneID)
 		if info != nil && info.cwd != "" {
 			// Show choice buttons
 			sel := &tele.ReplyMarkup{}
@@ -217,7 +302,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return c.Reply(fmt.Sprintf("✅ Unbound tmux session.\n📟 %s", tmuxStr))
 		}
 		// Check project route — needs confirmation
-		if info := sessionState.findByPaneID(target.PaneID); info != nil && info.cwd != "" {
+		if info := sessionState.findInfoByTarget(target.PaneID); info != nil && info.cwd != "" {
 			if _, ok := creds.ProjectRouteMap[info.cwd]; ok {
 				sel := &tele.ReplyMarkup{}
 				btnYes := sel.Data("✅ Yes, unbind", "unbind_confirm", "yes")

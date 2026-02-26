@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -114,9 +115,8 @@ func init() {
 }
 
 func runBot(cmd *cobra.Command, args []string) {
-	if debugFlag {
-		logger.SetDebugMode(true)
-	}
+	logPath := filepath.Join(config.GetConfigDir(), "bot.log")
+	logger.Init(logPath, debugFlag)
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load credentials: %v\n", err)
@@ -175,6 +175,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
 		tele.Command{Text: "bot_bind", Description: "Bind a tmux session to this chat"},
 		tele.Command{Text: "bot_unbind", Description: "Unbind a tmux session from this chat"},
+		tele.Command{Text: "resume", Description: "Resume a previous Claude Code session"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {

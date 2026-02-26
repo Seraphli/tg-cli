@@ -52,6 +52,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		logger.Error(fmt.Sprintf("Failed to parse pending payload %s: %v", uuid, err))
 		return
 	}
+	p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 	pf.SessionID = p.SessionID
 	pf.TmuxTarget = p.TmuxTarget
 	pf.ToolName = p.ToolName
@@ -304,6 +305,8 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			return
 		}
 		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
+		// Strip socket suffix so internal stores use bare pane IDs (e.g. %859 not %859@/tmp/...)
+		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 		// Re-register session on any hook event (survives bot restart)
 		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
 			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
@@ -315,8 +318,12 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				w.WriteHeader(200)
 				return
 			}
+			var body string
+			if p.Source == "resume" && p.TranscriptPath != "" {
+				body = readLastAssistantText(p.TranscriptPath, 500)
+			}
 			text := notify.BuildNotificationText(notify.NotificationData{
-				Event: "SessionStart", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
+				Event: "SessionStart", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget, Body: body,
 			})
 			bot.Send(chat, text)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
