@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -112,6 +113,9 @@ func readAssistantTexts(transcriptPath string) []string {
 		if typ, _ := entry["type"].(string); typ != "assistant" {
 			continue
 		}
+		if model, _ := entry["model"].(string); model == "<synthetic>" {
+			continue
+		}
 		msg, _ := entry["message"].(map[string]interface{})
 		if msg == nil {
 			continue
@@ -133,7 +137,10 @@ func readAssistantTexts(transcriptPath string) []string {
 			}
 		}
 		if len(textParts) > 0 {
-			texts = append(texts, strings.Join(textParts, "\n"))
+			joined := strings.Join(textParts, "\n")
+			if joined != "No response requested." {
+				texts = append(texts, joined)
+			}
 		}
 	}
 	return texts
@@ -289,7 +296,7 @@ func extractTmuxTarget(text string) (*injector.TmuxTarget, error) {
 				return nil, err
 			}
 			if target.Socket == "" {
-				if info := sessionState.findByPaneID(target.PaneID); info != nil {
+				if info := sessionState.findInfoByTarget(target.PaneID); info != nil {
 					full, _ := injector.ParseTarget(info.tmuxTarget)
 					if full.Socket != "" {
 						target.Socket = full.Socket
@@ -638,10 +645,12 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 
 // handleCaptureCommand handles /bot_capture — captures pane content and replies with it.
 func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
+	logger.Debug(fmt.Sprintf("handleCaptureCommand: target=%v", target))
 	content, err := injector.CapturePane(target)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("❌ Capture failed: %v", err))
 	}
+	logger.Debug(fmt.Sprintf("handleCaptureCommand: captured %d bytes", len(content)))
 	if content == "" {
 		return c.Reply("(empty pane)")
 	}
@@ -649,6 +658,7 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	if len(content) > maxLen {
 		content = "...(truncated, showing last 4000 chars)\n\n" + content[len(content)-maxLen:]
 	}
+	logger.Debug("handleCaptureCommand: sending reply")
 	return c.Reply(content)
 }
 
@@ -691,6 +701,7 @@ type hookPayload struct {
 	PermSuggestions json.RawMessage `json:"permission_suggestions"`
 	TmuxTarget      string          `json:"tmux_target"`
 	Project         string          `json:"project"`
+	Source          string          `json:"source"`
 }
 
 func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
@@ -953,12 +964,336 @@ func scanPendingDir(bot *tele.Bot, creds *config.Credentials) {
 	}
 }
 
+// sessionListEntry holds metadata for a discovered CC session.
+type sessionListEntry struct {
+	SessionID     string
+	Summary       string
+	SummarySource string // "assistant" or "user"
+	Modified      time.Time
+}
+
+// projectSlug converts an absolute path to a CC project slug by replacing
+// all slashes with dashes.
+func projectSlug(cwd string) string {
+	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// listProjectSessions scans ~/.claude/projects/<slug>/ for session JSONL files,
+// returns up to limit entries sorted by mtime descending.
+// excludeID is an optional session ID to skip (e.g. the currently active session).
+func listProjectSessions(cwd string, limit int, excludeID string) ([]sessionListEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(home, ".claude", "projects", projectSlug(cwd))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	type fileInfo struct {
+		path    string
+		name    string
+		modTime time.Time
+	}
+	var files []fileInfo
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{
+			path:    filepath.Join(dir, e.Name()),
+			name:    strings.TrimSuffix(e.Name(), ".jsonl"),
+			modTime: info.ModTime(),
+		})
+	}
+	// Sort by mtime descending
+	for i := 1; i < len(files); i++ {
+		for j := i; j > 0 && files[j].modTime.After(files[j-1].modTime); j-- {
+			files[j], files[j-1] = files[j-1], files[j]
+		}
+	}
+	var result []sessionListEntry
+	for _, f := range files {
+		if len(result) >= limit {
+			break
+		}
+		if excludeID != "" && f.name == excludeID {
+			continue
+		}
+		summary, source := readLastMeaningfulEntry(f.path, 300)
+		if summary == "" {
+			continue
+		}
+		result = append(result, sessionListEntry{
+			SessionID:     f.name,
+			Summary:       summary,
+			SummarySource: source,
+			Modified:      f.modTime,
+		})
+	}
+	return result, nil
+}
+
+// readFirstHumanPrompt reads the first human prompt text from a JSONL session file.
+// Returns "No prompt" if not found.
+func readFirstHumanPrompt(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "No prompt"
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	var cmdFallback string
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 20 {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Type   string `json:"type"`
+			IsMeta bool   `json:"isMeta"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		if entry.Type != "user" || entry.IsMeta {
+			continue
+		}
+		// Try string content first (most common for user prompts)
+		var contentStr string
+		if json.Unmarshal(entry.Message.Content, &contentStr) == nil && contentStr != "" {
+			if !isSystemTagContent(contentStr) {
+				return contentStr
+			}
+			if name := extractCommandName(contentStr); name != "" && cmdFallback == "" {
+				cmdFallback = name
+			}
+			continue
+		}
+		// Try array content format
+		var contentArr []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(entry.Message.Content, &contentArr) == nil {
+			for _, c := range contentArr {
+				if c.Type == "text" && c.Text != "" {
+					if !isSystemTagContent(c.Text) {
+						return c.Text
+					}
+					if name := extractCommandName(c.Text); name != "" && cmdFallback == "" {
+						cmdFallback = name
+					}
+				}
+			}
+		}
+	}
+	if cmdFallback != "" {
+		return cmdFallback
+	}
+	return "No prompt"
+}
+
+// extractCommandName extracts command name from <command-name>...</command-name> tag.
+func extractCommandName(content string) string {
+	const tag = "<command-name>"
+	const endTag = "</command-name>"
+	start := strings.Index(content, tag)
+	if start == -1 {
+		return ""
+	}
+	start += len(tag)
+	end := strings.Index(content[start:], endTag)
+	if end == -1 {
+		return ""
+	}
+	return content[start : start+end]
+}
+
+// isSystemTagContent checks if a string starts with a known CC system tag prefix.
+func isSystemTagContent(s string) bool {
+	prefixes := []string{"<local-command-", "<command-", "<task-notification", "<bash-input", "<system-reminder"}
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// readLastMeaningfulEntry scans a JSONL transcript file from end to start using
+// reverse chunk reading (32KB chunks), returning the first meaningful entry
+// (non-synthetic assistant output or non-command user input).
+// Returns (text, source) where source is "assistant" or "user", or ("", "") if nothing found.
+func readLastMeaningfulEntry(path string, maxLen int) (string, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", ""
+	}
+	fileSize := info.Size()
+	if fileSize == 0 {
+		return "", ""
+	}
+	const chunkSize = 32 * 1024
+	// Remainder carries a partial line from the beginning of the previous chunk
+	var remainder []byte
+	offset := fileSize
+	for offset > 0 {
+		readSize := int64(chunkSize)
+		if readSize > offset {
+			readSize = offset
+		}
+		offset -= readSize
+		buf := make([]byte, readSize)
+		if _, err := f.ReadAt(buf, offset); err != nil {
+			return "", ""
+		}
+		// Append remainder from previous iteration to end of this chunk
+		if len(remainder) > 0 {
+			buf = append(buf, remainder...)
+			remainder = nil
+		}
+		// Split into lines; first segment may be partial (carry to next iteration)
+		lines := bytes.Split(buf, []byte("\n"))
+		// If we haven't reached the start of the file, the first segment is partial
+		if offset > 0 {
+			remainder = lines[0]
+			lines = lines[1:]
+		}
+		// Process lines from end to start
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := bytes.TrimSpace(lines[i])
+			if len(line) == 0 {
+				continue
+			}
+			var entry struct {
+				Type    string `json:"type"`
+				IsMeta  bool   `json:"isMeta"`
+				Model   string `json:"model"`
+				Message struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(line, &entry) != nil {
+				continue
+			}
+			if entry.Type == "assistant" && entry.Model != "<synthetic>" {
+				var contentArr []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(entry.Message.Content, &contentArr) == nil {
+					var parts []string
+					for _, c := range contentArr {
+						if c.Type == "text" && c.Text != "" {
+							parts = append(parts, c.Text)
+						}
+					}
+					if len(parts) > 0 {
+						text := strings.Join(parts, "\n")
+						if text == "No response requested." {
+							continue
+						}
+						return truncateStr(text, maxLen), "assistant"
+					}
+				}
+				continue
+			}
+			if entry.Type == "user" && !entry.IsMeta {
+				// Try string content
+				var contentStr string
+				if json.Unmarshal(entry.Message.Content, &contentStr) == nil && contentStr != "" {
+					if !isSystemTagContent(contentStr) {
+						return truncateStr(contentStr, maxLen), "user"
+					}
+					continue
+				}
+				// Try array content
+				var contentArr []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(entry.Message.Content, &contentArr) == nil {
+					for _, c := range contentArr {
+						if c.Type == "text" && c.Text != "" {
+							if !isSystemTagContent(c.Text) {
+								return truncateStr(c.Text, maxLen), "user"
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+// readLastAssistantText reads the last assistant text from a JSONL transcript file.
+// Returns empty string if not found. Truncates to maxLen characters.
+func readLastAssistantText(path string, maxLen int) string {
+	texts := readAssistantTexts(path)
+	if len(texts) == 0 {
+		return ""
+	}
+	last := texts[len(texts)-1]
+	if len(last) > maxLen {
+		last = last[:maxLen] + "..."
+	}
+	return last
+}
+
+// relativeTime formats a time as a human-readable relative string ("Xm ago", "Xh ago", "Xd ago").
+func relativeTime(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// buildResumeKeyboard builds an inline keyboard with one button per session.
+// Button label: "📝 <prompt truncated to 40> • <relativeTime>".
+// Callback unique: "resume", data: session ID.
+func buildResumeKeyboard(sessions []sessionListEntry) *tele.ReplyMarkup {
+	markup := &tele.ReplyMarkup{}
+	var rows []tele.Row
+	for i, s := range sessions {
+		label := fmt.Sprintf("%d • %s", i+1, relativeTime(s.Modified))
+		rows = append(rows, markup.Row(markup.Data(label, "resume", s.SessionID)))
+	}
+	markup.Inline(rows...)
+	return markup
+}
+
 // rebuildInMemoryState reconstructs in-memory maps from a status=sent pending file
 func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 	var p hookPayload
 	if err := json.Unmarshal(pf.Payload, &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
+	pf.TmuxTarget = notify.FormatPaneID(pf.TmuxTarget)
 	if pf.ToolName == "AskUserQuestion" {
 		var askInput struct {
 			Questions []struct {

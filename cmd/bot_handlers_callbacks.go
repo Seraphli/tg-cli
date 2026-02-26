@@ -249,6 +249,47 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond()
 	})
 
+	bot.Handle(&tele.InlineButton{Unique: "resume"}, func(c tele.Context) error {
+		sessionID := c.Data()
+		targetPtr, err := extractTmuxTarget(c.Message().Text)
+		if err != nil || targetPtr == nil {
+			return c.Respond(&tele.CallbackResponse{Text: "No tmux target found"})
+		}
+		if !checkSessionAlive(injector.FormatTarget(*targetPtr), bot) {
+			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
+		}
+		if err := injector.InjectText(*targetPtr, "/resume "+sessionID); err != nil {
+			logger.Error(fmt.Sprintf("resume inject failed: target=%s session=%s err=%v", injector.FormatTarget(*targetPtr), sessionID, err))
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Injection failed"})
+		}
+		logger.Info(fmt.Sprintf("Resume injected: target=%s session=%s", injector.FormatTarget(*targetPtr), sessionID))
+		// Rebuild keyboard with ✅ on selected button
+		markup := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		for _, row := range c.Message().ReplyMarkup.InlineKeyboard {
+			var btns []tele.Btn
+			for _, btn := range row {
+				label := btn.Text
+				// Extract per-button session ID from callback data (\f<unique>|<sessionID>)
+				btnSessionID := sessionID
+				if idx := strings.Index(btn.Data, "|"); idx != -1 {
+					btnSessionID = btn.Data[idx+1:]
+				}
+				if btnSessionID == sessionID && !strings.HasPrefix(label, "✅") {
+					label = "✅ " + label
+				}
+				btns = append(btns, markup.Data(label, "resume", btnSessionID))
+			}
+			rows = append(rows, markup.Row(btns...))
+		}
+		markup.Inline(rows...)
+		if _, err := bot.Edit(c.Message(), c.Message().Text, markup); err != nil {
+			logger.Debug(fmt.Sprintf("resume edit markup error: %v", err))
+		}
+		reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(*targetPtr))
+		return c.Respond(&tele.CallbackResponse{Text: "✅ Resuming"})
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
 		action := c.Data() // "yes" or "no"
 		val, ok := unbindPending.Load(c.Message().ID)

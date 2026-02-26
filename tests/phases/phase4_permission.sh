@@ -13,7 +13,7 @@ LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[Phase 4] BEFORE permission prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt"
+inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[Phase 4] AFTER sending permission prompt"
 
 # Wait for permission request in bot log

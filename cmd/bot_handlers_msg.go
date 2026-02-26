@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	"github.com/Seraphli/tg-cli/internal/voice"
 	tele "gopkg.in/telebot.v3"
@@ -30,15 +32,36 @@ func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
 	for cwd, cid := range creds.ProjectRouteMap {
 		if cid == chatID {
 			if info := sessionState.findByCWD(cwd); info != nil {
+				normalized := notify.FormatPaneID(info.tmuxTarget)
 				found := false
 				for _, t := range targets {
-					if t == info.tmuxTarget {
+					if notify.FormatPaneID(t) == normalized {
 						found = true
 						break
 					}
 				}
 				if !found {
 					targets = append(targets, info.tmuxTarget)
+				}
+			} else {
+				out, scanErr := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}").Output()
+				if scanErr == nil {
+					for _, pl := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+						parts := strings.SplitN(pl, "\t", 3)
+						if len(parts) == 3 && parts[1] == cwd && parts[2] == "claude" {
+							normalized := notify.FormatPaneID(parts[0])
+							found := false
+							for _, t := range targets {
+								if notify.FormatPaneID(t) == normalized {
+									found = true
+									break
+								}
+							}
+							if !found {
+								targets = append(targets, parts[0])
+							}
+						}
+					}
 				}
 			}
 		}
@@ -123,6 +146,10 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	// Group path: no reply, group/supergroup chat
 	if c.Message().ReplyTo == nil {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
+			return nil
+		}
+		// Skip forwarded messages (used for /bot_bind, not injection)
+		if c.Message().OriginalUnixtime != 0 {
 			return nil
 		}
 		tmuxStr, target, err := resolveGroupTarget(c.Chat().ID)

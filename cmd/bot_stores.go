@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -35,7 +35,6 @@ var ccBuiltinCommands = map[string]string{
 	"permissions":    "View/update permissions",
 	"plan":           "Enter plan mode",
 	"rename":         "Rename current session",
-	"resume":         "Resume a conversation",
 	"rewind":         "Rewind conversation",
 	"stats":          "Show usage stats",
 	"status":         "Show status",
@@ -238,8 +237,9 @@ func (ts *toolNotifyStore) markResolved(msgID int) {
 func (ts *toolNotifyStore) findByTmuxTarget(tmuxTarget string) (int, *toolNotifyEntry, bool) {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
+	normalized := notify.FormatPaneID(tmuxTarget)
 	for msgID, e := range ts.entries {
-		if e.tmuxTarget == tmuxTarget && e.toolName == "AskUserQuestion" && !e.resolved {
+		if notify.FormatPaneID(e.tmuxTarget) == normalized && e.toolName == "AskUserQuestion" && !e.resolved {
 			return msgID, e, true
 		}
 	}
@@ -357,12 +357,26 @@ func (s *sessionStateStore) all() map[string]sessionInfo {
 func (s *sessionStateStore) findByTarget(target string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	normalized := notify.FormatPaneID(target)
 	for sid, info := range s.sessions {
-		if info.tmuxTarget == target {
+		if notify.FormatPaneID(info.tmuxTarget) == normalized {
 			return sid, true
 		}
 	}
 	return "", false
+}
+
+func (s *sessionStateStore) findInfoByTarget(target string) *sessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	normalized := notify.FormatPaneID(target)
+	for _, info := range s.sessions {
+		if notify.FormatPaneID(info.tmuxTarget) == normalized {
+			cp := info
+			return &cp
+		}
+	}
+	return nil
 }
 
 // findByCWD returns the sessionInfo for the first active session with matching CWD, or nil.
@@ -371,23 +385,6 @@ func (s *sessionStateStore) findByCWD(cwd string) *sessionInfo {
 	defer s.mu.RUnlock()
 	for _, info := range s.sessions {
 		if info.cwd == cwd {
-			cp := info
-			return &cp
-		}
-	}
-	return nil
-}
-
-// findByPaneID returns the sessionInfo for the first session whose tmuxTarget parses to the given pane ID.
-func (s *sessionStateStore) findByPaneID(paneID string) *sessionInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, info := range s.sessions {
-		t, err := injector.ParseTarget(info.tmuxTarget)
-		if err != nil {
-			continue
-		}
-		if t.PaneID == paneID {
 			cp := info
 			return &cp
 		}

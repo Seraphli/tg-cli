@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var serviceDebug bool
+
 var ServiceCmd = &cobra.Command{
 	Use:   "service",
 	Short: "Manage systemd user service",
@@ -26,6 +28,7 @@ func init() {
 	ServiceCmd.AddCommand(serviceRestartCmd)
 	ServiceCmd.AddCommand(serviceStatusCmd)
 	ServiceCmd.AddCommand(serviceUpgradeCmd)
+	serviceInstallCmd.Flags().BoolVar(&serviceDebug, "debug", false, "Enable debug logging")
 }
 
 func serviceName() string {
@@ -105,6 +108,9 @@ var serviceInstallCmd = &cobra.Command{
 		execStart := binPath + " bot"
 		if config.ConfigDir != "" {
 			execStart = binPath + " --config-dir " + config.ConfigDir + " bot"
+		}
+		if serviceDebug {
+			execStart += " --debug"
 		}
 		unitPath := unitFilePath()
 		os.MkdirAll(filepath.Dir(unitPath), 0755)
@@ -198,6 +204,9 @@ var serviceUpgradeCmd = &cobra.Command{
 				newVersion = parts[len(parts)-1]
 			}
 		}
+		// Read existing unit file to preserve debug flag
+		unitData, _ := os.ReadFile(unitFilePath())
+		hasDebug := strings.Contains(string(unitData), "--debug")
 		fmt.Printf("Upgrading from v%s to v%s\n", oldVersion, newVersion)
 		fmt.Println("Stopping service...")
 		systemctl("stop", serviceName())
@@ -207,6 +216,27 @@ var serviceUpgradeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		os.Chmod(binPath, 0755)
+		// Regenerate unit file preserving debug flag
+		execStart := binPath + " bot"
+		if config.ConfigDir != "" {
+			execStart = binPath + " --config-dir " + config.ConfigDir + " bot"
+		}
+		if hasDebug {
+			execStart += " --debug"
+		}
+		unitPath := unitFilePath()
+		tmpl, _ := template.New("unit").Parse(unitTemplate)
+		f, err := os.Create(unitPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create unit file: %v\n", err)
+			os.Exit(1)
+		}
+		tmpl.Execute(f, map[string]string{
+			"ExecStart": execStart,
+			"ConfigDir": config.ConfigDir,
+		})
+		f.Close()
+		systemctl("daemon-reload")
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
 		fmt.Printf("Upgrade complete (v%s)\n", newVersion)

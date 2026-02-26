@@ -68,8 +68,8 @@ func CompressPath(path string) string {
 	return strings.Join(parts, sep)
 }
 
-// formatPaneID extracts the pane ID from a tmux target string (strips the /tmp/... suffix after '@').
-func formatPaneID(tmuxTarget string) string {
+// FormatPaneID extracts the pane ID from a tmux target string (strips the /tmp/... suffix after '@').
+func FormatPaneID(tmuxTarget string) string {
 	if idx := strings.Index(tmuxTarget, "@"); idx != -1 {
 		return tmuxTarget[:idx]
 	}
@@ -116,7 +116,7 @@ func BuildNotificationText(data NotificationData) string {
 		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
 	}
 	if data.ContextUsedPct >= 0 {
 		used := float64(data.ContextUsedTokens)
@@ -142,7 +142,7 @@ func BuildPermissionText(data PermissionData) string {
 		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
 	}
 	lines = append(lines, "", "🔧 Tool: "+data.ToolName)
 	// Show key fields from tool_input
@@ -165,7 +165,7 @@ func BuildQuestionText(data QuestionData) string {
 		"Project: " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+formatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
 	}
 	if len(data.Questions) > 1 {
 		for qIdx, q := range data.Questions {
