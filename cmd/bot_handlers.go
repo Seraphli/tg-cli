@@ -168,7 +168,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if s.SummarySource == "user" {
 				prefix = "👤"
 			}
-			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, truncateStr(s.Summary, 120), relativeTime(s.Modified)))
+			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, truncateStr(s.Summary, 500), relativeTime(s.Modified)))
 		}
 		text := strings.Join(lines, "\n")
 		_, err = bot.Send(c.Chat(), text, kb)
