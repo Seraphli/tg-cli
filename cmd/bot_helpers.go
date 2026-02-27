@@ -50,10 +50,7 @@ func scanCustomCommands() map[string]customCmd {
 				line := strings.TrimSpace(scanner.Text())
 				line = strings.TrimLeft(line, "# ")
 				if len(line) > 0 {
-					if len(line) > 200 {
-						line = line[:200]
-					}
-					desc = line
+					desc = truncateStr(line, 200)
 				}
 			}
 			f.Close()
@@ -684,9 +681,10 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 		return c.Reply("(empty pane)")
 	}
 	content = shortenSeparators(content)
-	const maxLen = 4000
-	if len(content) > maxLen {
-		content = "...(truncated, showing last 4000 chars)\n\n" + content[len(content)-maxLen:]
+	const maxRunes = 4000
+	r := []rune(content)
+	if len(r) > maxRunes {
+		content = "...(truncated)\n\n" + string(r[len(r)-maxRunes:])
 	}
 	logger.Debug("handleCaptureCommand: sending reply")
 	return c.Reply(content)
@@ -1056,7 +1054,7 @@ func listProjectSessions(cwd string, limit int, excludeID string) ([]sessionList
 		if excludeID != "" && f.name == excludeID {
 			continue
 		}
-		summary, source := readLastMeaningfulEntry(f.path, 300)
+		summary, source := readLastMeaningfulEntry(f.path, 4000)
 		if summary == "" {
 			continue
 		}
@@ -1285,10 +1283,7 @@ func readLastAssistantText(path string, maxLen int) string {
 		return ""
 	}
 	last := texts[len(texts)-1]
-	if len(last) > maxLen {
-		last = last[:maxLen] + "..."
-	}
-	return last
+	return truncateStr(last, maxLen)
 }
 
 // relativeTime formats a time as a human-readable relative string ("Xm ago", "Xh ago", "Xd ago").
