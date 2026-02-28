@@ -344,6 +344,7 @@ func (s *sessionStateStore) remove(sessionID string) {
 	delete(s.sessions, sessionID)
 }
 
+
 func (s *sessionStateStore) all() map[string]sessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

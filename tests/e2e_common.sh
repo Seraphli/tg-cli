@@ -155,6 +155,7 @@ start_claude() {
 
 setup_hooks() {
   ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
+  claude mcp add --scope local --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT"
   echo "Hooks installed."
 }
 
@@ -162,6 +163,7 @@ cleanup_sessions() {
   echo ""
   echo "Cleaning up..."
   rm -f "$TEST_SETTINGS"
+  claude mcp remove tg-cli -s local 2>/dev/null || true
   tmux kill-session -t "$BOT_SESSION" 2>/dev/null || true
   tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
 }

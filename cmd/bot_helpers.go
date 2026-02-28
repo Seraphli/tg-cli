@@ -233,7 +233,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), truncateStr(body, 200)))
-			logger.Info(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
+			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
 	} else {
 		nd.Body = chunks[0]
@@ -254,7 +254,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 				chatID:     chat.ID,
 			})
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
-			logger.Info(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
+			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
 	}
 }
@@ -729,7 +729,8 @@ type hookPayload struct {
 	PermSuggestions json.RawMessage `json:"permission_suggestions"`
 	TmuxTarget      string          `json:"tmux_target"`
 	Project         string          `json:"project"`
-	Source          string          `json:"source"`
+	Source               string          `json:"source"`
+	LastAssistantMessage string          `json:"last_assistant_message"`
 }
 
 func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
