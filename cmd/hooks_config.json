@@ -1,0 +1,14 @@
+{
+  "hooks": [
+    {"event": "Stop", "matcher": "", "timeout": 5},
+    {"event": "SessionStart", "matcher": "", "timeout": 5},
+    {"event": "SessionEnd", "matcher": "", "timeout": 5},
+    {"event": "PermissionRequest", "matcher": "", "timeout": 2147483},
+    {"event": "PreToolUse", "matcher": "", "timeout": 2147483},
+    {"event": "UserPromptSubmit", "matcher": "", "timeout": 5, "async": true}
+  ],
+  "cleanup_hooks": ["SubagentStop"],
+  "permissions": {
+    "allow": ["mcp__tg-cli__send_file"]
+  }
+}

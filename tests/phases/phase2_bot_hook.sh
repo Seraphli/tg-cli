@@ -63,6 +63,13 @@ else
   fail "1st TG notification (no notification within ${TIMEOUT}s)"
 fi
 
+# Extract test session ID for Phase 14 resume test
+TEST_SID=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -oP 'Session tracked: \K[^ ]+' | head -1)
+if [ -n "$TEST_SID" ]; then
+  echo "$TEST_SID" > /tmp/tg-cli-e2e-session-id.txt
+  echo "  Test session ID saved: $TEST_SID"
+fi
+
 # Verify hook included tmux target in debug log
 NEW_LOGS=$(tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE")
 if echo "$NEW_LOGS" | grep "Raw hook payload" > /dev/null 2>&1; then

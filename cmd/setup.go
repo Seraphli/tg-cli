@@ -1,15 +1,33 @@
 package cmd
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
 )
+
+//go:embed hooks_config.json
+var hooksConfigJSON []byte
+
+type hookEntry struct {
+	Event   string `json:"event"`
+	Matcher string `json:"matcher"`
+	Timeout int    `json:"timeout"`
+	Async   bool   `json:"async,omitempty"`
+}
+
+type hooksConfig struct {
+	Hooks        []hookEntry         `json:"hooks"`
+	CleanupHooks []string            `json:"cleanup_hooks"`
+	Permissions  map[string][]string `json:"permissions"`
+}
 
 var SetupCmd = &cobra.Command{
 	Use:   "setup",
@@ -76,34 +94,23 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if !ok {
 		hooks = make(map[string]interface{})
 	}
-	type hookCfg struct {
-		matcher string
-		timeout int
-		async   bool
-	}
-	configs := map[string]hookCfg{
-		"Stop":              {matcher: "", timeout: 5},
-		"SessionStart":      {matcher: "", timeout: 5},
-		"SessionEnd":        {matcher: "", timeout: 5},
-		"PermissionRequest": {matcher: "", timeout: 2147483},
-		"PreToolUse":        {matcher: "", timeout: 2147483},
-		"UserPromptSubmit":  {matcher: "", timeout: 5, async: true},
-	}
-	for event, cfg := range configs {
+	var hcfg hooksConfig
+	json.Unmarshal(hooksConfigJSON, &hcfg)
+	for _, hk := range hcfg.Hooks {
 		entry := map[string]interface{}{
-			"matcher": cfg.matcher,
+			"matcher": hk.Matcher,
 			"hooks": []map[string]interface{}{
 				{
 					"type":    "command",
 					"command": hookCommand,
-					"timeout": cfg.timeout,
+					"timeout": hk.Timeout,
 				},
 			},
 		}
-		if cfg.async {
+		if hk.Async {
 			entry["hooks"].([]map[string]interface{})[0]["async"] = true
 		}
-		existing, ok := hooks[event].([]interface{})
+		existing, ok := hooks[hk.Event].([]interface{})
 		if !ok {
 			existing = []interface{}{}
 		}
@@ -129,9 +136,9 @@ func runSetup(cmd *cobra.Command, args []string) {
 		if !setupUninstallFlag {
 			filtered = append(filtered, entry)
 		}
-		hooks[event] = filtered
+		hooks[hk.Event] = filtered
 	}
-	for _, event := range []string{"SubagentStop"} {
+	for _, event := range hcfg.CleanupHooks {
 		existing, ok := hooks[event].([]interface{})
 		if !ok {
 			existing = []interface{}{}
@@ -158,6 +165,59 @@ func runSetup(cmd *cobra.Command, args []string) {
 		hooks[event] = filtered
 	}
 	settings["hooks"] = hooks
+	// Manage permissions
+	if len(hcfg.Permissions) > 0 {
+		perms, _ := settings["permissions"].(map[string]interface{})
+		if perms == nil {
+			perms = make(map[string]interface{})
+		}
+		if setupUninstallFlag {
+			// Remove tg-cli permissions
+			if existing, ok := perms["allow"].([]interface{}); ok {
+				filtered := []interface{}{}
+				for _, p := range existing {
+					ps, _ := p.(string)
+					isTgCli := false
+					for _, allowed := range hcfg.Permissions["allow"] {
+						if ps == allowed {
+							isTgCli = true
+							break
+						}
+					}
+					if !isTgCli {
+						filtered = append(filtered, p)
+					}
+				}
+				if len(filtered) > 0 {
+					perms["allow"] = filtered
+				} else {
+					delete(perms, "allow")
+				}
+			}
+			if len(perms) == 0 {
+				delete(settings, "permissions")
+			} else {
+				settings["permissions"] = perms
+			}
+		} else {
+			// Add tg-cli permissions (idempotent)
+			existing, _ := perms["allow"].([]interface{})
+			for _, allowed := range hcfg.Permissions["allow"] {
+				found := false
+				for _, p := range existing {
+					if ps, _ := p.(string); ps == allowed {
+						found = true
+						break
+					}
+				}
+				if !found {
+					existing = append(existing, allowed)
+				}
+			}
+			perms["allow"] = existing
+			settings["permissions"] = perms
+		}
+	}
 	// Register statusLine command so CC statusbar shows context window usage
 	var statusLineCmd string
 	if config.ConfigDir != "" {
@@ -211,8 +271,26 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if setupUninstallFlag {
 		fmt.Printf("Hooks uninstalled from %s\n", settingsPath)
 		fmt.Printf("Removed hooks for instance: %s\n", instanceDesc)
+		// Unregister MCP server
+		mcpRm := exec.Command("claude", "mcp", "remove", "tg-cli", "-s", "user")
+		if err := mcpRm.Run(); err != nil {
+			fmt.Printf("MCP unregistration skipped (claude CLI not found or failed): %v\n", err)
+		} else {
+			fmt.Println("MCP server unregistered.")
+		}
 	} else {
 		fmt.Printf("Hooks installed to %s\n", settingsPath)
 		fmt.Printf("Hook command: %s\n", hookCommand)
+		// Register MCP server
+		mcpArgs := []string{"mcp", "add", "--scope", "user", "--transport", "stdio", "tg-cli", "--", hookBin, "mcp"}
+		if config.ConfigDir != "" {
+			mcpArgs = append(mcpArgs, "--config-dir", config.ConfigDir)
+		}
+		mcpAdd := exec.Command("claude", mcpArgs...)
+		if err := mcpAdd.Run(); err != nil {
+			fmt.Printf("MCP registration skipped (claude CLI not found or failed): %v\n", err)
+		} else {
+			fmt.Println("MCP server registered.")
+		}
 	}
 }

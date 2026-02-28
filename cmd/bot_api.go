@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -594,6 +595,49 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		pendingFiles.remove(msgID)
 		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/mcp/send-file", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			FilePath string `json:"file_path"`
+			Caption  string `json:"caption"`
+			CWD      string `json:"cwd"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid request"})
+			return
+		}
+		info, err := os.Stat(req.FilePath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file not found: %s", req.FilePath)})
+			return
+		}
+		if !info.Mode().IsRegular() {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not a regular file"})
+			return
+		}
+		if info.Size() > 50*1024*1024 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file too large: %d bytes (max 50MB for Telegram Bot API)", info.Size())})
+			return
+		}
+		chat, _ := resolveChat("", req.CWD)
+		doc := &tele.Document{
+			File:     tele.FromDisk(req.FilePath),
+			FileName: filepath.Base(req.FilePath),
+			Caption:  req.Caption,
+		}
+		msg, err := bot.Send(chat, doc)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})
+			return
+		}
+		logger.Info(fmt.Sprintf("[MCP] File sent: %s to chat %d (msg_id=%d)", filepath.Base(req.FilePath), chat.ID, msg.ID))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": fmt.Sprintf("File sent: %s", filepath.Base(req.FilePath))})
 	})
 	mux.HandleFunc("/perm/status", func(w http.ResponseWriter, r *http.Request) {
 		targetStr := r.URL.Query().Get("target")

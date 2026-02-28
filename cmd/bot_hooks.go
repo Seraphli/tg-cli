@@ -8,12 +8,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
+
+var hookSessionLocks sync.Map // session_id -> *sync.Mutex
+
+func getHookSessionLock(sessionID string) *sync.Mutex {
+	v, _ := hookSessionLocks.LoadOrStore(sessionID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
 
 // cancelPendingFilesBySession marks all pending files for a session as cancelled.
 // Called when bot receives subsequent events (Stop/PreToolUse/UserPromptSubmit),
@@ -340,6 +348,11 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
 			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
 		}
+		if p.SessionID != "" {
+			mu := getHookSessionLock(p.SessionID)
+			mu.Lock()
+			defer mu.Unlock()
+		}
 		chat, chatID := resolveChat(p.TmuxTarget, p.CWD)
 		switch event {
 		case "SessionStart":
@@ -393,7 +406,15 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		case "Stop":
 			cancelPendingFilesBySession(p.SessionID)
 			if chat != nil {
-				body := processTranscriptUpdates(p.SessionID, p.TranscriptPath)
+				body := p.LastAssistantMessage
+				// Update session count for consistency with PreToolUse
+				if p.SessionID != "" && p.TranscriptPath != "" {
+					lock := sessionCounts.getLock(p.SessionID)
+					lock.Lock()
+					texts := readAssistantTexts(p.TranscriptPath)
+					sessionCounts.counts[p.SessionID] = len(texts)
+					lock.Unlock()
+				}
 				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.CWD, p.TmuxTarget, body)
 			}
 		case "PreToolUse":
