@@ -26,7 +26,8 @@ func getHookSessionLock(sessionID string) *sync.Mutex {
 // cancelPendingFilesBySession marks all pending files for a session as cancelled.
 // Called when bot receives subsequent events (Stop/PreToolUse/UserPromptSubmit),
 // indicating user answered in TUI and CC has moved on.
-func cancelPendingFilesBySession(sessionID string) {
+// Also cleans up toolNotifs/TG message state for any associated question messages.
+func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 	if sessionID == "" {
 		return
 	}
@@ -47,6 +48,14 @@ func cancelPendingFilesBySession(sessionID string) {
 		if pf.SessionID == sessionID && pf.Status == "sent" {
 			pf.Status = "cancelled"
 			writePendingFile(path, pf)
+			if pf.TgMsgID != 0 {
+				if notifEntry, ok := toolNotifs.get(pf.TgMsgID); ok && !notifEntry.resolved {
+					toolNotifs.markResolved(pf.TgMsgID)
+					editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: pf.TgChatID}}
+					bot.Edit(editMsg, notifEntry.msgText, buildFrozenMarkup(notifEntry, "⌨️ Answered on desktop"))
+				}
+				pendingFiles.remove(pf.TgMsgID)
+			}
 			logger.Info(fmt.Sprintf("Cancelled pending file: %s (session=%s)", entry.Name(), sessionID))
 		}
 	}
@@ -346,7 +355,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 		// Re-register session on any hook event (survives bot restart)
 		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
-			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
+			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
 		}
 		if p.SessionID != "" {
 			mu := getHookSessionLock(p.SessionID)
@@ -370,7 +379,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			bot.Send(chat, text)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			if p.SessionID != "" && p.TmuxTarget != "" {
-				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD)
+				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
 				logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
 			}
 		case "SessionEnd":
@@ -390,7 +399,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			cleanPendingFilesBySession(p.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
 		case "UserPromptSubmit":
-			cancelPendingFilesBySession(p.SessionID)
+			cancelPendingFilesBySession(p.SessionID, bot)
 			if p.SessionID != "" && p.TranscriptPath != "" {
 				lock := sessionCounts.getLock(p.SessionID)
 				lock.Lock()
@@ -404,7 +413,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				logger.Debug(fmt.Sprintf("Cleared reactions for tmux target: %s", p.TmuxTarget))
 			}
 		case "Stop":
-			cancelPendingFilesBySession(p.SessionID)
+			cancelPendingFilesBySession(p.SessionID, bot)
 			if chat != nil {
 				body := p.LastAssistantMessage
 				// Update session count for consistency with PreToolUse
@@ -418,7 +427,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, p.CWD, p.TmuxTarget, body)
 			}
 		case "PreToolUse":
-			cancelPendingFilesBySession(p.SessionID)
+			cancelPendingFilesBySession(p.SessionID, bot)
 			// PreToolUse: send intermediate notification
 			// Skip processTranscriptUpdates for AskUserQuestion — /pending/notify handler will call it
 			// to avoid race condition where both paths compete for sessionCounts

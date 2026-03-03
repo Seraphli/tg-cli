@@ -290,6 +290,54 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Resuming"})
 	})
 
+	bot.Handle(&tele.InlineButton{Unique: "unbind_select"}, func(c tele.Context) error {
+		data := strings.TrimSpace(c.Data())
+		num, err := strconv.Atoi(data)
+		if err != nil {
+			bot.Edit(c.Message(), "❌ Invalid selection.")
+			return c.Respond()
+		}
+		val, ok := unbindMenuItems.LoadAndDelete(c.Message().ID)
+		if !ok {
+			bot.Edit(c.Message(), "❌ Menu expired. Send /bot_unbind again.")
+			return c.Respond()
+		}
+		items := val.([]unbindItem)
+		idx := num - 1
+		if idx < 0 || idx >= len(items) {
+			bot.Edit(c.Message(), "❌ Selection out of range.")
+			return c.Respond()
+		}
+		item := items[idx]
+		switch item.kind {
+		case "tmux":
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+				return c.Respond()
+			}
+			delete(creds.RouteMap, item.key)
+			config.SaveCredentials(creds)
+			logger.Info(fmt.Sprintf("Route unbound (menu/tmux): tmux=%s", item.key))
+			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound tmux route.\n📟 %s", getPaneLabel(item.key)))
+		case "project":
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+				return c.Respond()
+			}
+			delete(creds.ProjectRouteMap, item.key)
+			config.SaveCredentials(creds)
+			logger.Info(fmt.Sprintf("Route unbound (menu/project): cwd=%s", item.key))
+			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(item.key)))
+		case "session":
+			sessionState.remove(item.key)
+			logger.Info(fmt.Sprintf("Route unbound (menu/session): sid=%s", item.key))
+			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound session.\n🔑 %s", item.key[:8]))
+		}
+		return c.Respond()
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
 		action := c.Data() // "yes" or "no"
 		val, ok := unbindPending.Load(c.Message().ID)

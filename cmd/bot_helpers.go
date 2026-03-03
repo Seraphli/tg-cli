@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1005,7 +1006,8 @@ type sessionListEntry struct {
 // projectSlug converts an absolute path to a CC project slug by replacing
 // all slashes with dashes.
 func projectSlug(cwd string) string {
-	return strings.ReplaceAll(cwd, "/", "-")
+	s := strings.ReplaceAll(cwd, "/", "-")
+	return strings.ReplaceAll(s, "_", "-")
 }
 
 // listProjectSessions scans ~/.claude/projects/<slug>/ for session JSONL files,
@@ -1017,6 +1019,62 @@ func listProjectSessions(cwd string, limit int, excludeID string) ([]sessionList
 		return nil, err
 	}
 	dir := filepath.Join(home, ".claude", "projects", projectSlug(cwd))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	type fileInfo struct {
+		path    string
+		name    string
+		modTime time.Time
+	}
+	var files []fileInfo
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{
+			path:    filepath.Join(dir, e.Name()),
+			name:    strings.TrimSuffix(e.Name(), ".jsonl"),
+			modTime: info.ModTime(),
+		})
+	}
+	// Sort by mtime descending
+	for i := 1; i < len(files); i++ {
+		for j := i; j > 0 && files[j].modTime.After(files[j-1].modTime); j-- {
+			files[j], files[j-1] = files[j-1], files[j]
+		}
+	}
+	var result []sessionListEntry
+	for _, f := range files {
+		if len(result) >= limit {
+			break
+		}
+		if excludeID != "" && f.name == excludeID {
+			continue
+		}
+		summary, source := readLastMeaningfulEntry(f.path, 4000)
+		if summary == "" {
+			continue
+		}
+		result = append(result, sessionListEntry{
+			SessionID:     f.name,
+			Summary:       summary,
+			SummarySource: source,
+			Modified:      f.modTime,
+		})
+	}
+	return result, nil
+}
+
+// listProjectSessionsByDir scans a specific directory for session JSONL files,
+// returns up to limit entries sorted by mtime descending.
+// excludeID is an optional session ID to skip (e.g. the currently active session).
+func listProjectSessionsByDir(dir string, limit int, excludeID string) ([]sessionListEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -1378,4 +1436,57 @@ func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 	pendingFiles.store(pf.TgMsgID, pf.UUID)
 	logger.Info(fmt.Sprintf("scanPendingDir: rebuilt PermissionRequest state: msg_id=%d tool=%s tmux=%s uuid=%s", pf.TgMsgID, pf.ToolName, pf.TmuxTarget, pf.UUID))
 	return nil
+}
+
+// cleanStaleRoutes removes RouteMap entries whose tmux session no longer exists
+// and notifies the associated chat.
+func cleanStaleRoutes(bot *tele.Bot) {
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return
+	}
+	var stale []string
+	for tmuxTarget := range creds.RouteMap {
+		target, err := injector.ParseTarget(tmuxTarget)
+		if err != nil {
+			stale = append(stale, tmuxTarget)
+			continue
+		}
+		if !injector.SessionExists(target) {
+			stale = append(stale, tmuxTarget)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	for _, tmuxTarget := range stale {
+		paneID := tmuxTarget
+		if idx := strings.Index(paneID, "@"); idx != -1 {
+			paneID = paneID[:idx]
+		}
+		chatID := creds.RouteMap[tmuxTarget]
+		delete(creds.RouteMap, tmuxTarget)
+		bot.Send(&tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
+		logger.Info(fmt.Sprintf("Startup cleanup: removed stale route tmux=%s chat=%d", tmuxTarget, chatID))
+	}
+	config.SaveCredentials(creds)
+}
+
+// getPaneLabel returns a human-readable label (session:window.pane) for the given tmux target.
+func getPaneLabel(tmuxTarget string) string {
+	paneID := notify.FormatPaneID(tmuxTarget)
+	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{session_name}:#{window_name}.#{pane_index}").Output()
+	if err != nil {
+		return paneID
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// getPaneCWD returns the current working directory of the given tmux pane.
+func getPaneCWD(paneID string) string {
+	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_current_path}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

@@ -3,8 +3,12 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
+	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
@@ -318,10 +322,11 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 	delete(s.locks, sessionID)
 }
 
-// sessionInfo holds the tmux target and working directory for a CC session.
+// sessionInfo holds the tmux target, working directory, and project dir for a CC session.
 type sessionInfo struct {
 	tmuxTarget string
 	cwd        string
+	projectDir string
 }
 
 // sessionStateStore tracks active CC sessions and their associated info.
@@ -332,16 +337,95 @@ type sessionStateStore struct {
 
 var sessionState = &sessionStateStore{sessions: make(map[string]sessionInfo)}
 
-func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd string) {
+func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath string) {
+	// Prefer tmux pane cwd (stable during CC session)
+	if tmuxCWD := getPaneCWD(tmuxTarget); tmuxCWD != "" {
+		cwd = tmuxCWD
+	}
+	projectDir := ""
+	if transcriptPath != "" {
+		projectDir = filepath.Dir(transcriptPath)
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd}
+	for id, info := range s.sessions {
+		if info.tmuxTarget == tmuxTarget && id != sessionID {
+			delete(s.sessions, id)
+		}
+	}
+	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir}
+	s.mu.Unlock()
+	s.save()
 }
 
 func (s *sessionStateStore) remove(sessionID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.sessions, sessionID)
+	s.mu.Unlock()
+	s.save()
+}
+
+// sessionEntry is the JSON-serializable form of sessionInfo.
+type sessionEntry struct {
+	TmuxTarget string `json:"tmux_target"`
+	CWD        string `json:"cwd"`
+	ProjectDir string `json:"project_dir,omitempty"`
+}
+
+// save persists the current session map to disk.
+func (s *sessionStateStore) save() {
+	s.mu.RLock()
+	data := make(map[string]sessionEntry, len(s.sessions))
+	for sid, info := range s.sessions {
+		data[sid] = sessionEntry{TmuxTarget: info.tmuxTarget, CWD: info.cwd, ProjectDir: info.projectDir}
+	}
+	s.mu.RUnlock()
+	b, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(config.GetConfigDir(), "sessions.json")
+	os.WriteFile(path, b, 0644)
+}
+
+// loadFromFile restores sessions from the persisted file.
+func (s *sessionStateStore) loadFromFile() {
+	path := filepath.Join(config.GetConfigDir(), "sessions.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var data map[string]sessionEntry
+	if err := json.Unmarshal(b, &data); err != nil {
+		return
+	}
+	// Deduplicate by tmuxTarget: keep only the latest entry per pane
+	seen := make(map[string]string) // tmuxTarget → sessionID
+	for sid, entry := range data {
+		if prev, ok := seen[entry.TmuxTarget]; ok {
+			delete(data, prev)
+		}
+		seen[entry.TmuxTarget] = sid
+	}
+	s.mu.Lock()
+	for sid, entry := range data {
+		s.sessions[sid] = sessionInfo{tmuxTarget: entry.TmuxTarget, cwd: entry.CWD, projectDir: entry.ProjectDir}
+	}
+	s.mu.Unlock()
+	s.save()
+}
+
+// validateAlive removes sessions whose tmux pane no longer exists.
+func (s *sessionStateStore) validateAlive() {
+	s.mu.Lock()
+	for sid, info := range s.sessions {
+		target, err := injector.ParseTarget(info.tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			delete(s.sessions, sid)
+			logger.Info(fmt.Sprintf("Removed stale session: %s -> %s", sid, info.tmuxTarget))
+		}
+	}
+	s.mu.Unlock()
+	s.save()
 }
 
 

@@ -22,33 +22,44 @@ import (
 func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
 	creds, _ := config.LoadCredentials()
 	var targets []string
-	// Direct tmux routes
+	// Direct tmux routes — validate pane still exists
 	for t, cid := range creds.RouteMap {
 		if cid == chatID {
+			target, err := injector.ParseTarget(t)
+			if err != nil || !injector.SessionExists(target) {
+				continue
+			}
 			targets = append(targets, t)
 		}
 	}
 	// Project routes: find active sessions with matching CWD
 	for cwd, cid := range creds.ProjectRouteMap {
 		if cid == chatID {
+			addedFromState := false
 			if info := sessionState.findByCWD(cwd); info != nil {
-				normalized := notify.FormatPaneID(info.tmuxTarget)
-				found := false
-				for _, t := range targets {
-					if notify.FormatPaneID(t) == normalized {
-						found = true
-						break
+				target, err := injector.ParseTarget(info.tmuxTarget)
+				if err == nil && injector.SessionExists(target) {
+					normalized := notify.FormatPaneID(info.tmuxTarget)
+					found := false
+					for _, t := range targets {
+						if notify.FormatPaneID(t) == normalized {
+							found = true
+							break
+						}
 					}
+					if !found {
+						targets = append(targets, info.tmuxTarget)
+					}
+					addedFromState = true
 				}
-				if !found {
-					targets = append(targets, info.tmuxTarget)
-				}
-			} else {
-				out, scanErr := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}").Output()
+			}
+			// Fall through to tmux scan if sessionState had no live pane
+			if !addedFromState {
+				out, scanErr := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}").Output()
 				if scanErr == nil {
 					for _, pl := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-						parts := strings.SplitN(pl, "\t", 3)
-						if len(parts) == 3 && parts[1] == cwd && parts[2] == "claude" {
+						parts := strings.SplitN(pl, "\t", 2)
+						if len(parts) >= 2 && parts[1] == cwd {
 							normalized := notify.FormatPaneID(parts[0])
 							found := false
 							for _, t := range targets {
@@ -106,7 +117,8 @@ func reactAndTrack(bot *tele.Bot, chat *tele.Chat, msg *tele.Message, tmuxTarget
 	}
 }
 
-// resolveReplyTarget extracts and validates tmux target from reply message
+// resolveReplyTarget extracts and validates tmux target from reply message.
+// If the pane is alive but not in sessionState, recovers it.
 func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 	targetPtr, err := extractTmuxTarget(replyText)
 	if err != nil {
@@ -115,6 +127,14 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 	target := *targetPtr
 	if !injector.SessionExists(target) {
 		return injector.TmuxTarget{}, fmt.Errorf("session not found")
+	}
+	tmuxStr := injector.FormatTarget(target)
+	if _, found := sessionState.findByTarget(tmuxStr); !found {
+		cwd := getPaneCWD(target.PaneID)
+		if cwd != "" {
+			sessionState.add("recovered-"+target.PaneID, tmuxStr, cwd, "")
+			logger.Info(fmt.Sprintf("Session recovered from reply: tmux=%s cwd=%s", tmuxStr, cwd))
+		}
 	}
 	return target, nil
 }

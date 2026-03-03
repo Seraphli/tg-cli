@@ -688,7 +688,12 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		currentSID, _ := sessionState.findByTarget(tmuxStr)
-		sessions, err := listProjectSessions(info.cwd, 8, currentSID)
+		var sessions []sessionListEntry
+		if info.projectDir != "" {
+			sessions, err = listProjectSessionsByDir(info.projectDir, 8, currentSID)
+		} else {
+			sessions, err = listProjectSessions(info.cwd, 8, currentSID)
+		}
 		if err != nil {
 			http.Error(w, "failed to list sessions: "+err.Error(), 500)
 			return

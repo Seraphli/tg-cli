@@ -92,6 +92,7 @@ func startLivenessLoop(ctx context.Context, bot *tele.Bot) {
 					cleanDeadSession(info.tmuxTarget, bot)
 				}
 			}
+			cleanStaleRoutes(bot)
 		}
 	}
 }
@@ -191,6 +192,10 @@ func runBot(cmd *cobra.Command, args []string) {
 	registerTGHandlers(bot, &creds)
 	// Scan pending directory to rebuild in-memory state after restart
 	scanPendingDir(bot, &creds)
+	// Restore persisted sessions and clean up stale routes
+	sessionState.loadFromFile()
+	sessionState.validateAlive()
+	cleanStaleRoutes(bot)
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	registerHTTPHooks(mux, bot, &creds, port)
