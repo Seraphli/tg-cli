@@ -18,14 +18,19 @@ import (
 type modelInfo struct {
 	name     string
 	filename string
+	mem      string // runtime memory (whisper.cpp README)
+	wer      string // approximate multilingual WER (Whisper paper)
 }
 
+// Source: mem from whisper.cpp README, WER from OpenAI Whisper paper
+// turbo mem estimated (~2.3 GB) — not in whisper.cpp table
 var whisperModels = []modelInfo{
-	{"tiny", "ggml-tiny.bin"},
-	{"base", "ggml-base.bin"},
-	{"small", "ggml-small.bin"},
-	{"medium", "ggml-medium.bin"},
-	{"large", "ggml-large-v3-turbo.bin"},
+	{"tiny", "ggml-tiny.bin", "~273 MB", "~12%"},
+	{"base", "ggml-base.bin", "~388 MB", "~10%"},
+	{"small", "ggml-small.bin", "~852 MB", "~7%"},
+	{"medium", "ggml-medium.bin", "~2.1 GB", "~5%"},
+	{"large-v3-turbo", "ggml-large-v3-turbo.bin", "~2.3 GB", "~3.7%"},
+	{"large-v3", "ggml-large-v3.bin", "~3.9 GB", "~3.5%"},
 }
 
 var VoiceCmd = &cobra.Command{
@@ -114,16 +119,16 @@ func runVoice(cmd *cobra.Command, args []string) {
 			status = "installed"
 		}
 		if m.name == currentModelName {
-			fmt.Printf("  %d. %s (%s) [current]\n", i+1, m.name, status)
+			fmt.Printf("  %d. %-15s mem %s | WER %s (%s) [current]\n", i+1, m.name, m.mem, m.wer, status)
 		} else {
-			fmt.Printf("  %d. %s (%s)\n", i+1, m.name, status)
+			fmt.Printf("  %d. %-15s mem %s | WER %s (%s)\n", i+1, m.name, m.mem, m.wer, status)
 		}
 	}
 	if currentModelName != "" {
 		fmt.Printf("\nCurrent model: %s\n", currentModelName)
-		fmt.Print("Select model (1-5, Enter to keep current): ")
+		fmt.Print("Select model (1-6, Enter to keep current): ")
 	} else {
-		fmt.Print("\nSelect model (1-5): ")
+		fmt.Print("\nSelect model (1-6): ")
 	}
 	if !scanner.Scan() {
 		fmt.Fprintln(os.Stderr, "Failed to read input")
@@ -152,6 +157,8 @@ func runVoice(cmd *cobra.Command, args []string) {
 			idx = 3
 		case "5":
 			idx = 4
+		case "6":
+			idx = 5
 		default:
 			fmt.Fprintln(os.Stderr, "Invalid selection")
 			os.Exit(1)

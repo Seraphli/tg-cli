@@ -6,12 +6,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 )
 
+var transcribeMu sync.Mutex
+
 // Transcribe converts an OGG voice file to text using ffmpeg + whisper.cpp.
+// A mutex ensures concurrent voice messages are processed serially.
 func Transcribe(oggPath string) (string, error) {
+	transcribeMu.Lock()
+	defer transcribeMu.Unlock()
 	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
@@ -26,8 +33,8 @@ func Transcribe(oggPath string) (string, error) {
 	if out, err := ffCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ffmpeg failed: %w\n%s", err, out)
 	}
-	// Run whisper.cpp
-	outBase := filepath.Join(os.TempDir(), "tg-cli-whisper")
+	// Run whisper.cpp with a unique output path to avoid collisions
+	outBase := filepath.Join(os.TempDir(), fmt.Sprintf("tg-cli-whisper-%d", time.Now().UnixNano()))
 	args := []string{"-m", cfg.ModelPath, "-f", wavPath, "-otxt", "-of", outBase, "-nt"}
 	lang := cfg.Language
 	if lang == "" {
@@ -36,7 +43,7 @@ func Transcribe(oggPath string) (string, error) {
 	args = append(args, "-l", lang)
 	prompt := cfg.WhisperPrompt
 	if prompt == "" {
-		prompt = "Hello, how are you? I'm doing great! 你好，请问有什么需要帮助的？"
+		prompt = "Hello, how are you? I'm doing great! 你好，请问有什么需要帮助的？今天的会议很重要。这个方案可以吗？好的，没问题！"
 	}
 	args = append(args, "--prompt", prompt)
 	wCmd := exec.Command(cfg.WhisperPath, args...)
