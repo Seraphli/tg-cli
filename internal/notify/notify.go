@@ -1,7 +1,6 @@
 package notify
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -181,13 +180,106 @@ func truncToolStr(s string, maxLen int) string {
 }
 
 // BuildToolNotifyText formats a tool call notification message for Telegram.
-// Displays the raw toolInput JSON as-is.
+// Each tool type gets a human-readable format with relevant emojis.
 func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string) string {
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, toolInput, "", "  "); err != nil {
+	var fields map[string]interface{}
+	if err := json.Unmarshal(toolInput, &fields); err != nil {
 		return string(toolInput)
 	}
-	result := pretty.String()
+	var b strings.Builder
+	switch toolName {
+	case "Bash":
+		if cmd, ok := fields["command"]; ok {
+			fmt.Fprintf(&b, "💻 %v", cmd)
+		}
+		if desc, ok := fields["description"]; ok {
+			fmt.Fprintf(&b, "\nℹ️ %v", desc)
+		}
+		if timeout, ok := fields["timeout"]; ok {
+			fmt.Fprintf(&b, "\n⏱️ timeout: %v", timeout)
+		}
+	case "Edit":
+		if fp, ok := fields["file_path"]; ok {
+			fmt.Fprintf(&b, "📄 %v", fp)
+		}
+		if ra, ok := fields["replace_all"]; ok {
+			fmt.Fprintf(&b, "\n🔄 replace_all: %v", ra)
+		}
+		if old, ok := fields["old_string"]; ok {
+			fmt.Fprintf(&b, "\n\n- %v", old)
+		}
+		if ns, ok := fields["new_string"]; ok {
+			fmt.Fprintf(&b, "\n+ %v", ns)
+		}
+	case "Write":
+		if fp, ok := fields["file_path"]; ok {
+			fmt.Fprintf(&b, "📄 %v", fp)
+		}
+		if content, ok := fields["content"]; ok {
+			s := fmt.Sprintf("%v", content)
+			r := []rune(s)
+			if len(r) > 500 {
+				s = string(r[:500]) + "…"
+			}
+			fmt.Fprintf(&b, "\n\n%s", s)
+		}
+	case "Read":
+		if fp, ok := fields["file_path"]; ok {
+			fmt.Fprintf(&b, "📄 %v", fp)
+		}
+		if offset, ok := fields["offset"]; ok {
+			fmt.Fprintf(&b, "\n📍 offset: %v", offset)
+		}
+		if limit, ok := fields["limit"]; ok {
+			fmt.Fprintf(&b, "\n📏 limit: %v", limit)
+		}
+	case "Glob":
+		if pattern, ok := fields["pattern"]; ok {
+			fmt.Fprintf(&b, "🔍 %v", pattern)
+		}
+		if path, ok := fields["path"]; ok {
+			fmt.Fprintf(&b, "\n📂 %v", path)
+		}
+	case "Grep":
+		if pattern, ok := fields["pattern"]; ok {
+			fmt.Fprintf(&b, "🔍 %v", pattern)
+		}
+		if path, ok := fields["path"]; ok {
+			fmt.Fprintf(&b, "\n📂 %v", path)
+		}
+		for _, key := range []string{"output_mode", "glob", "type", "-n", "-B", "-A", "-C", "-i"} {
+			if v, ok := fields[key]; ok {
+				fmt.Fprintf(&b, "\n%s: %v", key, v)
+			}
+		}
+	case "Agent":
+		if desc, ok := fields["description"]; ok {
+			fmt.Fprintf(&b, "ℹ️ %v", desc)
+		}
+		if st, ok := fields["subagent_type"]; ok {
+			fmt.Fprintf(&b, "\n🤖 %v", st)
+		}
+		if model, ok := fields["model"]; ok {
+			fmt.Fprintf(&b, "\n🏷️ model: %v", model)
+		}
+	case "WebFetch":
+		if url, ok := fields["url"]; ok {
+			fmt.Fprintf(&b, "🌐 %v", url)
+		}
+		if prompt, ok := fields["prompt"]; ok {
+			fmt.Fprintf(&b, "\nℹ️ %v", prompt)
+		}
+	case "WebSearch":
+		if query, ok := fields["query"]; ok {
+			fmt.Fprintf(&b, "🔍 %v", query)
+		}
+	default:
+		// Unknown tool: key: value fallback
+		for k, v := range fields {
+			fmt.Fprintf(&b, "%s: %v\n", k, v)
+		}
+	}
+	result := b.String()
 	r := []rune(result)
 	if len(r) > 1000 {
 		result = string(r[:1000]) + "…"

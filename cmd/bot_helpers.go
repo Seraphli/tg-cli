@@ -1503,6 +1503,9 @@ func shouldNotifyTool(toolName string) bool {
 	if err != nil {
 		return false
 	}
+	if cfg.ToolNotifyEnabled != nil && !*cfg.ToolNotifyEnabled {
+		return false
+	}
 	for _, t := range cfg.ToolNotifyList {
 		if t == toolName {
 			return true

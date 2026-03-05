@@ -338,6 +338,67 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond()
 	})
 
+	btnVerbose := tele.InlineButton{Unique: "verbose"}
+	bot.Handle(&btnVerbose, func(c tele.Context) error {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		action := c.Data()
+		enabled := action == "on"
+		cfg.ToolNotifyEnabled = &enabled
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save config"})
+		}
+		var statusText string
+		if enabled {
+			statusText = "✅ ON"
+		} else {
+			statusText = "❌ OFF"
+		}
+		menu := &tele.ReplyMarkup{}
+		btnOn := menu.Data("✅ ON", "verbose", "on")
+		btnOff := menu.Data("❌ OFF", "verbose", "off")
+		menu.Inline(menu.Row(btnOn, btnOff))
+		c.Edit(fmt.Sprintf("🔧 Tool Notifications: %s\n\nSelect to toggle:", statusText), menu)
+		return c.Respond(&tele.CallbackResponse{Text: "Saved: " + statusText})
+	})
+
+	btnToolsToggle := tele.InlineButton{Unique: "tools_toggle"}
+	bot.Handle(&btnToolsToggle, func(c tele.Context) error {
+		toolName := c.Data()
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		// Toggle tool in list
+		found := false
+		var newList []string
+		for _, t := range cfg.ToolNotifyList {
+			if t == toolName {
+				found = true
+				continue // remove
+			}
+			newList = append(newList, t)
+		}
+		if !found {
+			newList = append(newList, toolName)
+		}
+		cfg.ToolNotifyList = newList
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		menu := buildToolsMenu(cfg.ToolNotifyList)
+		c.Edit("🔧 Select tools for notifications:\n(Click to toggle)", menu)
+		var action string
+		if found {
+			action = "OFF"
+		} else {
+			action = "ON"
+		}
+		return c.Respond(&tele.CallbackResponse{Text: toolName + ": " + action})
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
 		action := c.Data() // "yes" or "no"
 		val, ok := unbindPending.Load(c.Message().ID)

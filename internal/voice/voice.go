@@ -43,7 +43,7 @@ func Transcribe(oggPath string) (string, error) {
 	args = append(args, "-l", lang)
 	prompt := cfg.WhisperPrompt
 	if prompt == "" {
-		prompt = "Hello, how are you? I'm doing great! 你好，请问有什么需要帮助的？今天的会议很重要。这个方案可以吗？好的，没问题！"
+		prompt = "Hello, how are you? 你好，请问有什么需要帮助的？"
 	}
 	args = append(args, "--prompt", prompt)
 	wCmd := exec.Command(cfg.WhisperPath, args...)

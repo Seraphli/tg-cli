@@ -98,7 +98,8 @@ type AppConfig struct {
 	FFmpegPath     string   `json:"ffmpegPath"`
 	WhisperPrompt  string   `json:"whisperPrompt"`
 	VoicePrefix    string   `json:"voicePrefix"`
-	ToolNotifyList []string `json:"toolNotifyList,omitempty"`
+	ToolNotifyList    []string `json:"toolNotifyList,omitempty"`
+	ToolNotifyEnabled *bool    `json:"toolNotifyEnabled,omitempty"`
 }
 
 func GetConfigPath() string {

@@ -441,6 +441,62 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 		return c.Reply("❌ No binding found for this session.")
 	})
+	bot.Handle("/bot_verbose", func(c tele.Context) error {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Reply("❌ Failed to load config")
+		}
+		enabled := cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled
+		var statusText string
+		if enabled {
+			statusText = "✅ ON"
+		} else {
+			statusText = "❌ OFF"
+		}
+		menu := &tele.ReplyMarkup{}
+		btnOn := menu.Data("✅ ON", "verbose", "on")
+		btnOff := menu.Data("❌ OFF", "verbose", "off")
+		menu.Inline(menu.Row(btnOn, btnOff))
+		return c.Reply(fmt.Sprintf("🔧 Tool Notifications: %s\n\nSelect to toggle:", statusText), menu)
+	})
+
+	bot.Handle("/bot_tools", func(c tele.Context) error {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Reply("❌ Failed to load config")
+		}
+		menu := buildToolsMenu(cfg.ToolNotifyList)
+		return c.Reply("🔧 Select tools for notifications:\n(Click to toggle)", menu)
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
+}
+
+// buildToolsMenu builds an inline keyboard for tool notification selection.
+func buildToolsMenu(selected []string) *tele.ReplyMarkup {
+	menu := &tele.ReplyMarkup{}
+	selectedSet := make(map[string]bool)
+	for _, t := range selected {
+		selectedSet[t] = true
+	}
+	availTools := []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch"}
+	var rows []tele.Row
+	var pending []tele.Btn
+	for _, tool := range availTools {
+		label := "⬜ " + tool
+		if selectedSet[tool] {
+			label = "✅ " + tool
+		}
+		pending = append(pending, menu.Data(label, "tools_toggle", tool))
+		if len(pending) == 2 {
+			rows = append(rows, menu.Row(pending...))
+			pending = nil
+		}
+	}
+	if len(pending) > 0 {
+		rows = append(rows, menu.Row(pending...))
+	}
+	menu.Inline(rows...)
+	return menu
 }

@@ -177,6 +177,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_bind", Description: "Bind a tmux session to this chat"},
 		tele.Command{Text: "bot_unbind", Description: "Unbind a tmux session from this chat"},
 		tele.Command{Text: "resume", Description: "Resume a previous Claude Code session"},
+		tele.Command{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
+		tele.Command{Text: "bot_tools", Description: "Configure which tools send notifications"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
