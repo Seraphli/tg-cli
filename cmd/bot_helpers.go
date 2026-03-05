@@ -144,7 +144,7 @@ func readAssistantTexts(transcriptPath string) []string {
 	return texts
 }
 
-func processTranscriptUpdates(sessionID, transcriptPath string) string {
+func processTranscriptUpdates(sessionID, transcriptPath string, isQuestion ...bool) string {
 	if transcriptPath == "" || sessionID == "" {
 		return ""
 	}
@@ -154,8 +154,13 @@ func processTranscriptUpdates(sessionID, transcriptPath string) string {
 	// Initialize count for unknown sessions (e.g. after bot restart) to avoid sending historical content
 	if _, known := sessionCounts.counts[sessionID]; !known {
 		texts := readAssistantTexts(transcriptPath)
-		sessionCounts.counts[sessionID] = len(texts)
-		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, len(texts)))
+		count := len(texts)
+		// For AskUserQuestion, backtrack by 1 so the preceding assistant message is included
+		if len(isQuestion) > 0 && isQuestion[0] && count > 0 {
+			count--
+		}
+		sessionCounts.counts[sessionID] = count
+		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, count))
 	}
 	time.Sleep(2 * time.Second)
 	texts := readAssistantTexts(transcriptPath)
@@ -210,12 +215,13 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	return pct, int(used), int(effectiveLimit), true
 }
 
-func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body string) {
+func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName string) {
 	nd := notify.NotificationData{
 		Event:          event,
 		Project:        project,
 		CWD:            cwd,
 		TmuxTarget:     tmuxTarget,
+		ToolName:       toolName,
 		ContextUsedPct: -1,
 	}
 	if usedPct, usedTokens, windowSize, ok := readContextUsage(sessionID); ok {
@@ -1489,4 +1495,18 @@ func getPaneCWD(paneID string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// shouldNotifyTool checks if the user has configured notifications for the given tool name.
+func shouldNotifyTool(toolName string) bool {
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		return false
+	}
+	for _, t := range cfg.ToolNotifyList {
+		if t == toolName {
+			return true
+		}
+	}
+	return false
 }

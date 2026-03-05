@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 4: PermissionRequest test ---"
+echo "--- PermissionRequest test ---"
 
 ensure_infrastructure
 
@@ -12,9 +12,9 @@ ensure_infrastructure
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
-pane_log "[Phase 4] BEFORE permission prompt"
+pane_log "[permission] BEFORE permission prompt"
 inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
-pane_log "[Phase 4] AFTER sending permission prompt"
+pane_log "[permission] AFTER sending permission prompt"
 
 # Wait for permission request in bot log
 ELAPSED=0
@@ -34,7 +34,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 done
 
 wait_for_cc_idle
-pane_log "[Phase 4] AFTER permission detected (idle)"
+pane_log "[permission] AFTER permission detected (idle)"
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
@@ -55,7 +55,7 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   fi
 
   # Approve via API endpoint
-  pane_log "[Phase 4] BEFORE approve API call"
+  pane_log "[permission] BEFORE approve API call"
   API_URL="http://127.0.0.1:$TEST_PORT/permission/decide?msg_id=$PERM_MSG_ID&decision=allow"
   echo "  API call: GET $API_URL"
   DECIDE_RESP=$(curl -s "$API_URL")
@@ -66,7 +66,7 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
     fail "Permission decide API returned unexpected: $DECIDE_RESP"
   fi
   wait_for_cc_idle
-  pane_log "[Phase 4] AFTER approve API call (idle)"
+  pane_log "[permission] AFTER approve API call (idle)"
 
   # Wait for Stop notification (Claude completes after permission approved)
   wait_for_cc_idle
@@ -95,9 +95,9 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
     ELAPSED=$((ELAPSED + 2))
   done
   if [ "$STOP4_FOUND" = true ]; then
-    pass "Phase 4 Stop notification received (CC turn complete)"
+    pass "Stop notification received (CC turn complete)"
   else
-    fail "Phase 4 Stop notification not received within ${TIMEOUT}s"
+    fail "Stop notification not received within ${TIMEOUT}s"
   fi
 else
   fail "PermissionRequest not triggered within ${TIMEOUT}s"

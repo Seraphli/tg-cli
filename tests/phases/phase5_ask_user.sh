@@ -4,19 +4,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 5: AskUserQuestion test ---"
+echo "--- AskUserQuestion test ---"
 
 ensure_infrastructure
 wait_for_cc_idle
 
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
 
-pane_log "[Phase 5] BEFORE sending AskUserQuestion prompt"
+pane_log "[ask_user] BEFORE sending AskUserQuestion prompt"
 
 # Send prompt that should trigger AskUserQuestion
 inject_prompt "First write a brief paragraph explaining what you are about to do, then ask me a question using AskUserQuestion tool with header 'Test Header' and two options: 'Option A' with description 'First option desc', 'Option B' with description 'Second option desc'. Question: 'Which option?'"
 
-pane_log "[Phase 5] AFTER sending prompt"
+pane_log "[ask_user] AFTER sending prompt"
 
 # Wait for AskUserQuestion notification
 ELAPSED=0
@@ -37,7 +37,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 done
 
 wait_for_cc_idle
-pane_log "[Phase 5] AFTER hook notification (idle)"
+pane_log "[ask_user] AFTER hook notification (idle)"
 
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
@@ -64,7 +64,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     fail "AskUserQuestion sent log missing content"
   fi
 
-  pane_log "[Phase 5] BEFORE option selection API"
+  pane_log "[ask_user] BEFORE option selection API"
 
   # Delay 5s before responding to test concurrent hook timing
   echo "  Waiting 5s before responding to first AskUserQuestion..."
@@ -85,7 +85,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   fi
 
   wait_for_cc_idle
-  pane_log "[Phase 5] AFTER option selection API (idle)"
+  pane_log "[ask_user] AFTER option selection API (idle)"
 
   # Verify bot logged the selection with label
   sleep 2
@@ -115,7 +115,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     ELAPSED=$((ELAPSED + 2))
   done
 
-  pane_log "[Phase 5] AFTER Stop detected"
+  pane_log "[ask_user] AFTER Stop detected"
 
   if [ "$STOP5_FOUND" = true ]; then
     BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -oPm1 'Notification sent.*Stop.*body_len=\K[0-9]+' || true)
@@ -156,12 +156,12 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   # --- Free-text reply test ---
   LOG_BEFORE_FT=$(wc -l < "$LOG_FILE")
 
-  pane_log "[Phase 5] BEFORE sending free-text AskUserQuestion prompt"
+  pane_log "[ask_user] BEFORE sending free-text AskUserQuestion prompt"
 
   # Send prompt for free-text question (min 2 options required by AskUserQuestion)
   inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Free Text Test' and two options: 'Blue' with description 'The color blue', 'Red' with description 'The color red'. Question: 'What is your favorite color?'"
 
-  pane_log "[Phase 5] AFTER sending free-text prompt"
+  pane_log "[ask_user] AFTER sending free-text prompt"
 
   # Wait for AskUserQuestion notification
   ELAPSED=0
@@ -184,7 +184,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   if [ "$FT_FOUND" = true ] && [ -n "$FT_MSG_ID" ]; then
     pass "Free-text AskUserQuestion notification sent (msg_id=$FT_MSG_ID)"
 
-    pane_log "[Phase 5] BEFORE free-text API call"
+    pane_log "[ask_user] BEFORE free-text API call"
 
     # Record log position BEFORE sending — Stop fires quickly after CC processes answers
     LOG_BEFORE_FT_STOP=$(wc -l < "$LOG_FILE")
@@ -200,7 +200,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     fi
 
     wait_for_cc_idle
-    pane_log "[Phase 5] AFTER free-text API call (idle)"
+    pane_log "[ask_user] AFTER free-text API call (idle)"
 
     # Wait for Stop notification
     ELAPSED=0
@@ -248,7 +248,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   fi
 
   # --- Group direct free-text test (via /group/text API) ---
-  # Extract tmux_target from SessionStart log (same pattern as Phase 8)
+  # Extract tmux_target from SessionStart log (same pattern as group_routing)
   TMUX_TARGET=""
   SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -m1 "Notification sent.*SessionStart" || true)
   if [ -n "$SESSION_START_LINE" ]; then
@@ -260,12 +260,12 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
 
   LOG_BEFORE_GT=$(wc -l < "$LOG_FILE")
 
-  pane_log "[Phase 5] BEFORE sending group-text AskUserQuestion prompt"
+  pane_log "[ask_user] BEFORE sending group-text AskUserQuestion prompt"
 
   # Send prompt for group direct text question
   inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Group Test' and two options: 'Yes' with description 'Agree', 'No' with description 'Disagree'. Question: 'Do you agree?'"
 
-  pane_log "[Phase 5] AFTER sending group-text prompt"
+  pane_log "[ask_user] AFTER sending group-text prompt"
 
   # Wait for AskUserQuestion notification
   ELAPSED=0
@@ -288,7 +288,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   if [ "$GT_FOUND" = true ] && [ -n "$GT_MSG_ID" ]; then
     pass "Group-text AskUserQuestion notification sent (msg_id=$GT_MSG_ID)"
 
-    pane_log "[Phase 5] BEFORE group-text API call"
+    pane_log "[ask_user] BEFORE group-text API call"
 
     # Record log position BEFORE sending
     LOG_BEFORE_GT_STOP=$(wc -l < "$LOG_FILE")
@@ -308,7 +308,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     fi
 
     wait_for_cc_idle
-    pane_log "[Phase 5] AFTER group-text API call (idle)"
+    pane_log "[ask_user] AFTER group-text API call (idle)"
 
     # Verify bot log shows resolution via group text API
     GT_RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | grep -m1 "AskUserQuestion resolved via group text API" || true)

@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 8: Group routing test ---"
+echo "--- Group routing test ---"
 
 ensure_infrastructure
 
@@ -47,9 +47,9 @@ fi
 
 # Inject new prompt to trigger route resolution
 LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
-pane_log "[Phase 8] BEFORE 'say test routing' prompt"
+pane_log "[group_routing] BEFORE 'say test routing' prompt"
 inject_prompt "say test routing"
-pane_log "[Phase 8] AFTER routing prompt"
+pane_log "[group_routing] AFTER routing prompt"
 
 # Wait for Stop notification
 ELAPSED=0
@@ -65,7 +65,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-pane_log "[Phase 8] AFTER Stop detected"
+pane_log "[group_routing] AFTER Stop detected"
 
 if [ "$ROUTE_STOP_FOUND" = true ]; then
   pass "Stop notification received after routing prompt"
@@ -109,9 +109,9 @@ LOG_BEFORE_DEFAULT=$(wc -l < "$LOG_FILE")
 # Count existing "Route resolved" lines before this test
 ROUTE_COUNT_BEFORE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: tmux=" || echo 0)
 
-pane_log "[Phase 8] BEFORE 'say test default' prompt"
+pane_log "[group_routing] BEFORE 'say test default' prompt"
 inject_prompt "say test default"
-pane_log "[Phase 8] AFTER default prompt"
+pane_log "[group_routing] AFTER default prompt"
 
 # Wait for Stop notification
 ELAPSED=0
@@ -127,7 +127,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-pane_log "[Phase 8] AFTER default Stop detected"
+pane_log "[group_routing] AFTER default Stop detected"
 
 if [ "$DEFAULT_STOP_FOUND" = true ]; then
   pass "Stop notification received after default routing prompt"

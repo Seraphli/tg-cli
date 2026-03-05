@@ -4,17 +4,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 11: Hook cancel (TUI answer) test ---"
+echo "--- Hook cancel (TUI answer) test ---"
 
 ensure_infrastructure
 
 # Record log position
 LOG_BEFORE_CANCEL=$(wc -l < "$LOG_FILE")
 
-# Send command that triggers a PermissionRequest (same pattern as phase4)
-pane_log "[Phase 11] BEFORE permission prompt"
+# Send command that triggers a PermissionRequest (same pattern as permission)
+pane_log "[hook_cancel] BEFORE permission prompt"
 inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo hook_cancel_test_ok > /tmp/tg-cli-hook-cancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
-pane_log "[Phase 11] AFTER sending permission prompt"
+pane_log "[hook_cancel] AFTER sending permission prompt"
 
 # Wait for PermissionRequest notification in bot log (pending file created, hook blocking)
 ELAPSED=0
@@ -32,7 +32,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for PermissionRequest... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-pane_log "[Phase 11] AFTER permission detected"
+pane_log "[hook_cancel] AFTER permission detected"
 
 if [ "$PERM_FOUND" = false ]; then
   fail "PermissionRequest not triggered within ${TIMEOUT}s"
@@ -42,13 +42,13 @@ pass "PermissionRequest triggered (hook blocking, pending file created)"
 
 # Instead of approving via API, approve via TUI: press Enter in Claude pane
 # This simulates user answering in TUI while hook is still blocking
-pane_log "[Phase 11] BEFORE TUI Enter (approve in TUI)"
+pane_log "[hook_cancel] BEFORE TUI Enter (approve in TUI)"
 tmux send-keys -t "$CLAUDE_SESSION" Enter
-pane_log "[Phase 11] AFTER TUI Enter"
+pane_log "[hook_cancel] AFTER TUI Enter"
 
 # Wait for CC to continue and reach idle state (Stop hook fired)
 wait_for_cc_idle
-pane_log "[Phase 11] AFTER CC reached idle"
+pane_log "[hook_cancel] AFTER CC reached idle"
 
 # Check bot log for "Cancelled pending file" — proves cancelPendingFilesBySession ran
 ELAPSED=0
@@ -92,7 +92,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 done
 
 if [ "$STOP_FOUND" = true ]; then
-  pass "Phase 11 Stop notification received (CC turn complete after TUI answer)"
+  pass "Stop notification received (CC turn complete after TUI answer)"
 else
-  fail "Phase 11 Stop notification not received within ${TIMEOUT}s"
+  fail "Stop notification not received within ${TIMEOUT}s"
 fi

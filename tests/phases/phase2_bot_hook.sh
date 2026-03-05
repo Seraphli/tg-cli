@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 2: Bot notification test ---"
+echo "--- Bot notification test ---"
 
 ensure_infrastructure
 
@@ -35,7 +35,7 @@ fi
 
 # Send a simple command to trigger hook
 LOG_BEFORE_HELLO=$(wc -l < "$LOG_FILE")
-pane_log "[Phase 2] BEFORE 'say hello' prompt"
+pane_log "[bot_hook] BEFORE 'say hello' prompt"
 inject_prompt "say hello"
 echo "Command sent, waiting for hook to trigger..."
 
@@ -55,7 +55,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-pane_log "[Phase 2] AFTER hook triggered"
+pane_log "[bot_hook] AFTER hook triggered"
 
 if [ "$FOUND" = true ]; then
   pass "1st TG notification sent (hook → bot → TG)"
@@ -63,7 +63,7 @@ else
   fail "1st TG notification (no notification within ${TIMEOUT}s)"
 fi
 
-# Extract test session ID for Phase 14 resume test
+# Extract test session ID for resume test
 TEST_SID=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -oP 'Session tracked: \K[^ ]+' | head -1)
 if [ -n "$TEST_SID" ]; then
   echo "$TEST_SID" > /tmp/tg-cli-e2e-session-id.txt

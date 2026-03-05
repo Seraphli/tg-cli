@@ -4,23 +4,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 3: Long message pagination test ---"
+echo "--- Long message pagination test ---"
 
 ensure_infrastructure
 
 # Record log position before injecting long prompt
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
 
-# Wait for Claude to settle after Phase 2
+# Wait for Claude to settle after bot_hook
 echo "Waiting for Claude to settle..."
 wait_for_cc_idle
 
 # Inject a long-output prompt to trigger pagination
 LONG_PROMPT="list the numbers from 1 to 100, each on its own line, in the format 'Number NNN: test line for pagination verification'"
-pane_log "[Phase 3] BEFORE injecting long prompt"
+pane_log "[pagination] BEFORE injecting long prompt"
 inject_prompt "$LONG_PROMPT"
 echo "Long prompt injected, waiting for Claude to respond and trigger pagination..."
-pane_log "[Phase 3] AFTER injecting long prompt"
+pane_log "[pagination] AFTER injecting long prompt"
 
 # Wait for bot log to contain multi-page notification indicator
 ELAPSED=0
@@ -42,7 +42,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 done
 
 wait_for_cc_idle
-pane_log "[Phase 3] AFTER pagination detected (idle)"
+pane_log "[pagination] AFTER pagination detected (idle)"
 
 if [ "$PAGINATION_FOUND" = true ]; then
   pass "Long message triggered pagination (real Claude output)"

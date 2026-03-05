@@ -4,14 +4,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 14: Resume session test ---"
+echo "--- Resume session test ---"
 
 ensure_infrastructure
 
 LOG_BEFORE=$(wc -l < "$LOG_FILE")
 
-# Phase 13 exited CC. Restart CC in the existing tmux pane.
-pane_log "[Phase 14] BEFORE CC restart"
+# session_end exited CC. Restart CC in the existing tmux pane.
+pane_log "[resume] BEFORE CC restart"
 # Wait for shell to be ready after CC exit (sentinel approach)
 SENTINEL="SHELL_READY_$(date +%s)"
 ELAPSED=0
@@ -54,12 +54,12 @@ while [ $ELAPSED_CC -lt 30 ]; do
   echo "  Waiting for CC to start... ${ELAPSED_CC}s / 30s"
 done
 if [ "$CC_STARTED" = false ]; then
-  pane_log "[Phase 14] CC failed to start"
+  pane_log "[resume] CC failed to start"
   echo "  FAIL: CC did not start within 30s"
   fail "CC startup after restart"
   exit 1
 fi
-pane_log "[Phase 14] AFTER CC startup detected"
+pane_log "[resume] AFTER CC startup detected"
 
 # Wait for SessionStart notification in bot log
 ELAPSED=0
@@ -67,7 +67,7 @@ while ! tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "SessionStart" > /dev/
   sleep 2
   ELAPSED=$((ELAPSED + 2))
   if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    pane_log "[Phase 14] SessionStart timeout - pane state"
+    pane_log "[resume] SessionStart timeout - pane state"
     echo "  FAIL: SessionStart not detected within ${TIMEOUT}s"
     fail "SessionStart after CC restart"
     exit 1
@@ -77,7 +77,7 @@ done
 pass "SessionStart after CC restart"
 
 # Wait for CC to reach idle state (session registered)
-pane_log "[Phase 14] AFTER CC restart"
+pane_log "[resume] AFTER CC restart"
 wait_for_cc_idle
 
 # Test /resume/list API — should return at least 1 session from previous phases
@@ -101,7 +101,7 @@ else
   fail "Resume list log not found"
 fi
 
-# Read test session ID saved by Phase 2
+# Read test session ID saved by bot_hook
 TEST_SID=$(cat /tmp/tg-cli-e2e-session-id.txt 2>/dev/null || true)
 if [ -n "$TEST_SID" ]; then
   RESUME_SID="$TEST_SID"
@@ -133,8 +133,8 @@ else
 fi
 
 # Clean up: exit the resumed CC session
-pane_log "[Phase 14] BEFORE final /exit"
+pane_log "[resume] BEFORE final /exit"
 sleep 5
 inject_prompt "/exit"
 sleep 5
-pane_log "[Phase 14] AFTER final /exit"
+pane_log "[resume] AFTER final /exit"

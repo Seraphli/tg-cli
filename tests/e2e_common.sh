@@ -156,6 +156,9 @@ start_claude() {
 setup_hooks() {
   ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
   claude mcp add --scope local --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT"
+  # Write test app config with toolNotifyList so tool notifications are enabled for Bash
+  mkdir -p "$TEST_CONFIG_DIR"
+  echo '{"toolNotifyList":["Bash"]}' > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed."
 }
 

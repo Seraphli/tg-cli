@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 10: Escape command test ---"
+echo "--- Escape command test ---"
 
 ensure_infrastructure
 
@@ -13,12 +13,12 @@ ENCODED_TARGET=$(printf '%s' "$TARGET" | jq -sRr @uri)
 
 LOG_BEFORE_ESC=$(wc -l < "$LOG_FILE")
 
-pane_log "[Phase 10] BEFORE sending AskUserQuestion prompt for escape test"
+pane_log "[escape] BEFORE sending AskUserQuestion prompt for escape test"
 
 # 1. Inject prompt to trigger AskUserQuestion
 inject_prompt "Ask me a question using AskUserQuestion tool with header 'Escape Test' and two options: 'Yes' with description 'Confirm', 'No' with description 'Deny'. Question: 'Continue?'"
 
-pane_log "[Phase 10] AFTER sending prompt"
+pane_log "[escape] AFTER sending prompt"
 
 # 2. Wait for AskUserQuestion notification in bot log
 ELAPSED=0
@@ -48,7 +48,7 @@ wait_for_cc_idle
 # 3. Capture pane BEFORE escape — verify AskUserQuestion UI is visible
 BEFORE_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')
 
-pane_log "[Phase 10] Pane BEFORE escape captured"
+pane_log "[escape] Pane BEFORE escape captured"
 
 if echo "$BEFORE_ESCAPE" | grep "Esc to cancel" > /dev/null 2>&1; then
   pass "Pane contains AskUserQuestion content before escape"
@@ -69,11 +69,11 @@ fi
 # 5. Wait for TUI to update, then capture pane AFTER escape
 wait_for_cc_idle
 wait_for_pane_content "User declined"
-pane_log "[Phase 10] AFTER escape (idle)"
+pane_log "[escape] AFTER escape (idle)"
 
 AFTER_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')
 
-pane_log "[Phase 10] Pane AFTER escape captured"
+pane_log "[escape] Pane AFTER escape captured"
 
 # Verify AskUserQuestion UI is gone
 if echo "$AFTER_ESCAPE" | grep "Esc to cancel" > /dev/null 2>&1; then

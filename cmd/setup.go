@@ -2,16 +2,23 @@ package cmd
 
 import (
 	_ "embed"
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// availableTools is the list of tools that can trigger TG notifications.
+var availableTools = []string{
+	"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch",
+}
 
 //go:embed hooks_config.json
 var hooksConfigJSON []byte
@@ -264,6 +271,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to write settings: %v\n", err)
 		os.Exit(1)
 	}
+	// Configure tool notifications (skip during uninstall)
+	if !setupUninstallFlag {
+		configureToolNotifications()
+	}
 	instanceDesc := "default"
 	if config.ConfigDir != "" {
 		instanceDesc = config.ConfigDir
@@ -292,5 +303,70 @@ func runSetup(cmd *cobra.Command, args []string) {
 		} else {
 			fmt.Println("MCP server registered.")
 		}
+	}
+}
+
+// configureToolNotifications prompts the user to select which tools trigger TG notifications.
+func configureToolNotifications() {
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load app config: %v\n", err)
+		return
+	}
+	// Build a set of currently selected tools for quick lookup
+	currentSet := make(map[string]bool)
+	for _, t := range appCfg.ToolNotifyList {
+		currentSet[t] = true
+	}
+	fmt.Println()
+	fmt.Println("Tool notification config (select tools to receive TG notifications):")
+	// Print tools in a 3-column layout
+	for i, tool := range availableTools {
+		fmt.Printf("  [%d] %-10s", i+1, tool)
+		if (i+1)%3 == 0 {
+			fmt.Println()
+		}
+	}
+	if len(availableTools)%3 != 0 {
+		fmt.Println()
+	}
+	// Show current selection
+	if len(appCfg.ToolNotifyList) > 0 {
+		fmt.Printf("Current: %s\n", strings.Join(appCfg.ToolNotifyList, ", "))
+	} else {
+		fmt.Println("Current: (none)")
+	}
+	fmt.Print("Enter numbers (comma-separated), * for all, or press Enter to keep current: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" {
+		return
+	}
+	var selected []string
+	if input == "*" {
+		selected = append(selected, availableTools...)
+	} else {
+		for _, part := range strings.Split(input, ",") {
+			part = strings.TrimSpace(part)
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 1 || n > len(availableTools) {
+				fmt.Fprintf(os.Stderr, "Invalid selection: %q (skipped)\n", part)
+				continue
+			}
+			selected = append(selected, availableTools[n-1])
+		}
+	}
+	appCfg.ToolNotifyList = selected
+	if err := config.SaveAppConfig(appCfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save app config: %v\n", err)
+		return
+	}
+	if len(selected) > 0 {
+		fmt.Printf("Tool notifications configured: %s\n", strings.Join(selected, ", "))
+	} else {
+		fmt.Println("Tool notifications cleared.")
 	}
 }

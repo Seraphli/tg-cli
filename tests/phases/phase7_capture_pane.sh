@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 7: CapturePane test ---"
+echo "--- CapturePane test ---"
 
 ensure_infrastructure
 

@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 9: Permission mode switching test ---"
+echo "--- Permission mode switching test ---"
 
 ensure_infrastructure
 
@@ -17,7 +17,7 @@ MODES_TO_TEST="plan auto bypass default"
 
 for MODE in $MODES_TO_TEST; do
     LOG_BEFORE=$(wc -l < "$LOG_FILE")
-    pane_log "[Phase 9] BEFORE perm/switch to $MODE"
+    pane_log "[perm_switch] BEFORE perm/switch to $MODE"
 
     SWITCH_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/perm/switch?target=$ENCODED_TARGET&mode=$MODE")
     SWITCH_STATUS=$(echo "$SWITCH_RESP" | jq -r '.status // empty' 2>/dev/null)
@@ -30,7 +30,7 @@ for MODE in $MODES_TO_TEST; do
     fi
 
     sleep 2
-    pane_log "[Phase 9] AFTER perm/switch to $MODE"
+    pane_log "[perm_switch] AFTER perm/switch to $MODE"
 
     # Verify via /perm/status
     STATUS_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/perm/status?target=$ENCODED_TARGET")

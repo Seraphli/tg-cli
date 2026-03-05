@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../e2e_common.sh"
 
 echo ""
-echo "--- Phase 12: MCP send_file tool test ---"
+echo "--- MCP send_file tool test ---"
 
 ensure_infrastructure
 
@@ -13,7 +13,7 @@ TEST_FILE="/tmp/tg-cli-e2e-mcp-test-file.txt"
 echo "MCP send_file test content - $(date)" > "$TEST_FILE"
 
 LOG_BEFORE_MCP=$(wc -l < "$LOG_FILE")
-pane_log "[Phase 12] BEFORE MCP send_file"
+pane_log "[mcp_send_file] BEFORE MCP send_file"
 
 # Inject prompt to trigger send_file MCP tool
 inject_prompt "Use the send_file MCP tool to send the file at $TEST_FILE to telegram with caption 'E2E test file'"
@@ -31,13 +31,17 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for MCP send confirmation... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-pane_log "[Phase 12] AFTER MCP send_file"
+pane_log "[mcp_send_file] AFTER MCP send_file"
 
 if [ "$MCP_FOUND" = true ]; then
   pass "MCP send_file tool"
 else
   fail "MCP send_file tool - no send confirmation in bot log"
 fi
+
+# Wait for CC to finish the turn (Stop notification) before next phase
+wait_for_cc_idle
+pane_log "[mcp_send_file] AFTER CC idle"
 
 # Cleanup
 rm -f "$TEST_FILE"

@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +14,7 @@ type NotificationData struct {
 	CWD               string
 	Body              string
 	TmuxTarget        string
+	ToolName          string
 	Page              int // 0 = no pagination
 	TotalPages        int
 	ContextUsedPct    int // -1 means no data
@@ -40,13 +43,16 @@ type QuestionEntry struct {
 }
 
 type QuestionData struct {
-	Project    string
-	CWD        string
-	TmuxTarget string
-	Header     string
-	Question   string
-	Options    []QuestionOption
-	Questions  []QuestionEntry
+	Project           string
+	CWD               string
+	TmuxTarget        string
+	Header            string
+	Question          string
+	Options           []QuestionOption
+	Questions         []QuestionEntry
+	ContextUsedPct    int
+	ContextUsedTokens int
+	ContextWindowSize int
 }
 
 // CompressPath shortens a filesystem path by abbreviating intermediate components to their first character.
@@ -103,6 +109,12 @@ func BuildNotificationText(data NotificationData) string {
 	case data.Event == "PreToolUse":
 		emoji = "💬"
 		status = "Update"
+	case data.Event == "ToolUse":
+		emoji = "🔧"
+		status = data.ToolName
+		if status == "" {
+			status = "Tool Call"
+		}
 	default:
 		emoji = "✅"
 		status = "Task Completed"
@@ -125,7 +137,7 @@ func BuildNotificationText(data NotificationData) string {
 		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
 	}
 	if data.Body != "" {
-		lines = append(lines, "", "💬 Claude:", data.Body)
+		lines = append(lines, "", data.Body)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -159,6 +171,30 @@ func BuildPermissionText(data PermissionData) string {
 	return strings.Join(lines, "\n")
 }
 
+// truncToolStr truncates a string to maxLen runes, appending ellipsis if truncated.
+func truncToolStr(s string, maxLen int) string {
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return string(r[:maxLen]) + "…"
+}
+
+// BuildToolNotifyText formats a tool call notification message for Telegram.
+// Displays the raw toolInput JSON as-is.
+func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string) string {
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, toolInput, "", "  "); err != nil {
+		return string(toolInput)
+	}
+	result := pretty.String()
+	r := []rune(result)
+	if len(r) > 1000 {
+		result = string(r[:1000]) + "…"
+	}
+	return result
+}
+
 func BuildQuestionText(data QuestionData) string {
 	lines := []string{
 		"❓ Question",
@@ -166,6 +202,12 @@ func BuildQuestionText(data QuestionData) string {
 	}
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
+	}
+	if data.ContextUsedPct >= 0 {
+		used := float64(data.ContextUsedTokens)
+		usedStr := formatTokens(used)
+		totalStr := formatTokens(float64(data.ContextWindowSize))
+		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
 	}
 	if len(data.Questions) > 1 {
 		for qIdx, q := range data.Questions {
