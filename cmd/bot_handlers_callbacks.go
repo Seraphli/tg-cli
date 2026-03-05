@@ -59,7 +59,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if !uuidOk {
 			uuid, uuidOk = pendingFiles.get(c.Message().ID)
 		}
-		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(c.Message().ID))
+		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(c.Message().ID))
 		d, err := resolvePermission(c.Message().ID, decision, nil)
 		if err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
@@ -77,9 +77,9 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			}
 		}
 		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s uuid=%s", c.Message().ID, decision, uuid))
-		bot.Edit(c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabels))
+		bot.Edit(c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabel))
 		displayText := decision
-		if strings.HasPrefix(decision, "s") {
+		if decision == "sAll" || strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
 		}
 		targetPtr, err := extractTmuxTarget(c.Message().Text)

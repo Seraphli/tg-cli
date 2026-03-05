@@ -22,11 +22,12 @@ type NotificationData struct {
 }
 
 type PermissionData struct {
-	Project    string
-	CWD        string
-	TmuxTarget string
-	ToolName   string
-	ToolInput  map[string]interface{}
+	Project        string
+	CWD            string
+	TmuxTarget     string
+	ToolName       string
+	ToolInput      map[string]interface{}
+	SuggestionDesc string
 }
 
 type QuestionOption struct {
@@ -166,6 +167,9 @@ func BuildPermissionText(data PermissionData) string {
 				lines = append(lines, key+": "+s)
 			}
 		}
+	}
+	if data.SuggestionDesc != "" {
+		lines = append(lines, "", "💡 Always Allow: "+data.SuggestionDesc)
 	}
 	return strings.Join(lines, "\n")
 }

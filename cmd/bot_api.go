@@ -83,7 +83,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		msgText := pendingPerms.getMsgText(msgID)
 		permChatID := pendingPerms.getChatID(msgID)
-		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(msgID))
+		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
 		d, err := resolvePermission(msgID, decision, nil)
 		if err != nil {
 			http.Error(w, err.Error(), 404)
@@ -104,7 +104,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 		if permChatID != 0 && msgText != "" {
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			bot.Edit(editMsg, msgText, buildFrozenPermMarkup(decision, sugLabels))
+			bot.Edit(editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
 		}
 		respJSON, _ := json.Marshal(d)
 		w.Header().Set("Content-Type", "application/json")
@@ -587,10 +587,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		if _, ok := pendingPerms.getTarget(msgID); ok {
 			permChatID := pendingPerms.getChatID(msgID)
 			permMsgText := pendingPerms.getMsgText(msgID)
-			sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(msgID))
+			sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
 			pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabels))
+			bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
 			logger.Info(fmt.Sprintf("Permission cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
 		}
 		pendingFiles.remove(msgID)

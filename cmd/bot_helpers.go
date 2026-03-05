@@ -328,6 +328,11 @@ func resolvePermission(msgID int, decision string, suggestionsOverride json.RawM
 		d.Behavior = "allow"
 	case decision == "deny":
 		d.Behavior = "deny"
+	case decision == "sAll":
+		d.Behavior = "allow"
+		var sugArr []json.RawMessage
+		json.Unmarshal(suggestions, &sugArr)
+		d.UpdatedPermissions, _ = json.Marshal(sugArr)
 	case strings.HasPrefix(decision, "s"):
 		idx, err := strconv.Atoi(decision[1:])
 		if err != nil {
@@ -428,6 +433,12 @@ func buildFrozenMarkup(entry *toolNotifyEntry, footer string) *tele.ReplyMarkup 
 	markup := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
+	if footer != "" {
+		rows = append(rows, markup.Row(markup.Data(footer, "tool", "noop")))
+		markup.Inline(rows...)
+		return markup
+	}
+
 	if len(entry.questions) == 1 && !entry.questions[0].multiSelect {
 		// Single question, single select - show all options with ✅ on selected
 		q := entry.questions[0]
@@ -471,11 +482,16 @@ func buildFrozenMarkup(entry *toolNotifyEntry, footer string) *tele.ReplyMarkup 
 	return markup
 }
 
-// parseSuggestionLabels extracts human-readable labels from suggestion JSON
-func parseSuggestionLabels(suggestionsRaw json.RawMessage) []string {
+// parseSuggestionLabel parses suggestions and returns a short button label and a detailed description.
+// btnLabel is always "Always Allow" when suggestions exist, otherwise empty.
+// description summarizes all suggestions joined by "; ".
+func parseSuggestionLabel(suggestionsRaw json.RawMessage) (btnLabel string, description string) {
 	var suggestions []json.RawMessage
 	json.Unmarshal(suggestionsRaw, &suggestions)
-	var labels []string
+	if len(suggestions) == 0 {
+		return "", ""
+	}
+	var descs []string
 	for _, s := range suggestions {
 		var sug struct {
 			Type         string   `json:"type"`
@@ -489,16 +505,24 @@ func parseSuggestionLabels(suggestionsRaw json.RawMessage) []string {
 			} `json:"rules"`
 		}
 		json.Unmarshal(s, &sug)
-		var label string
+		var desc string
 		switch sug.Type {
-		case "setMode":
-			label = "✅ " + sug.Mode
 		case "addDirectories":
 			dir := ""
 			if len(sug.Directories) > 0 {
-				dir = sug.Directories[0]
+				dir = filepath.Base(sug.Directories[len(sug.Directories)-1])
 			}
-			label = "✅ Allow dir: " + dir
+			desc = "allow access to " + dir + "/"
+		case "addRules":
+			var ruleParts []string
+			for _, r := range sug.Rules {
+				ruleParts = append(ruleParts, r.RuleContent)
+			}
+			desc = "don't ask again for: " + strings.Join(ruleParts, ", ")
+		case "toolAlwaysAllow":
+			desc = "always allow " + sug.Tool
+		case "setMode":
+			desc = "switch to " + sug.Mode + " mode"
 		default:
 			toolName := sug.Tool
 			allowPattern := sug.AllowPattern
@@ -508,23 +532,29 @@ func parseSuggestionLabels(suggestionsRaw json.RawMessage) []string {
 					allowPattern = sug.Rules[0].RuleContent
 				}
 			}
-			label = "✅ Always Allow"
+			desc = "always allow"
 			if toolName != "" {
-				label += " " + toolName
+				desc += " " + toolName
 			}
 			if allowPattern != "" && allowPattern != "*" {
-				label += " (" + allowPattern + ")"
+				desc += " (" + allowPattern + ")"
 			}
 		}
-		labels = append(labels, label)
+		descs = append(descs, desc)
 	}
-	return labels
+	return "Always Allow", strings.Join(descs, "; ")
 }
 
 // buildFrozenPermMarkup creates frozen markup for PermissionRequest showing the selected decision.
-func buildFrozenPermMarkup(selectedDecision string, suggestions []string) *tele.ReplyMarkup {
+func buildFrozenPermMarkup(selectedDecision string, suggestionLabel string) *tele.ReplyMarkup {
 	markup := &tele.ReplyMarkup{}
 	var rows []tele.Row
+
+	if strings.Contains(selectedDecision, "Cancel") {
+		rows = append(rows, markup.Row(markup.Data("❌ Cancelled", "perm", "noop")))
+		markup.Inline(rows...)
+		return markup
+	}
 
 	allowLabel := "Allow"
 	denyLabel := "Deny"
@@ -539,12 +569,12 @@ func buildFrozenPermMarkup(selectedDecision string, suggestions []string) *tele.
 		markup.Data(denyLabel, "perm", "deny"),
 	))
 
-	for i, sug := range suggestions {
-		label := sug
-		if selectedDecision == fmt.Sprintf("s%d", i) {
-			label = "✅ " + sug
+	if suggestionLabel != "" {
+		label := suggestionLabel
+		if selectedDecision == "sAll" || strings.HasPrefix(selectedDecision, "s") {
+			label = "✅ " + suggestionLabel
 		}
-		rows = append(rows, markup.Row(markup.Data(label, "perm", fmt.Sprintf("s%d", i))))
+		rows = append(rows, markup.Row(markup.Data(label, "perm", "sAll")))
 	}
 
 	markup.Inline(rows...)

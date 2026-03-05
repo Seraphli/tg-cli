@@ -228,7 +228,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		if !uuidOk {
 			uuid, uuidOk = pendingFiles.get(replyTo.ID)
 		}
-		sugLabels := parseSuggestionLabels(pendingPerms.getSuggestions(replyTo.ID))
+		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(replyTo.ID))
 		denyMsg := "User provided custom input: " + text
 		if isVoice {
 			denyMsg = "User provided voice input: " + text
@@ -245,7 +245,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 		}
 		editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-		bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabels))
+		bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabel))
 		targetPtr, err := extractTmuxTarget(replyTo.Text)
 		if err == nil && targetPtr != nil {
 			target := *targetPtr

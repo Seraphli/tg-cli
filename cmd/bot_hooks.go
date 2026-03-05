@@ -56,6 +56,14 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				}
 				pendingFiles.remove(pf.TgMsgID)
 			}
+			if _, ok := pendingPerms.getTarget(pf.TgMsgID); ok {
+				permChatID := pendingPerms.getChatID(pf.TgMsgID)
+				permMsgText := pendingPerms.getMsgText(pf.TgMsgID)
+				sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(pf.TgMsgID))
+				pendingPerms.resolve(pf.TgMsgID, permDecision{Behavior: "deny", Message: "Cancelled by session event"})
+				editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: permChatID}}
+				bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+			}
 			logger.Info(fmt.Sprintf("Cancelled pending file: %s (session=%s)", entry.Name(), sessionID))
 		}
 	}
@@ -232,69 +240,26 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	var toolInput map[string]interface{}
 	json.Unmarshal(p.ToolInput, &toolInput)
 	logger.Info(fmt.Sprintf("Permission payload: toolInput=%s suggestions=%s", string(p.ToolInput), string(p.PermSuggestions)))
+	btnLabel, sugDesc := parseSuggestionLabel(p.PermSuggestions)
 	text := notify.BuildPermissionText(notify.PermissionData{
 		Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
-		ToolName: p.ToolName, ToolInput: toolInput,
+		ToolName: p.ToolName, ToolInput: toolInput, SuggestionDesc: sugDesc,
 	})
 	markup := &tele.ReplyMarkup{}
 	row1 := []tele.Btn{
-		markup.Data("✅ Allow", "perm", "allow"),
-		markup.Data("❌ Deny", "perm", "deny"),
-	}
-	var suggestions []json.RawMessage
-	json.Unmarshal(p.PermSuggestions, &suggestions)
-	var row2 []tele.Btn
-	for i, s := range suggestions {
-		var sug struct {
-			Type         string   `json:"type"`
-			Tool         string   `json:"tool"`
-			AllowPattern string   `json:"allow_pattern"`
-			Mode         string   `json:"mode"`
-			Directories  []string `json:"directories"`
-			Rules        []struct {
-				ToolName    string `json:"toolName"`
-				RuleContent string `json:"ruleContent"`
-			} `json:"rules"`
-		}
-		json.Unmarshal(s, &sug)
-		var label string
-		switch sug.Type {
-		case "setMode":
-			label = "✅ " + sug.Mode
-		case "addDirectories":
-			dir := ""
-			if len(sug.Directories) > 0 {
-				dir = sug.Directories[0]
-			}
-			label = "✅ Allow dir: " + dir
-		default:
-			toolName := sug.Tool
-			allowPattern := sug.AllowPattern
-			if toolName == "" && len(sug.Rules) > 0 {
-				toolName = sug.Rules[0].ToolName
-				if allowPattern == "" {
-					allowPattern = sug.Rules[0].RuleContent
-				}
-			}
-			label = "✅ Always Allow"
-			if toolName != "" {
-				label += " " + toolName
-			}
-			if allowPattern != "" && allowPattern != "*" {
-				label += " (" + allowPattern + ")"
-			}
-		}
-		row2 = append(row2, markup.Data(label, "perm", fmt.Sprintf("s%d", i)))
+		markup.Data("Allow", "perm", "allow"),
+		markup.Data("Deny", "perm", "deny"),
 	}
 	var permBtnRows []tele.Row
 	permBtnRows = append(permBtnRows, row1)
-	if len(row2) > 0 {
+	if btnLabel != "" {
+		row2 := []tele.Btn{markup.Data(btnLabel, "perm", "sAll")}
 		permBtnRows = append(permBtnRows, row2)
 	}
 	permChunks := splitBody(text, 3900)
 	if len(permChunks) <= 1 {
-		if len(row2) > 0 {
-			markup.Inline(markup.Row(row1...), markup.Row(row2...))
+		if btnLabel != "" {
+			markup.Inline(markup.Row(row1...), markup.Row(markup.Data(btnLabel, "perm", "sAll")))
 		} else {
 			markup.Inline(markup.Row(row1...))
 		}
@@ -322,8 +287,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	}
 	logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d) uuid=%s", p.ToolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks), uuid))
 	logger.Info(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
-	suggestionsRaw, _ := json.Marshal(suggestions)
-	pendingPerms.create(sent.ID, p.TmuxTarget, suggestionsRaw, text, chatIDInt, uuid)
+	pendingPerms.create(sent.ID, p.TmuxTarget, p.PermSuggestions, text, chatIDInt, uuid)
 	pendingFiles.store(sent.ID, uuid)
 	pf.Status = "sent"
 	pf.TgMsgID = sent.ID
