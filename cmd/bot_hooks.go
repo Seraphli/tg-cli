@@ -222,6 +222,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		pf.Status = "sent"
 		pf.TgMsgID = sent.ID
 		pf.TgChatID = chatIDInt
+		pf.TgMsgText = text
 		writePendingFile(path, pf)
 		logger.Info(fmt.Sprintf("TG question message sent full_text:\n%s", text))
 		var qSummaries []string
@@ -292,6 +293,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	pf.Status = "sent"
 	pf.TgMsgID = sent.ID
 	pf.TgChatID = chatIDInt
+	pf.TgMsgText = text
 	writePendingFile(path, pf)
 }
 

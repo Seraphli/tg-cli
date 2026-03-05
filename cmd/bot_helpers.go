@@ -857,6 +857,7 @@ type PendingFile struct {
 	CCOutput   json.RawMessage `json:"cc_output"`
 	CreatedAt  string          `json:"created_at"`
 	HookPID    int             `json:"hook_pid"`
+	TgMsgText  string          `json:"tg_msg_text"`
 }
 
 // pendingDir returns /tmp/<config-dir-basename>/pending, creating it if needed
@@ -1457,7 +1458,7 @@ func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 		contentSummary := strings.Join(qSummaries, " | ")
 		toolNotifs.store(pf.TgMsgID, &toolNotifyEntry{
 			tmuxTarget: pf.TmuxTarget, toolName: "AskUserQuestion",
-			questions: qMetas, chatID: pf.TgChatID, msgText: "",
+			questions: qMetas, chatID: pf.TgChatID, msgText: pf.TgMsgText,
 			pendingUUID: pf.UUID,
 		})
 		pendingFiles.store(pf.TgMsgID, pf.UUID)
@@ -1468,7 +1469,7 @@ func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 	var suggestions []json.RawMessage
 	json.Unmarshal(p.PermSuggestions, &suggestions)
 	suggestionsRaw, _ := json.Marshal(suggestions)
-	pendingPerms.create(pf.TgMsgID, pf.TmuxTarget, suggestionsRaw, "", pf.TgChatID, pf.UUID)
+	pendingPerms.create(pf.TgMsgID, pf.TmuxTarget, suggestionsRaw, pf.TgMsgText, pf.TgChatID, pf.UUID)
 	pendingFiles.store(pf.TgMsgID, pf.UUID)
 	logger.Info(fmt.Sprintf("scanPendingDir: rebuilt PermissionRequest state: msg_id=%d tool=%s tmux=%s uuid=%s", pf.TgMsgID, pf.ToolName, pf.TmuxTarget, pf.UUID))
 	return nil
