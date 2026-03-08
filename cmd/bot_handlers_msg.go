@@ -223,6 +223,33 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 
 	// Reply path: ReplyTo != nil
 	replyTo := c.Message().ReplyTo
+
+	// Check if this is a reply to a bot_new confirmation message
+	if val, ok := launchPending.Load(replyTo.ID); ok {
+		state := val.(*LaunchState)
+		customValue := strings.TrimSpace(c.Text())
+		launchPending.Delete(replyTo.ID)
+		switch state.Step {
+		case "session":
+			state.SessionName = customValue
+			c.Bot().Edit(c.Message().ReplyTo, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			if state.WorkDir == "" {
+				askWorkDir(c.Bot(), state.ChatID, state)
+			} else {
+				go executeLaunch(c.Bot(), state.ChatID, state)
+			}
+		case "workdir":
+			if strings.HasPrefix(customValue, "~") {
+				home, _ := os.UserHomeDir()
+				customValue = home + customValue[1:]
+			}
+			state.WorkDir = customValue
+			c.Bot().Edit(c.Message().ReplyTo, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			go executeLaunch(c.Bot(), state.ChatID, state)
+		}
+		return nil
+	}
+
 	if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
 		uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
 		if !uuidOk {

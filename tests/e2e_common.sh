@@ -4,7 +4,8 @@
 BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot}"
 CLAUDE_SESSION="${CLAUDE_SESSION:-tg-cli-e2e-claude}"
 TEST_CONFIG_DIR="$HOME/.tg-cli-test"
-TEST_SETTINGS="$TEST_CONFIG_DIR/claude-settings.json"
+TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$(mktemp -d /tmp/tg-cli-e2e-claude-XXXXXX)}"
+TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
 TEST_PORT=12501
 LOG_FILE="$TEST_CONFIG_DIR/bot.log"
 CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
@@ -21,7 +22,8 @@ fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; }
 # Usage: pane_log "label"
 pane_log() {
   local label="$1"
-  local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$CLAUDE_PANE" | jq -sRr @uri)"
+  local target="${2:-$CLAUDE_PANE}"
+  local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$target" | jq -sRr @uri)"
   local capture
   capture=$(curl -s "$api_url" | jq -r '.content // "(empty)"' 2>/dev/null || echo "(capture failed)")
   {
@@ -134,41 +136,67 @@ start_bot() {
 }
 
 start_claude() {
-  tmux new-session -d -s "$CLAUDE_SESSION" 2>/dev/null || true
+  tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$CLAUDE_SESSION"
   CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
   export CLAUDE_PANE
   tmux send-keys -t "$CLAUDE_SESSION" \
-    "claude --model haiku --allow-dangerously-skip-permissions --setting-sources local --settings $TEST_SETTINGS" Enter
+    "BROWSER=false CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
   echo "Waiting for Claude to start..."
   # Check if trust dialog is present before sending Enter
   sleep 5
-  PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -qi "trust"; then
-    tmux send-keys -t "$CLAUDE_SESSION" Enter
+  pane_log "[start_claude] after 5s sleep, before trust check"
+  PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p -S - 2>/dev/null || true)
+  if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
+    # Bypass Permissions dialog: cursor defaults to "No, exit", need Down then Enter
+    tmux send-keys -t "$CLAUDE_SESSION" Down
+    sleep 1
+    tmux send-keys -t "$CLAUDE_SESSION" C-m
+    echo "Bypass Permissions dialog detected, accepted."
+  elif echo "$PANE_CONTENT" | grep -qi "trust"; then
+    tmux send-keys -t "$CLAUDE_SESSION" C-m
     echo "Trust dialog detected, confirmed."
   else
-    echo "No trust dialog detected, skipping."
+    echo "No dialog detected, skipping."
   fi
+  pane_log "[start_claude] after trust dialog handling"
   echo "Waiting for Claude to reach idle state..."
+  pane_log "[start_claude] before wait_for_cc_idle"
   wait_for_cc_idle
+  pane_log "[start_claude] after wait_for_cc_idle"
 }
 
 setup_hooks() {
-  ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
-  claude mcp add --scope local --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT"
-  # Write test app config with toolNotifyList so tool notifications are enabled for Bash
+  # Copy credentials (CLAUDE_CONFIG_DIR maps to ~/.claude)
+  cp "$HOME/.claude/.credentials.json" "$TEST_CLAUDE_CONFIG_DIR/.credentials.json" 2>/dev/null || true
+  # Write minimal .claude.json (skip onboarding, no MCP leak)
+  cat > "$TEST_CLAUDE_CONFIG_DIR/.claude.json" << 'MINEOF'
+{"hasCompletedOnboarding":true,"hasInitOnboardingBeenShown":true,"numStartups":100,"autoUpdates":false}
+MINEOF
+  # Install hooks to user-level settings (CLAUDE_CONFIG_DIR/settings.json)
+  TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
+  echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
+  # Add skipDangerousModePermissionPrompt to settings
+  python3 -c "import json;f='$TEST_SETTINGS';d=json.load(open(f));d['skipDangerousModePermissionPrompt']=True;json.dump(d,open(f,'w'),indent=2)"
+  # Register MCP in isolated config
+  CLAUDE_CONFIG_DIR="$TEST_CLAUDE_CONFIG_DIR" claude mcp add --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT" 2>/dev/null || true
+  # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
-  echo '{"toolNotifyList":["Bash"]}' > "$TEST_CONFIG_DIR/config.json"
-  echo "Hooks installed."
+  local cc_cmd="BROWSER=false CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions"
+  echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\"}" > "$TEST_CONFIG_DIR/config.json"
+  echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
 
 cleanup_sessions() {
+  local exit_code=$?
   echo ""
   echo "Cleaning up..."
-  rm -f "$TEST_SETTINGS"
-  claude mcp remove tg-cli -s local 2>/dev/null || true
+  if [ -n "$TEST_CLAUDE_CONFIG_DIR" ] && [ -d "$TEST_CLAUDE_CONFIG_DIR" ]; then
+    rm -rf "$TEST_CLAUDE_CONFIG_DIR"
+  fi
   tmux kill-session -t "$BOT_SESSION" 2>/dev/null || true
   tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  return $exit_code
 }
 
 ensure_infrastructure() {

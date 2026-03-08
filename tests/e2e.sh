@@ -3,6 +3,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/e2e_common.sh"
 
+E2E_LOG_FILE="/tmp/tg-cli-e2e-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee "$E2E_LOG_FILE") 2>&1
+echo "E2E log file: $E2E_LOG_FILE"
+
 ensure_credentials
 
 # Parse args
@@ -26,6 +30,7 @@ fi
 # Init results file
 > "$E2E_RESULTS_FILE"
 export E2E_ORCHESTRATED=1
+export TEST_CLAUDE_CONFIG_DIR
 
 echo "=== tg-cli E2E Test ==="
 echo "Log file: $LOG_FILE"

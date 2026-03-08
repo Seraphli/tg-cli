@@ -16,7 +16,7 @@ echo "Waiting for Claude to settle..."
 wait_for_cc_idle
 
 # Inject a long-output prompt to trigger pagination
-LONG_PROMPT="list the numbers from 1 to 100, each on its own line, in the format 'Number NNN: test line for pagination verification'"
+LONG_PROMPT="Without using any tools, directly output in your message: list the numbers from 1 to 200, each on its own line, in the format 'Number NNN: test line for pagination verification'. Do NOT use Bash or any other tool - type the entire list yourself in your response."
 pane_log "[pagination] BEFORE injecting long prompt"
 inject_prompt "$LONG_PROMPT"
 echo "Long prompt injected, waiting for Claude to respond and trigger pagination..."

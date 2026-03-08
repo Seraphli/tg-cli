@@ -92,14 +92,17 @@ func SaveCredentials(creds Credentials) error {
 }
 
 type AppConfig struct {
-	WhisperPath    string   `json:"whisperPath"`
-	ModelPath      string   `json:"modelPath"`
-	Language       string   `json:"language"`
-	FFmpegPath     string   `json:"ffmpegPath"`
-	WhisperPrompt  string   `json:"whisperPrompt"`
-	VoicePrefix    string   `json:"voicePrefix"`
+	WhisperPath       string   `json:"whisperPath"`
+	ModelPath         string   `json:"modelPath"`
+	Language          string   `json:"language"`
+	FFmpegPath        string   `json:"ffmpegPath"`
+	WhisperPrompt     string   `json:"whisperPrompt"`
+	VoicePrefix       string   `json:"voicePrefix"`
 	ToolNotifyList    []string `json:"toolNotifyList,omitempty"`
 	ToolNotifyEnabled *bool    `json:"toolNotifyEnabled,omitempty"`
+	ClaudeCommand     string   `json:"claudeCommand"`
+	DefaultSessionName string  `json:"defaultSessionName"`
+	DefaultWorkDir    string   `json:"defaultWorkDir"`
 }
 
 func GetConfigPath() string {
@@ -112,7 +115,7 @@ func LoadAppConfig() (AppConfig, error) {
 	}
 	path := GetConfigPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️"}, nil
+		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️", ClaudeCommand: "claude", DefaultSessionName: "tg-cli", DefaultWorkDir: filepath.Join(GetConfigDir(), "workspace")}, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -127,6 +130,15 @@ func LoadAppConfig() (AppConfig, error) {
 	}
 	if cfg.VoicePrefix == "" {
 		cfg.VoicePrefix = "🗣️"
+	}
+	if cfg.ClaudeCommand == "" {
+		cfg.ClaudeCommand = "claude"
+	}
+	if cfg.DefaultSessionName == "" {
+		cfg.DefaultSessionName = "tg-cli"
+	}
+	if cfg.DefaultWorkDir == "" {
+		cfg.DefaultWorkDir = filepath.Join(GetConfigDir(), "workspace")
 	}
 	return cfg, nil
 }

@@ -399,6 +399,73 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond(&tele.CallbackResponse{Text: toolName + ": " + action})
 	})
 
+	bot.Handle(&tele.InlineButton{Unique: "bot_new"}, func(c tele.Context) error {
+		data := c.Data()
+		msgID := c.Message().ID
+		val, ok := launchPending.Load(msgID)
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Expired"})
+		}
+		state := val.(*LaunchState)
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		switch {
+		case data == "session_default":
+			state.SessionName = cfg.DefaultSessionName
+			c.Bot().Edit(c.Message(), fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			launchPending.Delete(msgID)
+			if state.WorkDir == "" {
+				askWorkDir(c.Bot(), state.ChatID, state)
+			} else {
+				go executeLaunch(c.Bot(), state.ChatID, state)
+			}
+		case data == "dir_select":
+			state.WorkDir = state.BrowsePath
+			c.Bot().Edit(c.Message(), fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			launchPending.Delete(msgID)
+			go executeLaunch(c.Bot(), state.ChatID, state)
+		case data == "cd_up":
+			parent := filepath.Dir(state.BrowsePath)
+			if parent != state.BrowsePath {
+				state.BrowsePath = parent
+				state.DirPage = 0
+			}
+			refreshDirBrowser(c.Bot(), c.Message(), state)
+		case strings.HasPrefix(data, "cd:"):
+			idx, err := strconv.Atoi(strings.TrimPrefix(data, "cd:"))
+			if err == nil {
+				dirs, _ := listSubDirs(state.BrowsePath, state.ShowHidden)
+				if idx >= 0 && idx < len(dirs) {
+					state.BrowsePath = filepath.Join(state.BrowsePath, dirs[idx])
+					state.DirPage = 0
+				}
+			}
+			refreshDirBrowser(c.Bot(), c.Message(), state)
+		case data == "toggle_hidden":
+			state.ShowHidden = !state.ShowHidden
+			state.DirPage = 0
+			refreshDirBrowser(c.Bot(), c.Message(), state)
+		case data == "page_prev":
+			if state.DirPage > 0 {
+				state.DirPage--
+			}
+			refreshDirBrowser(c.Bot(), c.Message(), state)
+		case data == "page_next":
+			state.DirPage++
+			refreshDirBrowser(c.Bot(), c.Message(), state)
+		case data == "page_noop":
+			// no-op
+		case data == "cancel":
+			c.Bot().Edit(c.Message(), "❌ Launch cancelled.")
+			launchPending.Delete(msgID)
+			deleteLaunchState(state.UUID)
+			logger.Info(fmt.Sprintf("bot_new: cancel pressed msg_id=%d uuid=%s", msgID, state.UUID))
+		}
+		return c.Respond()
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
 		action := c.Data() // "yes" or "no"
 		val, ok := unbindPending.Load(c.Message().ID)

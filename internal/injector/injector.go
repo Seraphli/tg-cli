@@ -89,6 +89,44 @@ func FormatTarget(t TmuxTarget) string {
 	return t.PaneID
 }
 
+// CreateSession creates a new tmux session with optional working directory.
+func CreateSession(name, workDir string) error {
+	args := []string{"new-session", "-d", "-s", name}
+	if workDir != "" {
+		args = append(args, "-c", workDir)
+	}
+	return exec.Command("tmux", args...).Run()
+}
+
+// CreateWindow creates a new window in an existing tmux session.
+// Returns the pane ID of the new window.
+func CreateWindow(session, workDir string) (string, error) {
+	args := []string{"new-window", "-t", session, "-P", "-F", "#{pane_id}"}
+	if workDir != "" {
+		args = append(args, "-c", workDir)
+	}
+	out, err := exec.Command("tmux", args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ListPanes returns pane IDs in a session.
+func ListPanes(session string) ([]string, error) {
+	out, err := exec.Command("tmux", "list-panes", "-t", session, "-F", "#{pane_id}").Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return lines, nil
+}
+
+// NamedSessionExists checks if a tmux session with the given name exists.
+func NamedSessionExists(name string) bool {
+	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
+}
+
 // SendKeys sends keys to a tmux pane.
 func SendKeys(target TmuxTarget, keys ...string) error {
 	args := append([]string{"send-keys", "-t", target.PaneID}, keys...)

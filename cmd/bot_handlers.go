@@ -469,6 +469,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return c.Reply("🔧 Select tools for notifications:\n(Click to toggle)", menu)
 	})
 
+	bot.Handle("/bot_new", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired.")
+		}
+		args := strings.TrimSpace(c.Message().Payload)
+		sessionName, workDir, command := parseBotNewArgs(args)
+		return startLaunchFlow(c, sessionName, workDir, command)
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
 }

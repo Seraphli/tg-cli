@@ -1030,6 +1030,8 @@ func scanPendingDir(bot *tele.Bot, creds *config.Credentials) {
 			logger.Error(fmt.Sprintf("scanPendingDir: unknown status %q in %s", pf.Status, uuid))
 		}
 	}
+	// Also scan launch state files for /bot_new crash recovery
+	scanLaunchDir(bot)
 }
 
 // sessionListEntry holds metadata for a discovered CC session.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -669,6 +670,157 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "mode": mode, "content": content})
+	})
+	mux.HandleFunc("/bot_new", func(w http.ResponseWriter, r *http.Request) {
+		chatID, err := strconv.ParseInt(creds.PairingAllow.DefaultChatID, 10, 64)
+		if err != nil {
+			http.Error(w, "no default chat configured", 400)
+			return
+		}
+		session := r.URL.Query().Get("session")
+		workdir := r.URL.Query().Get("workdir")
+		command := r.URL.Query().Get("command")
+		state := &LaunchState{
+			SessionName: session,
+			WorkDir:     workdir,
+			Command:     command,
+			ChatID:      chatID,
+			UUID:        generateLaunchUUID(),
+		}
+		if session == "" {
+			askSessionName(bot, chatID, state)
+		} else if workdir == "" {
+			askWorkDir(bot, chatID, state)
+		} else {
+			go executeLaunch(bot, chatID, state)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "uuid": state.UUID})
+	})
+	mux.HandleFunc("/bot_new/callback", func(w http.ResponseWriter, r *http.Request) {
+		uuid := r.URL.Query().Get("uuid")
+		data := r.URL.Query().Get("data")
+		if uuid == "" || data == "" {
+			http.Error(w, "missing uuid or data", 400)
+			return
+		}
+		var state *LaunchState
+		var msgID int
+		launchPending.Range(func(key, val interface{}) bool {
+			s := val.(*LaunchState)
+			if s.UUID == uuid {
+				state = s
+				msgID = key.(int)
+				return false
+			}
+			return true
+		})
+		if state == nil {
+			http.Error(w, "launch not found", 404)
+			return
+		}
+		chatID := state.ChatID
+		msg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+		cfg, _ := config.LoadAppConfig()
+		switch {
+		case data == "session_default":
+			state.SessionName = cfg.DefaultSessionName
+			bot.Edit(msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			launchPending.Delete(msgID)
+			if state.WorkDir == "" {
+				askWorkDir(bot, chatID, state)
+			} else {
+				go executeLaunch(bot, chatID, state)
+			}
+		case data == "dir_select":
+			state.WorkDir = state.BrowsePath
+			bot.Edit(msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			launchPending.Delete(msgID)
+			go executeLaunch(bot, chatID, state)
+		case data == "cd_up":
+			parent := filepath.Dir(state.BrowsePath)
+			if parent != state.BrowsePath {
+				state.BrowsePath = parent
+				state.DirPage = 0
+			}
+			refreshDirBrowser(bot, msg, state)
+		case strings.HasPrefix(data, "cd:"):
+			idx, err := strconv.Atoi(strings.TrimPrefix(data, "cd:"))
+			if err == nil {
+				dirs, _ := listSubDirs(state.BrowsePath, state.ShowHidden)
+				if idx >= 0 && idx < len(dirs) {
+					state.BrowsePath = filepath.Join(state.BrowsePath, dirs[idx])
+					state.DirPage = 0
+				}
+			}
+			refreshDirBrowser(bot, msg, state)
+		case data == "toggle_hidden":
+			state.ShowHidden = !state.ShowHidden
+			state.DirPage = 0
+			refreshDirBrowser(bot, msg, state)
+		case data == "page_prev":
+			if state.DirPage > 0 {
+				state.DirPage--
+			}
+			refreshDirBrowser(bot, msg, state)
+		case data == "page_next":
+			state.DirPage++
+			refreshDirBrowser(bot, msg, state)
+		case data == "cancel":
+			bot.Edit(msg, "❌ Launch cancelled.")
+			launchPending.Delete(msgID)
+			deleteLaunchState(state.UUID)
+			logger.Info(fmt.Sprintf("bot_new API: cancel pressed msg_id=%d uuid=%s", msgID, state.UUID))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	})
+	mux.HandleFunc("/bot_new/reply", func(w http.ResponseWriter, r *http.Request) {
+		uuid := r.URL.Query().Get("uuid")
+		text := r.URL.Query().Get("text")
+		if uuid == "" || text == "" {
+			http.Error(w, "missing uuid or text", 400)
+			return
+		}
+		var state *LaunchState
+		var msgID int
+		launchPending.Range(func(key, val interface{}) bool {
+			s := val.(*LaunchState)
+			if s.UUID == uuid {
+				state = s
+				msgID = key.(int)
+				return false
+			}
+			return true
+		})
+		if state == nil {
+			http.Error(w, "launch not found", 404)
+			return
+		}
+		chatID := state.ChatID
+		msg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+		launchPending.Delete(msgID)
+		switch state.Step {
+		case "session":
+			state.SessionName = strings.TrimSpace(text)
+			bot.Edit(msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			if state.WorkDir == "" {
+				askWorkDir(bot, chatID, state)
+			} else {
+				go executeLaunch(bot, chatID, state)
+			}
+		case "workdir":
+			customValue := strings.TrimSpace(text)
+			if strings.HasPrefix(customValue, "~") {
+				home, _ := os.UserHomeDir()
+				customValue = home + customValue[1:]
+			}
+			state.WorkDir = customValue
+			bot.Edit(msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			go executeLaunch(bot, chatID, state)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 	})
 	mux.HandleFunc("/resume/list", func(w http.ResponseWriter, r *http.Request) {
 		target := r.URL.Query().Get("target")
