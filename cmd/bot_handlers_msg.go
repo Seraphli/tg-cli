@@ -182,33 +182,40 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 			return c.Reply("❌ tmux session not found.")
 		}
-		if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-			uuid, uuidOk := pendingFiles.get(msgID)
-			if uuidOk {
-				if handleStalePending(msgID, uuid, bot) {
-					// Stale: hook dead or file missing, fall through to InjectText
-				} else {
-					path := filepath.Join(pendingDir(), uuid+".json")
-					pf, err := readPendingFile(path)
-					if err == nil {
-						answers := make(map[string]string)
-						if len(entry.questions) > 0 {
-							answers[entry.questions[0].questionText] = text
-						}
-						ccOutput := buildAskCCOutput(pf.Payload, answers)
-						if err := writePendingAnswer(uuid, ccOutput); err != nil {
-							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-						} else {
-							toolNotifs.markResolved(msgID)
-							logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-							bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
-						}
-						sendFeedback(tmuxStr)
-						return nil
-					}
-				}
+		for {
+			msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr)
+			if !ok {
+				break
 			}
+			uuid, uuidOk := pendingFiles.get(msgID)
+			if !uuidOk {
+				toolNotifs.markResolved(msgID)
+				continue
+			}
+			if handleStalePending(msgID, uuid, bot) {
+				continue
+			}
+			path := filepath.Join(pendingDir(), uuid+".json")
+			pf, err := readPendingFile(path)
+			if err != nil {
+				toolNotifs.markResolved(msgID)
+				continue
+			}
+			answers := make(map[string]string)
+			if len(entry.questions) > 0 {
+				answers[entry.questions[0].questionText] = text
+			}
+			ccOutput := buildAskCCOutput(pf.Payload, answers)
+			if err := writePendingAnswer(uuid, ccOutput); err != nil {
+				logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+			} else {
+				toolNotifs.markResolved(msgID)
+				logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+				editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+			}
+			sendFeedback(tmuxStr)
+			return nil
 		}
 		if !checkSessionAlive(tmuxStr, bot) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
