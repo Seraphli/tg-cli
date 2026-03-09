@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1614,4 +1615,127 @@ func shouldNotifyTool(toolName string) bool {
 		}
 	}
 	return false
+}
+
+// handleUsageCommand launches a temporary CC session, runs /usage, and sends the result to TG.
+func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
+	// Send feedback message
+	msg, err := retrySend(bot, c.Chat(), "⏳ Fetching CC usage...")
+	if err != nil {
+		return err
+	}
+	// Create temp tmux session
+	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
+	configDir := config.GetConfigDir()
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
+	if err := cmd.Run(); err != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
+		retryEdit(bot, msg, "❌ Failed to create temp session")
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
+	// Ensure cleanup
+	defer exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	target, _ := injector.ParseTarget(sessionName)
+	// Start claude
+	logger.Info(fmt.Sprintf("handleUsageCommand: starting claude session=%s", sessionName))
+	injector.SendKeys(target, "claude", "Enter")
+	// Wait for CC ready (poll for ❯ prompt, 30s for cold start)
+	if !waitForPaneContent(target, "❯", 30*time.Second) {
+		logger.Error("handleUsageCommand: CC failed to initialize (timeout waiting for ❯)")
+		retryEdit(bot, msg, "❌ CC failed to initialize")
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: CC ready session=%s", sessionName))
+	// Inject /usage
+	logger.Info("handleUsageCommand: injecting /usage")
+	injector.SendKeys(target, "/usage", "Enter")
+	// Wait for usage output (poll for "used" keyword)
+	if !waitForPaneContent(target, "used", 10*time.Second) {
+		logger.Error("handleUsageCommand: failed to get usage data (timeout waiting for 'used')")
+		retryEdit(bot, msg, "❌ Failed to get usage data")
+		return nil
+	}
+	logger.Info("handleUsageCommand: usage output detected")
+	// Extra wait for full render
+	time.Sleep(1 * time.Second)
+	// Capture and parse
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: failed to capture pane err=%v", err))
+		retryEdit(bot, msg, "❌ Failed to capture usage data")
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: pane captured len=%d", len(content)))
+	// Parse usage content
+	formatted := parseUsageOutput(content)
+	if formatted == "" {
+		logger.Error("handleUsageCommand: failed to parse usage data (empty result)")
+		retryEdit(bot, msg, "❌ Failed to parse usage data")
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
+	// Send formatted result (replace the ⏳ message)
+	chunks := splitBody(formatted, 4000)
+	if len(chunks) <= 1 {
+		retryEdit(bot, msg, formatted)
+	} else {
+		kb := buildPageKeyboard(1, len(chunks))
+		retryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb)
+		pages.store(msg.ID, "", &pageEntry{chunks: chunks, permRows: []tele.Row{}})
+	}
+	logger.Info("handleUsageCommand: done")
+	return nil
+}
+
+// waitForPaneContent polls the tmux pane until the needle string appears or timeout is reached.
+func waitForPaneContent(target injector.TmuxTarget, needle string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		content, err := injector.CapturePane(target)
+		if err == nil && strings.Contains(content, needle) {
+			return true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
+
+// parseUsageOutput extracts relevant usage lines from raw CC pane output.
+func parseUsageOutput(raw string) string {
+	lines := strings.Split(raw, "\n")
+	var result []string
+	result = append(result, "📊 CC Usage\n")
+	var currentSection string
+	re := regexp.MustCompile(`(\d+%\s+used)`)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "Settings:") ||
+			trimmed == "Esc to cancel" || strings.HasPrefix(trimmed, "❯") ||
+			strings.HasPrefix(trimmed, "╭") || strings.HasPrefix(trimmed, "╰") {
+			continue
+		}
+		if !strings.Contains(trimmed, "% used") && !strings.HasPrefix(trimmed, "Resets") &&
+			!strings.HasPrefix(trimmed, "█") && !strings.HasPrefix(trimmed, "Extra") &&
+			!strings.HasPrefix(trimmed, "▌") && len(trimmed) > 5 {
+			if strings.HasPrefix(trimmed, "Current") || strings.HasPrefix(trimmed, "Extra") {
+				currentSection = trimmed
+			}
+			continue
+		}
+		if strings.Contains(trimmed, "% used") {
+			if m := re.FindString(trimmed); m != "" {
+				if currentSection != "" {
+					result = append(result, fmt.Sprintf("%s: %s", currentSection, m))
+				}
+			}
+		}
+		if strings.HasPrefix(trimmed, "Resets") {
+			result = append(result, fmt.Sprintf("⏰ %s\n", trimmed))
+		}
+		if strings.HasPrefix(trimmed, "Extra usage") {
+			result = append(result, trimmed)
+		}
+	}
+	return strings.Join(result, "\n")
 }

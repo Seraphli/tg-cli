@@ -549,6 +549,15 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return startLaunchFlow(c, sessionName, workDir, command)
 	})
 
+	bot.Handle("/bot_usage", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired.")
+		}
+		return handleUsageCommand(c, bot)
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
 }

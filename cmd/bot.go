@@ -180,6 +180,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
 		tele.Command{Text: "bot_tools", Description: "Configure which tools send notifications"},
 		tele.Command{Text: "bot_new", Description: "Launch new Claude Code session"},
+		tele.Command{Text: "bot_usage", Description: "Show CC usage limits"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
