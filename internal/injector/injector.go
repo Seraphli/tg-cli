@@ -4,8 +4,17 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
+
+var injectMu sync.Map // key: formatted target string, value: *sync.Mutex
+
+func getInjectLock(target TmuxTarget) *sync.Mutex {
+	key := FormatTarget(target)
+	v, _ := injectMu.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
 
 type TmuxTarget struct {
 	PaneID string // e.g. "%3"
@@ -44,22 +53,27 @@ func SessionExists(target TmuxTarget) bool {
 }
 
 // InjectText injects text into a tmux pane using bracketed paste.
+// Uses a per-target mutex to prevent concurrent injections into the same pane.
 func InjectText(target TmuxTarget, text string) error {
+	mu := getInjectLock(target)
+	mu.Lock()
+	defer mu.Unlock()
 	text = NormalizeText(text)
 	if text == "" {
 		return fmt.Errorf("empty text after normalization")
 	}
+	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
 	// Clear current input
 	if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-u").Run(); err != nil {
 		return fmt.Errorf("clear input failed: %w", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 	// Set buffer
-	if err := tmuxCmd(target, "set-buffer", "-b", "tg-cli", "--", text).Run(); err != nil {
+	if err := tmuxCmd(target, "set-buffer", "-b", bufName, "--", text).Run(); err != nil {
 		return fmt.Errorf("set-buffer failed: %w", err)
 	}
 	// Paste with bracketed paste
-	if err := tmuxCmd(target, "paste-buffer", "-t", target.PaneID, "-b", "tg-cli", "-r", "-p").Run(); err != nil {
+	if err := tmuxCmd(target, "paste-buffer", "-t", target.PaneID, "-b", bufName, "-r", "-p").Run(); err != nil {
 		return fmt.Errorf("paste-buffer failed: %w", err)
 	}
 	time.Sleep(1000 * time.Millisecond)

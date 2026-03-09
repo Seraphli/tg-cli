@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,24 @@ type unbindItem struct {
 
 // registerTGHandlers registers all Telegram bot handlers
 func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
+	// Log every incoming Telegram message and callback for debugging
+	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
+		return func(c tele.Context) error {
+			if cb := c.Callback(); cb != nil {
+				logger.Info(fmt.Sprintf("TG recv callback: chat=%d sender=%d msg_id=%d data=%s",
+					c.Chat().ID, c.Sender().ID, c.Message().ID, cb.Data))
+			} else if msg := c.Message(); msg != nil {
+				msgType := "text"
+				if msg.Voice != nil {
+					msgType = "voice"
+				}
+				preview := truncateStr(c.Text(), 50)
+				logger.Info(fmt.Sprintf("TG recv %s: chat=%d sender=%d msg_id=%d text=%s",
+					msgType, c.Chat().ID, c.Sender().ID, msg.ID, preview))
+			}
+			return next(c)
+		}
+	})
 	// Build TG→CC name mapping
 	ccCommandMap := make(map[string]string)
 	for tgName := range ccBuiltinCommands {
@@ -71,6 +90,31 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
 						text += " " + payload
 					}
+					// Check for pending AskUserQuestion — resolve with command text instead of injecting
+					if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+						uuid, uuidOk := pendingFiles.get(msgID)
+						if uuidOk && !handleStalePending(msgID, uuid, bot) {
+							path := filepath.Join(pendingDir(), uuid+".json")
+							pf, err := readPendingFile(path)
+							if err == nil {
+								answers := make(map[string]string)
+								if len(entry.questions) > 0 {
+									answers[entry.questions[0].questionText] = text
+								}
+								ccOutput := buildAskCCOutput(pf.Payload, answers)
+								if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
+									logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
+								} else {
+									toolNotifs.markResolved(msgID)
+									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+									retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+								}
+							}
+						}
+						reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+						return nil
+					}
 					if err := injector.InjectText(target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 					}
@@ -91,10 +135,35 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
 				text += " " + payload
 			}
+			tmuxStr := injector.FormatTarget(target)
+			// Check for pending AskUserQuestion — resolve with command text instead of injecting
+			if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+				uuid, uuidOk := pendingFiles.get(msgID)
+				if uuidOk && !handleStalePending(msgID, uuid, bot) {
+					path := filepath.Join(pendingDir(), uuid+".json")
+					pf, err := readPendingFile(path)
+					if err == nil {
+						answers := make(map[string]string)
+						if len(entry.questions) > 0 {
+							answers[entry.questions[0].questionText] = text
+						}
+						ccOutput := buildAskCCOutput(pf.Payload, answers)
+						if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
+							logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
+						} else {
+							toolNotifs.markResolved(msgID)
+							logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+							retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+						}
+					}
+				}
+				reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+				return nil
+			}
 			if err := injector.InjectText(target, text); err != nil {
 				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
-			tmuxStr := injector.FormatTarget(target)
 			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
 			return nil
 		})
@@ -183,7 +252,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, truncateStr(s.Summary, 500), relativeTime(s.Modified)))
 		}
 		text := strings.Join(lines, "\n")
-		_, err = bot.Send(c.Chat(), text, kb)
+		_, err = retrySend(bot, c.Chat(), text, kb)
 		if err != nil {
 			return c.Send(fmt.Sprintf("❌ Failed to send: %v", err))
 		}
@@ -302,7 +371,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			btnTmux := sel.Data("📟 Tmux", "bind", "tmux")
 			btnProject := sel.Data("📂 Project", "bind", "project")
 			sel.Inline(sel.Row(btnTmux, btnProject))
-			sent, err := bot.Send(c.Chat(), fmt.Sprintf("Choose binding type:\n📟 %s\n📂 %s", tmuxStr, notify.CompressPath(info.cwd)), sel)
+			sent, err := retrySend(bot, c.Chat(), fmt.Sprintf("Choose binding type:\n📟 %s\n📂 %s", tmuxStr, notify.CompressPath(info.cwd)), sel)
 			if err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
 			}
@@ -431,7 +500,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 				btnYes := sel.Data("✅ Yes, unbind", "unbind_confirm", "yes")
 				btnNo := sel.Data("❌ Cancel", "unbind_confirm", "no")
 				sel.Inline(sel.Row(btnYes, btnNo))
-				sent, err := bot.Send(c.Chat(), fmt.Sprintf("Unbind project route?\n📂 %s\n⚠️ This affects all sessions in this project.", notify.CompressPath(info.cwd)), sel)
+				sent, err := retrySend(bot, c.Chat(), fmt.Sprintf("Unbind project route?\n📂 %s\n⚠️ This affects all sessions in this project.", notify.CompressPath(info.cwd)), sel)
 				if err != nil {
 					return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
 				}

@@ -42,7 +42,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			})
 		}
 		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
-		_, err = bot.Edit(c.Message(), text, kb)
+		_, err = retryEdit(bot, c.Message(), text, kb)
 		if err != nil {
 			logger.Debug(fmt.Sprintf("edit page error: %v", err))
 		}
@@ -77,7 +77,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			}
 		}
 		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s uuid=%s", c.Message().ID, decision, uuid))
-		bot.Edit(c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabel))
+		retryEdit(bot, c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabel))
 		displayText := decision
 		if decision == "sAll" || strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
@@ -129,7 +129,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
 				}
 				toolNotifs.markResolved(c.Message().ID)
-				bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, "💬 Chat mode selected"))
+				retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, "💬 Chat mode selected"))
 				logger.Info(fmt.Sprintf("AskUserQuestion 'Chat about this' selected: msg_id=%d uuid=%s", c.Message().ID, uuid))
 				return c.Respond(&tele.CallbackResponse{Text: "Chat mode"})
 			} else if parts[1] == "submit" {
@@ -153,7 +153,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
 				}
 				toolNotifs.markResolved(c.Message().ID)
-				bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
+				retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
 				logger.Info(fmt.Sprintf("AskUserQuestion submitted: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 				return c.Respond(&tele.CallbackResponse{Text: "✅ Submitted"})
 			} else {
@@ -168,7 +168,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					qm.selectedOptions[optIdx] = !qm.selectedOptions[optIdx]
 					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d state=%v label=%s", c.Message().ID, qIdx, optIdx, qm.selectedOptions[optIdx], qm.optionLabels[optIdx]))
 					newMarkup := rebuildAskMarkup(entry)
-					bot.Edit(c.Message(), c.Message().Text, newMarkup)
+					retryEdit(bot, c.Message(), c.Message().Text, newMarkup)
 					return c.Respond(&tele.CallbackResponse{Text: "Toggled"})
 				} else {
 					qm.selectedOption = optIdx
@@ -199,13 +199,13 @@ func registerCallbackHandlers(bot *tele.Bot) {
 							return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
 						}
 						toolNotifs.markResolved(c.Message().ID)
-						bot.Edit(c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
+						retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
 						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 						return c.Respond(&tele.CallbackResponse{Text: "✅ Selected"})
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
-						bot.Edit(c.Message(), c.Message().Text, newMarkup)
+						retryEdit(bot, c.Message(), c.Message().Text, newMarkup)
 						return c.Respond(&tele.CallbackResponse{Text: "Selected"})
 					}
 				}
@@ -228,7 +228,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 
 		creds, err := config.LoadCredentials()
 		if err != nil {
-			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
 			return c.Respond()
 		}
 		var resultMsg string
@@ -242,10 +242,10 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			logger.Info(fmt.Sprintf("Route bound (project): cwd=%s → chat=%d", bp.cwd, bp.chatID))
 		}
 		if err := config.SaveCredentials(creds); err != nil {
-			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
 			return c.Respond()
 		}
-		bot.Edit(c.Message(), resultMsg)
+		retryEdit(bot, c.Message(), resultMsg)
 		return c.Respond()
 	})
 
@@ -283,7 +283,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			rows = append(rows, markup.Row(btns...))
 		}
 		markup.Inline(rows...)
-		if _, err := bot.Edit(c.Message(), c.Message().Text, markup); err != nil {
+		if _, err := retryEdit(bot, c.Message(), c.Message().Text, markup); err != nil {
 			logger.Debug(fmt.Sprintf("resume edit markup error: %v", err))
 		}
 		reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(*targetPtr))
@@ -294,18 +294,18 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		data := strings.TrimSpace(c.Data())
 		num, err := strconv.Atoi(data)
 		if err != nil {
-			bot.Edit(c.Message(), "❌ Invalid selection.")
+			retryEdit(bot, c.Message(), "❌ Invalid selection.")
 			return c.Respond()
 		}
 		val, ok := unbindMenuItems.LoadAndDelete(c.Message().ID)
 		if !ok {
-			bot.Edit(c.Message(), "❌ Menu expired. Send /bot_unbind again.")
+			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_unbind again.")
 			return c.Respond()
 		}
 		items := val.([]unbindItem)
 		idx := num - 1
 		if idx < 0 || idx >= len(items) {
-			bot.Edit(c.Message(), "❌ Selection out of range.")
+			retryEdit(bot, c.Message(), "❌ Selection out of range.")
 			return c.Respond()
 		}
 		item := items[idx]
@@ -313,27 +313,27 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		case "tmux":
 			creds, err := config.LoadCredentials()
 			if err != nil {
-				bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+				retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
 				return c.Respond()
 			}
 			delete(creds.RouteMap, item.key)
 			config.SaveCredentials(creds)
 			logger.Info(fmt.Sprintf("Route unbound (menu/tmux): tmux=%s", item.key))
-			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound tmux route.\n📟 %s", getPaneLabel(item.key)))
+			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound tmux route.\n📟 %s", getPaneLabel(item.key)))
 		case "project":
 			creds, err := config.LoadCredentials()
 			if err != nil {
-				bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+				retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
 				return c.Respond()
 			}
 			delete(creds.ProjectRouteMap, item.key)
 			config.SaveCredentials(creds)
 			logger.Info(fmt.Sprintf("Route unbound (menu/project): cwd=%s", item.key))
-			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(item.key)))
+			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(item.key)))
 		case "session":
 			sessionState.remove(item.key)
 			logger.Info(fmt.Sprintf("Route unbound (menu/session): sid=%s", item.key))
-			bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound session.\n🔑 %s", item.key[:8]))
+			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound session.\n🔑 %s", item.key[:8]))
 		}
 		return c.Respond()
 	})
@@ -476,21 +476,21 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		unbindPending.Delete(c.Message().ID)
 
 		if action != "yes" {
-			bot.Edit(c.Message(), "❌ Unbind cancelled.")
+			retryEdit(bot, c.Message(), "❌ Unbind cancelled.")
 			return c.Respond()
 		}
 		creds, err := config.LoadCredentials()
 		if err != nil {
-			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
 			return c.Respond()
 		}
 		delete(creds.ProjectRouteMap, up.cwd)
 		if err := config.SaveCredentials(creds); err != nil {
-			bot.Edit(c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
 			return c.Respond()
 		}
 		logger.Info(fmt.Sprintf("Route unbound (project): cwd=%s", up.cwd))
-		bot.Edit(c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(up.cwd)))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(up.cwd)))
 		return c.Respond()
 	})
 }

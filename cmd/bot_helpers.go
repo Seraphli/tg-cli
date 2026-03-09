@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -235,7 +236,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 	if len(chunks) <= 1 {
 		nd.Body = body
 		text := notify.BuildNotificationText(nd)
-		_, err := b.Send(chat, text)
+		_, err := retrySend(b, chat, text)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
@@ -248,7 +249,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		nd.TotalPages = len(chunks)
 		text := notify.BuildNotificationText(nd)
 		kb := buildPageKeyboard(1, len(chunks))
-		sent, err := b.Send(chat, text, kb)
+		sent, err := retrySend(b, chat, text, kb)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
@@ -263,6 +264,62 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
+	}
+}
+
+// retrySend sends a Telegram message with unlimited retries.
+// On FloodError it waits the RetryAfter duration; on other errors it backs off up to 10s.
+func retrySend(b *tele.Bot, to tele.Recipient, what interface{}, opts ...interface{}) (*tele.Message, error) {
+	var msg *tele.Message
+	var err error
+	attempt := 0
+	for {
+		msg, err = b.Send(to, what, opts...)
+		if err == nil {
+			return msg, nil
+		}
+		attempt++
+		var floodErr tele.FloodError
+		if errors.As(err, &floodErr) {
+			wait := time.Duration(floodErr.RetryAfter) * time.Second
+			logger.Info(fmt.Sprintf("FloodError, waiting %v (attempt %d)", wait, attempt))
+			time.Sleep(wait)
+			continue
+		}
+		wait := time.Duration(attempt) * time.Second
+		if wait > 10*time.Second {
+			wait = 10 * time.Second
+		}
+		logger.Error(fmt.Sprintf("Send failed (attempt %d): %v, retrying in %v", attempt, err, wait))
+		time.Sleep(wait)
+	}
+}
+
+// retryEdit edits a Telegram message with unlimited retries.
+// On FloodError it waits the RetryAfter duration; on other errors it backs off up to 10s.
+func retryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interface{}) (*tele.Message, error) {
+	var result *tele.Message
+	var err error
+	attempt := 0
+	for {
+		result, err = b.Edit(msg, what, opts...)
+		if err == nil {
+			return result, nil
+		}
+		attempt++
+		var floodErr tele.FloodError
+		if errors.As(err, &floodErr) {
+			wait := time.Duration(floodErr.RetryAfter) * time.Second
+			logger.Info(fmt.Sprintf("FloodError on edit, waiting %v (attempt %d)", wait, attempt))
+			time.Sleep(wait)
+			continue
+		}
+		wait := time.Duration(attempt) * time.Second
+		if wait > 10*time.Second {
+			wait = 10 * time.Second
+		}
+		logger.Error(fmt.Sprintf("Edit failed (attempt %d): %v, retrying in %v", attempt, err, wait))
+		time.Sleep(wait)
 	}
 }
 
@@ -719,12 +776,24 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	}
 	content = shortenSeparators(content)
 	const maxRunes = 4000
-	r := []rune(content)
-	if len(r) > maxRunes {
-		content = "...(truncated)\n\n" + string(r[len(r)-maxRunes:])
+	chunks := splitBody(content, maxRunes)
+	logger.Debug(fmt.Sprintf("handleCaptureCommand: sending reply (%d chunks)", len(chunks)))
+	if len(chunks) == 1 {
+		_, err := retrySend(c.Bot(), c.Chat(), chunks[0])
+		return err
 	}
-	logger.Debug("handleCaptureCommand: sending reply")
-	return c.Reply(content)
+	lastPage := len(chunks)
+	kb := buildPageKeyboard(lastPage, len(chunks))
+	text := chunks[lastPage-1] + fmt.Sprintf("\n\n📄 %d/%d", lastPage, len(chunks))
+	sent, err := retrySend(c.Bot(), c.Chat(), text, kb)
+	if err != nil {
+		return err
+	}
+	pages.store(sent.ID, "", &pageEntry{
+		chunks:   chunks,
+		permRows: []tele.Row{},
+	})
+	return nil
 }
 
 // handleEscapeCommand handles /bot_escape — sends Escape key to interrupt Claude Code.
@@ -838,7 +907,7 @@ func cleanDeadSession(tmuxTarget string, bot *tele.Bot) {
 	if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
 		delete(creds.RouteMap, tmuxTarget)
 		config.SaveCredentials(creds)
-		bot.Send(&tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
+		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
 		logger.Info(fmt.Sprintf("Auto-unbound dead session: tmux=%s chat=%d", tmuxTarget, chatID))
 	}
 }
@@ -940,7 +1009,7 @@ func cleanupPendingState(msgID int, uuid string, bot *tele.Bot, reason string) {
 	if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
 		toolNotifs.markResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
 	}
 	if _, ok := pendingPerms.getTarget(msgID); ok {
 		pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
@@ -1505,7 +1574,7 @@ func cleanStaleRoutes(bot *tele.Bot) {
 		}
 		chatID := creds.RouteMap[tmuxTarget]
 		delete(creds.RouteMap, tmuxTarget)
-		bot.Send(&tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
+		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
 		logger.Info(fmt.Sprintf("Startup cleanup: removed stale route tmux=%s chat=%d", tmuxTarget, chatID))
 	}
 	config.SaveCredentials(creds)

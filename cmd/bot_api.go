@@ -58,7 +58,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
 		editMsg := &tele.Message{ID: msgID, Chat: chat}
-		_, err = bot.Edit(editMsg, text, kb)
+		_, err = retryEdit(bot, editMsg, text, kb)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Callback edit failed: %v", err))
 			http.Error(w, "edit failed: "+err.Error(), 500)
@@ -105,7 +105,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 		if permChatID != 0 && msgText != "" {
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			bot.Edit(editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
+			retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
 		}
 		respJSON, _ := json.Marshal(d)
 		w.Header().Set("Content-Type", "application/json")
@@ -164,7 +164,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(value, 200)))
 				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
 			} else if action == "submit" {
 				entry, ok := toolNotifs.get(msgID)
 				if !ok {
@@ -197,7 +197,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
 				editChat := &tele.Chat{ID: entry.chatID}
 				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
+				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 			} else {
 				qIdx, _ := strconv.Atoi(r.URL.Query().Get("question"))
 				optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
@@ -221,7 +221,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					newMarkup := rebuildAskMarkup(entry)
 					editChat := &tele.Chat{ID: entry.chatID}
 					editMsg := &tele.Message{ID: msgID, Chat: editChat}
-					bot.Edit(editMsg, entry.msgText, newMarkup)
+					retryEdit(bot, editMsg, entry.msgText, newMarkup)
 				} else {
 					qm.selectedOption = optIdx
 					hasSubmit := len(entry.questions) > 1
@@ -253,13 +253,13 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d uuid=%s q=%d opt=%d label=%s answers=%v", msgID, uuid, qIdx, optIdx, qm.optionLabels[optIdx], answers))
 						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
+						retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
 						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						bot.Edit(editMsg, entry.msgText, newMarkup)
+						retryEdit(bot, editMsg, entry.msgText, newMarkup)
 					}
 				}
 			}
@@ -490,7 +490,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		toolNotifs.markResolved(msgID)
 		logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
 		fmt.Fprintf(w, "resolved")
 	})
 	mux.HandleFunc("/perm/switch", func(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +581,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
 			toolNotifs.markResolved(msgID)
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-			bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
 			logger.Info(fmt.Sprintf("Pending cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
 		}
 		// Clean up PermissionRequest state — read data BEFORE resolve
@@ -591,7 +591,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
 			pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+			retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
 			logger.Info(fmt.Sprintf("Permission cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
 		}
 		pendingFiles.remove(msgID)
@@ -630,7 +630,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			FileName: filepath.Base(req.FilePath),
 			Caption:  req.Caption,
 		}
-		msg, err := bot.Send(chat, doc)
+		msg, err := retrySend(bot, chat, doc)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})
@@ -725,7 +725,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		switch {
 		case data == "session_default":
 			state.SessionName = cfg.DefaultSessionName
-			bot.Edit(msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
 			launchPending.Delete(msgID)
 			if state.WorkDir == "" {
 				askWorkDir(bot, chatID, state)
@@ -734,7 +734,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			}
 		case data == "dir_select":
 			state.WorkDir = state.BrowsePath
-			bot.Edit(msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
 			launchPending.Delete(msgID)
 			go executeLaunch(bot, chatID, state)
 		case data == "cd_up":
@@ -767,7 +767,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			state.DirPage++
 			refreshDirBrowser(bot, msg, state)
 		case data == "cancel":
-			bot.Edit(msg, "❌ Launch cancelled.")
+			retryEdit(bot, msg, "❌ Launch cancelled.")
 			launchPending.Delete(msgID)
 			deleteLaunchState(state.UUID)
 			logger.Info(fmt.Sprintf("bot_new API: cancel pressed msg_id=%d uuid=%s", msgID, state.UUID))
@@ -803,7 +803,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		switch state.Step {
 		case "session":
 			state.SessionName = strings.TrimSpace(text)
-			bot.Edit(msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
 			if state.WorkDir == "" {
 				askWorkDir(bot, chatID, state)
 			} else {
@@ -816,7 +816,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 				customValue = home + customValue[1:]
 			}
 			state.WorkDir = customValue
-			bot.Edit(msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
 			go executeLaunch(bot, chatID, state)
 		}
 		w.Header().Set("Content-Type", "application/json")

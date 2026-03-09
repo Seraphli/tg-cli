@@ -31,7 +31,7 @@ if [ $ELAPSED -ge 30 ]; then
   fail "Shell readiness after CC exit"
   exit 1
 fi
-tmux send-keys -t "$CLAUDE_SESSION" "BROWSER=false CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
+tmux send-keys -t "$CLAUDE_SESSION" "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
 
 # Wait for CC to show banner or trust dialog
 ELAPSED_CC=0

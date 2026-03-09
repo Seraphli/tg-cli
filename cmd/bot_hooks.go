@@ -52,7 +52,7 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				if notifEntry, ok := toolNotifs.get(pf.TgMsgID); ok && !notifEntry.resolved {
 					toolNotifs.markResolved(pf.TgMsgID)
 					editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: pf.TgChatID}}
-					bot.Edit(editMsg, notifEntry.msgText, buildFrozenMarkup(notifEntry, "⌨️ Answered on desktop"))
+					retryEdit(bot, editMsg, notifEntry.msgText, buildFrozenMarkup(notifEntry, "⌨️ Answered on desktop"))
 				}
 				pendingFiles.remove(pf.TgMsgID)
 			}
@@ -62,7 +62,7 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(pf.TgMsgID))
 				pendingPerms.resolve(pf.TgMsgID, permDecision{Behavior: "deny", Message: "Cancelled by session event"})
 				editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: permChatID}}
-				bot.Edit(editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+				retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
 			}
 			logger.Info(fmt.Sprintf("Cancelled pending file: %s (session=%s)", entry.Name(), sessionID))
 		}
@@ -110,7 +110,12 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	pf.SessionID = p.SessionID
 	pf.TmuxTarget = p.TmuxTarget
 	pf.ToolName = p.ToolName
-	chat, chatID := resolveChat(p.TmuxTarget, p.CWD)
+	// Use stored session CWD for routing to avoid drift from cd commands in CC
+	cwdForRoute := p.CWD
+	if info := sessionState.findInfoByTarget(p.TmuxTarget); info != nil && info.cwd != "" {
+		cwdForRoute = info.cwd
+	}
+	chat, chatID := resolveChat(p.TmuxTarget, cwdForRoute)
 	if chat == nil {
 		logger.Info(fmt.Sprintf("No chat for pending request %s, skipping", uuid))
 		return
@@ -207,7 +212,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 			rows = append(rows, markup.Row(markup.Data("💬 Chat about this", "tool", "AskUserQuestion|chat")))
 		}
 		markup.Inline(rows...)
-		sent, err := bot.Send(chat, text, markup)
+		sent, err := retrySend(bot, chat, text, markup)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send AskUserQuestion: %v", err))
 			return
@@ -269,7 +274,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		kb := buildPageKeyboardWithExtra(1, len(permChunks), permBtnRows)
 		markup = kb
 	}
-	sent, err := bot.Send(chat, text, markup)
+	sent, err := retrySend(bot, chat, text, markup)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to send permission message: %v", err))
 		return
@@ -336,7 +341,12 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			mu.Lock()
 			defer mu.Unlock()
 		}
-		chat, chatID := resolveChat(p.TmuxTarget, p.CWD)
+		// Use stored session CWD for routing to avoid drift from cd commands in CC
+		cwdForRoute := p.CWD
+		if info := sessionState.findInfoByTarget(p.TmuxTarget); info != nil && info.cwd != "" {
+			cwdForRoute = info.cwd
+		}
+		chat, chatID := resolveChat(p.TmuxTarget, cwdForRoute)
 		switch event {
 		case "SessionStart":
 			if chat == nil || p.TmuxTarget == "" {
@@ -350,7 +360,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			text := notify.BuildNotificationText(notify.NotificationData{
 				Event: "SessionStart", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget, Body: body,
 			})
-			bot.Send(chat, text)
+			retrySend(bot, chat, text)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			if p.SessionID != "" && p.TmuxTarget != "" {
 				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
@@ -361,7 +371,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				text := notify.BuildNotificationText(notify.NotificationData{
 					Event: "SessionEnd", Project: p.Project, CWD: p.CWD, TmuxTarget: p.TmuxTarget,
 				})
-				bot.Send(chat, text)
+				retrySend(bot, chat, text)
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			}
 			if p.SessionID != "" {

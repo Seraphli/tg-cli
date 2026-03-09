@@ -141,7 +141,7 @@ start_claude() {
   CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
   export CLAUDE_PANE
   tmux send-keys -t "$CLAUDE_SESSION" \
-    "BROWSER=false CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
+    "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
   echo "Waiting for Claude to start..."
   # Check if trust dialog is present before sending Enter
   sleep 5
@@ -182,7 +182,7 @@ MINEOF
   CLAUDE_CONFIG_DIR="$TEST_CLAUDE_CONFIG_DIR" claude mcp add --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT" 2>/dev/null || true
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
-  local cc_cmd="BROWSER=false CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions"
+  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions"
   echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\"}" > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }

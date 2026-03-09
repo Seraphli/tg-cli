@@ -338,19 +338,31 @@ type sessionStateStore struct {
 var sessionState = &sessionStateStore{sessions: make(map[string]sessionInfo)}
 
 func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath string) {
-	// Prefer tmux pane cwd (stable during CC session)
+	s.mu.Lock()
+	// Remove stale sessions using the same pane but different session IDs
+	for id, info := range s.sessions {
+		if info.tmuxTarget == tmuxTarget && id != sessionID {
+			delete(s.sessions, id)
+		}
+	}
+	// If session already exists with a CWD, preserve it to avoid drift from cd commands
+	if existing, ok := s.sessions[sessionID]; ok && existing.cwd != "" {
+		existing.tmuxTarget = tmuxTarget
+		if existing.projectDir == "" && transcriptPath != "" {
+			existing.projectDir = filepath.Dir(transcriptPath)
+		}
+		s.sessions[sessionID] = existing
+		s.mu.Unlock()
+		s.save()
+		return
+	}
+	// First registration: prefer tmux pane CWD as it reflects the launch directory
 	if tmuxCWD := getPaneCWD(tmuxTarget); tmuxCWD != "" {
 		cwd = tmuxCWD
 	}
 	projectDir := ""
 	if transcriptPath != "" {
 		projectDir = filepath.Dir(transcriptPath)
-	}
-	s.mu.Lock()
-	for id, info := range s.sessions {
-		if info.tmuxTarget == tmuxTarget && id != sessionID {
-			delete(s.sessions, id)
-		}
 	}
 	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir}
 	s.mu.Unlock()

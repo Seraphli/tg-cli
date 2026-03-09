@@ -212,7 +212,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 				toolNotifs.markResolved(msgID)
 				logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 				editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
 			}
 			sendFeedback(tmuxStr)
 			return nil
@@ -279,7 +279,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 		}
 		editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-		bot.Edit(editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabel))
+		retryEdit(bot, editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabel))
 		targetPtr, err := extractTmuxTarget(replyTo.Text)
 		if err == nil && targetPtr != nil {
 			target := *targetPtr
@@ -337,7 +337,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 				toolNotifs.markResolved(replyTo.ID)
 				logger.Info(fmt.Sprintf("AskUserQuestion custom reply: msg_id=%d uuid=%s voice=%v text=%s", replyTo.ID, uuid, isVoice, truncateStr(text, 200)))
 				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
-				bot.Edit(editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
 				sendFeedback(entry.tmuxTarget)
 				return nil
 			}
