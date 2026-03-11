@@ -117,7 +117,7 @@ func askSessionName(bot *tele.Bot, chatID int64, state *LaunchState) {
 	sel := &tele.ReplyMarkup{}
 	btnDefault := sel.Data(fmt.Sprintf("Use default: %s", cfg.DefaultSessionName), "bot_new", "session_default")
 	btnCancel := sel.Data("❌ Cancel", "bot_new", "cancel")
-	sel.Inline(sel.Row(btnDefault), sel.Row(btnCancel))
+	sel.Inline(sel.Row(btnDefault, btnCancel))
 	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("📦 Session name\nDefault: %s\n\n💡 Click the button to use default, or reply to this message with a custom name.", cfg.DefaultSessionName), sel)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askSessionName: failed to send: %v", err))
@@ -372,7 +372,7 @@ func buildDirKeyboard(dirs []string, page int, showHidden bool) *tele.ReplyMarku
 	rows = append(rows, sel.Row(btnUp, btnHidden))
 	btnSelect := sel.Data("✅ Select this directory", "bot_new", "dir_select")
 	btnCancel := sel.Data("❌ Cancel", "bot_new", "cancel")
-	rows = append(rows, sel.Row(btnSelect), sel.Row(btnCancel))
+	rows = append(rows, sel.Row(btnSelect, btnCancel))
 	sel.Inline(rows...)
 	return sel
 }

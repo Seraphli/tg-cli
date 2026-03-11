@@ -71,41 +71,14 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		decision := r.URL.Query().Get("decision")
-		// Pre-check session liveness before processing the decision
-		if tmuxTarget, ok := pendingPerms.getTarget(msgID); ok && tmuxTarget != "" {
-			if !checkSessionAlive(tmuxTarget, bot) {
+		d, err := doDecidePerm(bot, msgID, decision)
+		if err != nil {
+			if err.Error() == "session disconnected" {
 				http.Error(w, "session disconnected", 410)
 				return
 			}
-		}
-		uuid, uuidOk := pendingPerms.getUUID(msgID)
-		if !uuidOk {
-			uuid, uuidOk = pendingFiles.get(msgID)
-		}
-		msgText := pendingPerms.getMsgText(msgID)
-		permChatID := pendingPerms.getChatID(msgID)
-		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
-		d, err := resolvePermission(msgID, decision, nil)
-		if err != nil {
 			http.Error(w, err.Error(), 404)
 			return
-		}
-		if uuidOk {
-			var updatedPerms []interface{}
-			if d.UpdatedPermissions != nil {
-				var perms []interface{}
-				json.Unmarshal(d.UpdatedPermissions, &perms)
-				updatedPerms = perms
-			}
-			ccOutput := buildPermCCOutput(d.Behavior, d.Message, updatedPerms)
-			if err := writePendingAnswer(uuid, ccOutput); err != nil {
-				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-			}
-		}
-		logger.Info(fmt.Sprintf("Permission resolved via API: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
-		if permChatID != 0 && msgText != "" {
-			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
 		}
 		respJSON, _ := json.Marshal(d)
 		w.Header().Set("Content-Type", "application/json")
@@ -135,36 +108,14 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					http.Error(w, "already answered", 400)
 					return
 				}
-				uuid, ok := pendingFiles.get(msgID)
-				if !ok {
-					http.Error(w, "pending file not found", 404)
-					return
-				}
-				if handleStalePending(msgID, uuid, bot) {
-					http.Error(w, "hook dead (stale pending)", 410)
-					return
-				}
-				path := filepath.Join(pendingDir(), uuid+".json")
-				pf, err := readPendingFile(path)
-				if err != nil {
-					http.Error(w, "failed to read pending file", 500)
-					return
-				}
 				answers := make(map[string]string)
 				if len(entry.questions) > 0 {
 					answers[entry.questions[0].questionText] = value
 				}
-				ccOutput := buildAskCCOutput(pf.Payload, answers)
-				if err := writePendingAnswer(uuid, ccOutput); err != nil {
-					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-					http.Error(w, "failed to save answer", 500)
+				if err := doRespondAsk(bot, msgID, answers, "✅ Text answer"); err != nil {
+					http.Error(w, err.Error(), 500)
 					return
 				}
-				toolNotifs.markResolved(msgID)
-				logger.Info(fmt.Sprintf("AskUserQuestion text via API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(value, 200)))
-				editChat := &tele.Chat{ID: entry.chatID}
-				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
 			} else if action == "submit" {
 				entry, ok := toolNotifs.get(msgID)
 				if !ok {
@@ -175,29 +126,15 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					http.Error(w, "already answered", 400)
 					return
 				}
-				uuid, ok := pendingFiles.get(msgID)
-				if !ok {
-					http.Error(w, "pending file not found", 404)
+				if err := doRespondAsk(bot, msgID, buildAnswers(entry), ""); err != nil {
+					http.Error(w, err.Error(), 500)
 					return
 				}
-				path := filepath.Join(pendingDir(), uuid+".json")
-				pf, err := readPendingFile(path)
-				if err != nil {
-					http.Error(w, "failed to read pending file", 500)
+			} else if action == "chat" {
+				if err := doChatAsk(bot, msgID); err != nil {
+					http.Error(w, err.Error(), 500)
 					return
 				}
-				answers := buildAnswers(entry)
-				ccOutput := buildAskCCOutput(pf.Payload, answers)
-				if err := writePendingAnswer(uuid, ccOutput); err != nil {
-					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-					http.Error(w, "failed to save answer", 500)
-					return
-				}
-				toolNotifs.markResolved(msgID)
-				logger.Info(fmt.Sprintf("AskUserQuestion submitted via API: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
-				editChat := &tele.Chat{ID: entry.chatID}
-				editMsg := &tele.Message{ID: msgID, Chat: editChat}
-				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 			} else {
 				qIdx, _ := strconv.Atoi(r.URL.Query().Get("question"))
 				optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
@@ -231,29 +168,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 						}
 					}
 					if !hasSubmit {
-						uuid, ok := pendingFiles.get(msgID)
-						if !ok {
-							http.Error(w, "pending file not found", 404)
+						if err := doRespondAsk(bot, msgID, buildAnswers(entry), ""); err != nil {
+							http.Error(w, err.Error(), 500)
 							return
 						}
-						path := filepath.Join(pendingDir(), uuid+".json")
-						pf, err := readPendingFile(path)
-						if err != nil {
-							http.Error(w, "failed to read pending file", 500)
-							return
-						}
-						answers := buildAnswers(entry)
-						ccOutput := buildAskCCOutput(pf.Payload, answers)
-						if err := writePendingAnswer(uuid, ccOutput); err != nil {
-							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-							http.Error(w, "failed to save answer", 500)
-							return
-						}
-						toolNotifs.markResolved(msgID)
-						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved via API: msg_id=%d uuid=%s q=%d opt=%d label=%s answers=%v", msgID, uuid, qIdx, optIdx, qm.optionLabels[optIdx], answers))
-						editChat := &tele.Chat{ID: entry.chatID}
-						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, ""))
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
@@ -436,12 +354,32 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		// Strip socket prefix so the target matches stored pane IDs
 		target = notify.FormatPaneID(target)
+		// Check pending PermissionRequest first
+		if permMsgID, ok := pendingPerms.findByTmuxTarget(target); ok {
+			doCancelPerm(bot, permMsgID)
+			t, err := injector.ParseTarget(target)
+			if err != nil {
+				http.Error(w, "invalid target", 400)
+				return
+			}
+			go func() {
+				time.Sleep(3 * time.Second)
+				injector.InjectText(t, text)
+			}()
+			logger.Info(fmt.Sprintf("Permission cancelled via group text API + delayed inject: target=%s text=%s", target, truncateStr(text, 200)))
+			fmt.Fprintf(w, "cancelled+injected")
+			return
+		}
 		msgID, entry, ok := toolNotifs.findByTmuxTarget(target)
 		if !ok {
 			// No pending AskUserQuestion — inject text
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
+				return
+			}
+			if !checkSessionAlive(target, bot) {
+				http.Error(w, "session disconnected", 410)
 				return
 			}
 			if err := injector.InjectText(t, text); err != nil {
@@ -577,22 +515,11 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			w.WriteHeader(200)
 			return
 		}
-		// Clean up AskUserQuestion state
-		if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
-			toolNotifs.markResolved(msgID)
-			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
-			logger.Info(fmt.Sprintf("Pending cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
-		}
-		// Clean up PermissionRequest state — read data BEFORE resolve
 		if _, ok := pendingPerms.getTarget(msgID); ok {
-			permChatID := pendingPerms.getChatID(msgID)
-			permMsgText := pendingPerms.getMsgText(msgID)
-			sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
-			pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
-			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: permChatID}}
-			retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
-			logger.Info(fmt.Sprintf("Permission cancelled via hook signal: uuid=%s msg_id=%d", uuid, msgID))
+			doCancelPerm(bot, msgID)
+		}
+		if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
+			doCancelAsk(bot, msgID)
 		}
 		pendingFiles.remove(msgID)
 		w.WriteHeader(200)

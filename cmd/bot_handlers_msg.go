@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -94,27 +96,50 @@ func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
 func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
 	file, err := bot.FileByID(fileID)
 	if err != nil {
+		logger.Error(fmt.Sprintf("Voice file lookup failed: %v", err))
 		return "", fmt.Errorf("failed to get voice file: %w", err)
 	}
 	tmpFile := filepath.Join(os.TempDir(), "tg-cli-voice-"+fileID+".ogg")
 	defer os.Remove(tmpFile)
 	if err := bot.Download(&file, tmpFile); err != nil {
+		logger.Error(fmt.Sprintf("Voice download failed: %v", err))
 		return "", fmt.Errorf("failed to download voice: %w", err)
 	}
-	text, err := voice.Transcribe(tmpFile)
+	text, engine, err := voice.Transcribe(tmpFile)
 	if err != nil {
+		logger.Error(fmt.Sprintf("Voice transcription failed: %v", err))
 		return "", fmt.Errorf("transcription failed: %w", err)
 	}
+	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, truncateStr(text, 200)))
 	return text, nil
 }
 
-// reactAndTrack adds a reaction emoji and records it in the tracker
-func reactAndTrack(bot *tele.Bot, chat *tele.Chat, msg *tele.Message, tmuxTarget string) {
-	if err := bot.React(chat, msg, tele.ReactionOptions{
-		Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-	}); err == nil {
-		reactionTracker.record(tmuxTarget, chat.ID, msg.ID)
+// restoreSpoilers wraps spoiler entities back into ||spoiler|| markdown syntax.
+func restoreSpoilers(text string, entities []tele.MessageEntity) string {
+	if len(entities) == 0 {
+		return text
 	}
+	type spoilerRange struct{ offset, length int }
+	var spoilers []spoilerRange
+	for _, e := range entities {
+		if e.Type == tele.EntitySpoiler {
+			spoilers = append(spoilers, spoilerRange{e.Offset, e.Length})
+		}
+	}
+	if len(spoilers) == 0 {
+		return text
+	}
+	sort.Slice(spoilers, func(i, j int) bool { return spoilers[i].offset > spoilers[j].offset })
+	runes := []rune(text)
+	for _, sp := range spoilers {
+		end := sp.offset + sp.length
+		if end > len(runes) {
+			end = len(runes)
+		}
+		runes = append(runes[:end], append([]rune("||"), runes[end:]...)...)
+		runes = append(runes[:sp.offset], append([]rune("||"), runes[sp.offset:]...)...)
+	}
+	return string(runes)
 }
 
 // resolveReplyTarget extracts and validates tmux target from reply message.
@@ -147,19 +172,17 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	if isVoice {
 		answerLabel = "✅ Voice answer"
 	}
+	text = restoreSpoilers(text, c.Message().Entities)
 	injectionText := text
 	if isVoice {
 		injectionText = voicePrefix + " " + text
 	}
+	reactSeen(bot, c.Message().Chat, c.Message())
 	// sendFeedback sends the appropriate feedback message for a group or reply context
 	sendFeedback := func(tmuxTarget string) {
+		recordPending(tmuxTarget, c.Message().Chat.ID, c.Message().ID)
 		if isVoice {
-			sentMsg, _ := bot.Reply(c.Message(), voicePrefix+" "+text)
-			if sentMsg != nil {
-				reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxTarget)
-			}
-		} else {
-			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxTarget)
+			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
 	}
 
@@ -217,14 +240,24 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			sendFeedback(tmuxStr)
 			return nil
 		}
+		if msgID, ok := pendingPerms.findByTmuxTarget(tmuxStr); ok {
+			doCancelPerm(bot, msgID)
+			go func() {
+				time.Sleep(3 * time.Second)
+				injector.InjectText(target, injectionText)
+			}()
+			logger.Info(fmt.Sprintf("Permission cancelled via group msg, ESC+delayed inject: perm_msg=%d target=%s voice=%v text=%s", msgID, tmuxStr, isVoice, truncateStr(text, 200)))
+			sendFeedback(tmuxStr)
+			return nil
+		}
 		if !checkSessionAlive(tmuxStr, bot) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
+		sendFeedback(tmuxStr)
 		if err := injector.InjectText(target, injectionText); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
 		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, truncateStr(text, 200)))
-		sendFeedback(tmuxStr)
 		return nil
 	}
 
@@ -258,36 +291,18 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	}
 
 	if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-		uuid, uuidOk := pendingPerms.getUUID(replyTo.ID)
-		if !uuidOk {
-			uuid, uuidOk = pendingFiles.get(replyTo.ID)
-		}
-		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(replyTo.ID))
-		denyMsg := "User provided custom input: " + text
-		if isVoice {
-			denyMsg = "User provided voice input: " + text
-		}
-		d := permDecision{
-			Behavior: "deny",
-			Message:  denyMsg,
-		}
-		pendingPerms.resolve(replyTo.ID, d)
-		if uuidOk {
-			ccOutput := buildPermCCOutput(d.Behavior, d.Message, nil)
-			if err := writePendingAnswer(uuid, ccOutput); err != nil {
-				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-			}
-		}
-		editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: c.Chat().ID}}
-		retryEdit(bot, editMsg, replyTo.Text, buildFrozenPermMarkup("deny", sugLabel))
+		doCancelPerm(bot, replyTo.ID)
 		targetPtr, err := extractTmuxTarget(replyTo.Text)
 		if err == nil && targetPtr != nil {
 			target := *targetPtr
 			if injector.SessionExists(target) {
-				injector.InjectText(target, injectionText)
+				go func() {
+					time.Sleep(3 * time.Second)
+					injector.InjectText(target, injectionText)
+				}()
+				logger.Info(fmt.Sprintf("Permission cancelled via reply, text will inject after ESC: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
+				sendFeedback(injector.FormatTarget(target))
 			}
-			logger.Info(fmt.Sprintf("Permission denied via reply, text injected: msg_id=%d target=%s uuid=%s voice=%v text=%s", replyTo.ID, injector.FormatTarget(target), uuid, isVoice, truncateStr(text, 200)))
-			sendFeedback(injector.FormatTarget(target))
 		}
 		return nil
 	}
@@ -304,8 +319,8 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 				injector.InjectText(target, injectionText)
 				return nil
 			}
-			uuid, ok := pendingFiles.get(replyTo.ID)
-			if !ok {
+			uuid, uuidOk := pendingFiles.get(replyTo.ID)
+			if !uuidOk {
 				// No pending file mapping, treat as stale
 				toolNotifs.markResolved(replyTo.ID)
 				injector.InjectText(target, injectionText)
@@ -316,34 +331,27 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 				injector.InjectText(target, injectionText)
 				return nil
 			}
+			// Cancel pending file and send ESC, then inject after delay
 			path := filepath.Join(pendingDir(), uuid+".json")
 			pf, err := readPendingFile(path)
-			if err != nil {
-				if !isVoice {
-					// For text: fall through to log+react below
-					break
-				}
-				// For voice: unexpected read error after stale check
-				return c.Reply("❌ Failed to read pending file.")
+			if err == nil {
+				pf.Status = "cancelled"
+				writePendingFile(path, pf)
 			}
-			answers := make(map[string]string)
-			if len(entry.questions) > 0 {
-				answers[entry.questions[0].questionText] = text
-			}
-			ccOutput := buildAskCCOutput(pf.Payload, answers)
-			if err := writePendingAnswer(uuid, ccOutput); err != nil {
-				logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-			} else {
-				toolNotifs.markResolved(replyTo.ID)
-				logger.Info(fmt.Sprintf("AskUserQuestion custom reply: msg_id=%d uuid=%s voice=%v text=%s", replyTo.ID, uuid, isVoice, truncateStr(text, 200)))
-				editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
-				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
-				sendFeedback(entry.tmuxTarget)
-				return nil
-			}
+			toolNotifs.markResolved(replyTo.ID)
+			editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
+			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+			injector.SendKeys(target, "Escape")
+			go func() {
+				time.Sleep(3 * time.Second)
+				injector.InjectText(target, injectionText)
+			}()
+			logger.Info(fmt.Sprintf("AskUserQuestion text reply: ESC+delayed inject: msg_id=%d uuid=%s voice=%v text=%s", replyTo.ID, uuid, isVoice, truncateStr(text, 200)))
+			sendFeedback(entry.tmuxTarget)
+			return nil
 		}
 		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
-		reactAndTrack(bot, c.Message().Chat, c.Message(), entry.tmuxTarget)
+		recordPending(entry.tmuxTarget, c.Message().Chat.ID, c.Message().ID)
 		return nil
 	}
 
@@ -360,22 +368,9 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
 	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
+	recordPending(injector.FormatTarget(target), c.Message().Chat.ID, c.Message().ID)
 	if isVoice {
-		tmuxStr := injector.FormatTarget(target)
-		sentMsg, _ := bot.Reply(c.Message(), voicePrefix+" "+text)
-		if sentMsg != nil {
-			reactAndTrack(bot, c.Message().Chat, sentMsg, tmuxStr)
-		}
-	} else {
-		if err := bot.React(c.Message().Chat, c.Message(), tele.ReactionOptions{
-			Reactions: []tele.Reaction{{Type: "emoji", Emoji: "✍"}},
-		}); err != nil {
-			logger.Debug(fmt.Sprintf("React failed: %v, falling back to reply", err))
-			return c.Reply("✅")
-		} else {
-			tmuxStr := injector.FormatTarget(target)
-			reactionTracker.record(tmuxStr, c.Chat().ID, c.Message().ID)
-		}
+		bot.Reply(c.Message(), voicePrefix+" "+text)
 	}
 	return nil
 }
@@ -450,8 +445,13 @@ func registerMessageHandlers(bot *tele.Bot) {
 				return nil
 			}
 			text, err := transcribeVoice(bot, c.Message().Voice.FileID)
-			if err != nil || text == "" {
-				return c.Reply("❌ Transcription failed or empty.")
+			if err != nil {
+				logger.Error(fmt.Sprintf("Group voice transcription failed: err=%v", err))
+				return c.Reply(fmt.Sprintf("❌ %v", err))
+			}
+			if text == "" {
+				logger.Error("Group voice transcription failed: empty text")
+				return c.Reply("❌ Transcription produced empty text.")
 			}
 			return processUserInput(c, bot, text, true, voicePrefix)
 		}

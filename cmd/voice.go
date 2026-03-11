@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/bzip2"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
@@ -67,7 +70,35 @@ func runVoice(cmd *cobra.Command, args []string) {
 	}
 	fmt.Printf("ffmpeg found: %s\n\n", ffmpegPath)
 
-	// Step 2: Detect or ask for whisper.cpp
+	// Step 2: Engine selection
+	appCfgForEngine, _ := config.LoadAppConfig()
+	currentEngine := appCfgForEngine.VoiceEngine
+	if currentEngine == "" {
+		currentEngine = "whisper"
+	}
+	fmt.Println("Select voice engine:")
+	if currentEngine == "whisper" {
+		fmt.Println("  1. whisper (whisper.cpp, local inference) [current]")
+	} else {
+		fmt.Println("  1. whisper (whisper.cpp, local inference)")
+	}
+	if currentEngine == "sensevoice" {
+		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual) [current]")
+	} else {
+		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual)")
+	}
+	fmt.Print("Engine choice (1-2, default 1): ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	engineChoice := strings.TrimSpace(scanner.Text())
+	if engineChoice == "2" {
+		runVoiceSherpa(scanner, ffmpegPath)
+		return
+	}
+
+	// Step 3: Detect or ask for whisper.cpp
 	var whisperPath string
 	for _, name := range []string{"whisper-cli", "whisper-cpp", "whisper"} {
 		if p, err := exec.LookPath(name); err == nil {
@@ -78,7 +109,16 @@ func runVoice(cmd *cobra.Command, args []string) {
 	if whisperPath != "" {
 		fmt.Printf("whisper.cpp found: %s\n\n", whisperPath)
 	} else {
-		fmt.Print("whisper.cpp not found in PATH. Enter path to whisper.cpp binary: ")
+		fmt.Println("whisper.cpp not found in PATH.")
+		fmt.Println()
+		if _, err := os.Stat("/etc/arch-release"); err == nil {
+			fmt.Println("Install via AUR (GPU support):")
+			fmt.Println("  yay -S whisper.cpp-cuda")
+		} else {
+			fmt.Println("Install from source: https://github.com/ggml-org/whisper.cpp")
+		}
+		fmt.Println()
+		fmt.Print("Or enter path to whisper.cpp binary: ")
 		if !scanner.Scan() {
 			fmt.Fprintln(os.Stderr, "Failed to read input")
 			os.Exit(1)
@@ -95,7 +135,7 @@ func runVoice(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Step 3: Model selection
+	// Step 4: Model selection
 	appCfg, _ := config.LoadAppConfig()
 	currentModelName := ""
 	if appCfg.ModelPath != "" {
@@ -192,7 +232,7 @@ func runVoice(cmd *cobra.Command, args []string) {
 		fmt.Printf("Model downloaded to %s\n", modelPath)
 	}
 
-	// Step 4: Language selection
+	// Step 5: Language selection
 	fmt.Print("\nEnter language code (e.g., en, zh, ja) or press Enter for auto-detect: ")
 	if !scanner.Scan() {
 		fmt.Fprintln(os.Stderr, "Failed to read input")
@@ -203,13 +243,39 @@ func runVoice(cmd *cobra.Command, args []string) {
 		language = ""
 	}
 
-	// Step 5: Save config
-	cfg := config.AppConfig{
-		WhisperPath: whisperPath,
-		ModelPath:   modelPath,
-		Language:    language,
-		FFmpegPath:  ffmpegPath,
+	// Test engine before saving
+	fmt.Println("\nTesting whisper engine...")
+	testWav := filepath.Join(os.TempDir(), "tg-cli-voice-test.wav")
+	testCmd := exec.Command(ffmpegPath, "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "1", testWav)
+	if out, err := testCmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to generate test audio: %v\n%s\n", err, out)
+		fmt.Fprintln(os.Stderr, "Config not saved.")
+		os.Exit(1)
 	}
+	defer os.Remove(testWav)
+	testOutBase := filepath.Join(os.TempDir(), fmt.Sprintf("tg-cli-whisper-test-%d", time.Now().UnixNano()))
+	testArgs := []string{"-m", modelPath, "-f", testWav, "-otxt", "-of", testOutBase, "-nt"}
+	testLang := language
+	if testLang == "" {
+		testLang = "auto"
+	}
+	testArgs = append(testArgs, "-l", testLang)
+	wTest := exec.Command(whisperPath, testArgs...)
+	if out, err := wTest.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nEngine test FAILED: %v\n%s\n", err, out)
+		fmt.Fprintln(os.Stderr, "Config not saved. Please check your whisper.cpp installation.")
+		os.Exit(1)
+	}
+	os.Remove(testOutBase + ".txt")
+	fmt.Println("Engine test passed!")
+
+	// Step 6: Save config (preserve existing config fields)
+	cfg, _ := config.LoadAppConfig()
+	cfg.WhisperPath = whisperPath
+	cfg.ModelPath = modelPath
+	cfg.Language = language
+	cfg.FFmpegPath = ffmpegPath
+	cfg.VoiceEngine = "whisper"
 	if err := config.SaveAppConfig(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to save config: %v\n", err)
 		os.Exit(1)
@@ -217,6 +283,213 @@ func runVoice(cmd *cobra.Command, args []string) {
 
 	fmt.Println("\nVoice transcription setup complete!")
 	fmt.Printf("  Whisper: %s\n", whisperPath)
+	fmt.Printf("  Model: %s\n", modelPath)
+	fmt.Printf("  FFmpeg: %s\n", ffmpegPath)
+	if language != "" {
+		fmt.Printf("  Language: %s\n", language)
+	} else {
+		fmt.Println("  Language: auto-detect")
+	}
+}
+
+// detectSherpaOnnxBinary searches for sherpa-onnx-offline binary in PATH and known locations.
+func detectSherpaOnnxBinary() string {
+	for _, name := range []string{"sherpa-onnx-offline", "sherpa-onnx"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	configDir := config.GetConfigDir()
+	homeDir, _ := os.UserHomeDir()
+	patterns := []string{
+		filepath.Join(configDir, "sherpa-onnx", "*", "bin", "sherpa-onnx-offline"),
+		filepath.Join(homeDir, "sherpa-onnx*", "bin", "sherpa-onnx-offline"),
+		filepath.Join(homeDir, "Workspace", "Github", "*", "*", "sherpa-onnx*", "bin", "sherpa-onnx-offline"),
+	}
+	for _, pat := range patterns {
+		matches, _ := filepath.Glob(pat)
+		if len(matches) > 0 {
+			return matches[0]
+		}
+	}
+	return ""
+}
+
+// detectSenseVoiceModel searches for SenseVoice model in config and known locations.
+func detectSenseVoiceModel() string {
+	cfg, err := config.LoadAppConfig()
+	if err == nil && cfg.SenseVoiceModelPath != "" {
+		if _, err := os.Stat(cfg.SenseVoiceModelPath); err == nil {
+			return cfg.SenseVoiceModelPath
+		}
+	}
+	configDir := config.GetConfigDir()
+	matches, _ := filepath.Glob(filepath.Join(configDir, "models", "sensevoice", "*", "model.int8.onnx"))
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return ""
+}
+
+func ensureSherpaOnnx() (string, error) {
+	sherpaPath := detectSherpaOnnxBinary()
+	if sherpaPath != "" {
+		return sherpaPath, nil
+	}
+	configDir := config.GetConfigDir()
+	sherpaOnnxVersion := "1.12.28"
+	sherpaURL := fmt.Sprintf("https://github.com/k2-fsa/sherpa-onnx/releases/download/v%s/sherpa-onnx-v%s-linux-x64-gpu.tar.bz2", sherpaOnnxVersion, sherpaOnnxVersion)
+	destDir := filepath.Join(configDir, "sherpa-onnx")
+	topDir, err := downloadAndExtractTarBz2(sherpaURL, destDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to download sherpa-onnx: %w", err)
+	}
+	sherpaPath = filepath.Join(topDir, "bin", "sherpa-onnx-offline")
+	if _, err := os.Stat(sherpaPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("sherpa-onnx-offline binary not found in extracted archive at %s", sherpaPath)
+	}
+	return sherpaPath, nil
+}
+
+func ensureSenseVoiceModel() (string, error) {
+	modelPath := detectSenseVoiceModel()
+	if modelPath != "" {
+		return modelPath, nil
+	}
+	configDir := config.GetConfigDir()
+	modelsDir := filepath.Join(configDir, "models", "sensevoice")
+	modelURL := "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
+	topDir, err := downloadAndExtractTarBz2(modelURL, modelsDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to download SenseVoice model: %w", err)
+	}
+	modelPath = filepath.Join(topDir, "model.int8.onnx")
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("model file not found in extracted archive at %s", modelPath)
+	}
+	return modelPath, nil
+}
+
+func ensureWhisperModel() (string, error) {
+	cfg, _ := config.LoadAppConfig()
+	if cfg.ModelPath != "" {
+		if _, err := os.Stat(cfg.ModelPath); err == nil {
+			return cfg.ModelPath, nil
+		}
+	}
+	modelsDir := filepath.Join(config.GetConfigDir(), "models")
+	home, _ := os.UserHomeDir()
+	systemModelsDir := filepath.Join(home, ".local", "share", "whisper.cpp", "models")
+	for _, m := range whisperModels {
+		if p := filepath.Join(modelsDir, m.filename); fileExists(p) {
+			return p, nil
+		}
+		if p := filepath.Join(systemModelsDir, m.filename); fileExists(p) {
+			return p, nil
+		}
+	}
+	// Download default model (base)
+	selected := whisperModels[1]
+	modelPath := filepath.Join(systemModelsDir, selected.filename)
+	modelURL := fmt.Sprintf("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/%s", selected.filename)
+	if err := os.MkdirAll(systemModelsDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create models directory: %w", err)
+	}
+	if err := downloadFile(modelPath, modelURL); err != nil {
+		return "", fmt.Errorf("failed to download whisper model: %w", err)
+	}
+	return modelPath, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// currentWhisperModelName returns the name of the currently configured whisper model.
+func currentWhisperModelName() string {
+	cfg, _ := config.LoadAppConfig()
+	if cfg.ModelPath == "" {
+		return ""
+	}
+	base := filepath.Base(cfg.ModelPath)
+	for _, m := range whisperModels {
+		if m.filename == base {
+			return m.name
+		}
+	}
+	return ""
+}
+
+// runVoiceSherpa handles setup for the sherpa-onnx SenseVoice engine.
+func runVoiceSherpa(scanner *bufio.Scanner, ffmpegPath string) {
+	// Step 1: Ensure sherpa-onnx-offline binary
+	sherpaPath, err := ensureSherpaOnnx()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("sherpa-onnx: %s\n\n", sherpaPath)
+
+	// Step 2: Ensure SenseVoice model
+	modelPath, err := ensureSenseVoiceModel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("SenseVoice model: %s\n\n", modelPath)
+
+	appCfg, _ := config.LoadAppConfig()
+
+	// Step 3: Language selection
+	fmt.Print("Enter language code (e.g., en, zh, ja) or press Enter for auto-detect: ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	language := strings.TrimSpace(scanner.Text())
+	if language == "auto" || language == "" {
+		language = ""
+	}
+
+	// Test engine before saving
+	fmt.Println("\nTesting SenseVoice engine...")
+	testWav := filepath.Join(os.TempDir(), "tg-cli-voice-test.wav")
+	testCmd := exec.Command(ffmpegPath, "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "1", testWav)
+	if tOut, tErr := testCmd.CombinedOutput(); tErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to generate test audio: %v\n%s\n", tErr, tOut)
+		fmt.Fprintln(os.Stderr, "Config not saved.")
+		os.Exit(1)
+	}
+	defer os.Remove(testWav)
+	tokensPath := filepath.Join(filepath.Dir(modelPath), "tokens.txt")
+	testArgs := []string{"--sense-voice-model=" + modelPath, "--tokens=" + tokensPath}
+	if language != "" {
+		testArgs = append(testArgs, "--sense-voice-language="+language)
+	}
+	testArgs = append(testArgs, testWav)
+	sTest := exec.Command(sherpaPath, testArgs...)
+	if tOut, tErr := sTest.CombinedOutput(); tErr != nil {
+		fmt.Fprintf(os.Stderr, "\nEngine test FAILED: %v\n%s\n", tErr, tOut)
+		fmt.Fprintln(os.Stderr, "Config not saved. Please check your sherpa-onnx installation.")
+		os.Exit(1)
+	}
+	fmt.Println("Engine test passed!")
+
+	// Step 4: Save config (preserve existing whisper config fields)
+	cfg := appCfg
+	cfg.FFmpegPath = ffmpegPath
+	cfg.VoiceEngine = "sensevoice"
+	cfg.SherpaOnnxPath = sherpaPath
+	cfg.SenseVoiceModelPath = modelPath
+	cfg.Language = language
+	if err := config.SaveAppConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("\nSenseVoice setup complete!")
+	fmt.Printf("  sherpa-onnx: %s\n", sherpaPath)
 	fmt.Printf("  Model: %s\n", modelPath)
 	fmt.Printf("  FFmpeg: %s\n", ffmpegPath)
 	if language != "" {
@@ -270,4 +543,62 @@ func downloadFile(filepath string, url string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// downloadAndExtractTarBz2 downloads a tar.bz2 file and extracts it to destDir.
+// Returns the path of the top-level directory inside the archive.
+func downloadAndExtractTarBz2(url, destDir string) (string, error) {
+	tmpFile := filepath.Join(destDir, "download.tar.bz2")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return "", err
+	}
+	fmt.Printf("Downloading from %s...\n", url)
+	if err := downloadFile(tmpFile, url); err != nil {
+		return "", fmt.Errorf("download failed: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	f, err := os.Open(tmpFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	bzReader := bzip2.NewReader(f)
+	tarReader := tar.NewReader(bzReader)
+
+	var topDir string
+	fmt.Println("Extracting...")
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("tar read error: %w", err)
+		}
+
+		target := filepath.Join(destDir, header.Name)
+		if topDir == "" {
+			parts := strings.SplitN(header.Name, "/", 2)
+			if len(parts) > 0 && parts[0] != "" {
+				topDir = filepath.Join(destDir, parts[0])
+			}
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			os.MkdirAll(target, os.FileMode(header.Mode))
+		case tar.TypeReg:
+			os.MkdirAll(filepath.Dir(target), 0755)
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
+			if err != nil {
+				return "", err
+			}
+			io.Copy(outFile, tarReader)
+			outFile.Close()
+		}
+	}
+	fmt.Println("Extraction complete.")
+	return topDir, nil
 }

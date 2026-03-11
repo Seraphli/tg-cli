@@ -178,6 +178,18 @@ func (ps *pendingPermStore) getChatID(msgID int) int64 {
 	return ps.chatIDs[msgID]
 }
 
+func (ps *pendingPermStore) findByTmuxTarget(tmuxTarget string) (int, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	normalized := notify.FormatPaneID(tmuxTarget)
+	for msgID, t := range ps.targets {
+		if notify.FormatPaneID(t) == normalized {
+			return msgID, true
+		}
+	}
+	return 0, false
+}
+
 func (ps *pendingPermStore) cleanup(msgID int) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -496,33 +508,41 @@ type reactionEntry struct {
 
 type reactionTrackerStore struct {
 	mu      sync.Mutex
-	entries map[string][]reactionEntry
+	pending map[string][]reactionEntry // Injected, waiting for UserPromptSubmit
+	active  map[string][]reactionEntry // Confirmed by UserPromptSubmit, showing ✍
 }
 
 var reactionTracker = &reactionTrackerStore{
-	entries: make(map[string][]reactionEntry),
+	pending: make(map[string][]reactionEntry),
+	active:  make(map[string][]reactionEntry),
 }
 
-func (rt *reactionTrackerStore) record(tmuxTarget string, chatID int64, msgID int) {
+func (rt *reactionTrackerStore) recordPending(tmuxTarget string, chatID int64, msgID int) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	rt.entries[tmuxTarget] = append(rt.entries[tmuxTarget], reactionEntry{chatID: chatID, msgID: msgID})
-	logger.Debug(fmt.Sprintf("Reaction recorded: target=%s msg_id=%d", tmuxTarget, msgID))
+	rt.pending[tmuxTarget] = append(rt.pending[tmuxTarget], reactionEntry{chatID: chatID, msgID: msgID})
+	logger.Debug(fmt.Sprintf("Reaction pending recorded: target=%s msg_id=%d", tmuxTarget, msgID))
 }
 
-func (rt *reactionTrackerStore) clearAndRemove(bot *tele.Bot, tmuxTarget string) {
+// promotePending appends pending entries to active with ✍ reaction (replacing 👀).
+func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string) {
 	rt.mu.Lock()
-	rEntries := rt.entries[tmuxTarget]
-	delete(rt.entries, tmuxTarget)
-	rt.mu.Unlock()
-	if len(rEntries) > 0 {
-		logger.Debug(fmt.Sprintf("Clearing %d reactions for target %s", len(rEntries), tmuxTarget))
+	newEntries := rt.pending[tmuxTarget]
+	delete(rt.pending, tmuxTarget)
+	if len(newEntries) > 0 {
+		rt.active[tmuxTarget] = append(rt.active[tmuxTarget], newEntries...)
 	}
-	for _, e := range rEntries {
+	rt.mu.Unlock()
+
+	// Set ✍ on newly promoted entries (replacing 👀)
+	for _, e := range newEntries {
 		bot.Raw("setMessageReaction", map[string]interface{}{
 			"chat_id":    e.chatID,
 			"message_id": e.msgID,
-			"reaction":   []interface{}{},
+			"reaction":   []interface{}{map[string]interface{}{"type": "emoji", "emoji": "✍"}},
 		})
+	}
+	if len(newEntries) > 0 {
+		logger.Debug(fmt.Sprintf("Reactions promoted: target=%s promoted=%d", tmuxTarget, len(newEntries)))
 	}
 }

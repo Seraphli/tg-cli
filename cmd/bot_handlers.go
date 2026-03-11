@@ -112,14 +112,14 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 								}
 							}
 						}
-						reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+						recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 						return nil
 					}
 					if err := injector.InjectText(target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 					}
 					logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, truncateStr(text, 200)))
-					reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+					recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 					return nil
 				}
 				return c.Send("💡 Please reply to a notification message to target a session.")
@@ -158,13 +158,13 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 						}
 					}
 				}
-				reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+				recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 				return nil
 			}
 			if err := injector.InjectText(target, text); err != nil {
 				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
-			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+			recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 			return nil
 		})
 	}
@@ -206,7 +206,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if err := injector.InjectText(target, "/resume "+payload); err != nil {
 				return c.Send(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
-			reactAndTrack(bot, c.Message().Chat, c.Message(), tmuxStr)
+			recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 			return nil
 		}
 		// Without payload: show session picker
@@ -558,9 +558,20 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return handleUsageCommand(c, bot)
 	})
 
+	bot.Handle("/bot_voice", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired.")
+		}
+		return handleVoiceCommand(c)
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
 }
+
+var availTools = []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch"}
 
 // buildToolsMenu builds an inline keyboard for tool notification selection.
 func buildToolsMenu(selected []string) *tele.ReplyMarkup {
@@ -569,7 +580,6 @@ func buildToolsMenu(selected []string) *tele.ReplyMarkup {
 	for _, t := range selected {
 		selectedSet[t] = true
 	}
-	availTools := []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch"}
 	var rows []tele.Row
 	var pending []tele.Btn
 	for _, tool := range availTools {
@@ -586,6 +596,12 @@ func buildToolsMenu(selected []string) *tele.ReplyMarkup {
 	if len(pending) > 0 {
 		rows = append(rows, menu.Row(pending...))
 	}
+	// Add All toggle button on the last row
+	allLabel := "☑️ All"
+	if len(selected) == len(availTools) {
+		allLabel = "✅ All"
+	}
+	rows = append(rows, menu.Row(menu.Data(allLabel, "tools_toggle_all")))
 	menu.Inline(rows...)
 	return menu
 }

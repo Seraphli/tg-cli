@@ -54,19 +54,19 @@ pane_log "[hook_cancel] AFTER CC reached idle"
 ELAPSED=0
 CANCEL_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Cancelled pending file" > /dev/null 2>&1; then
+  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep -E "Cancelled pending file|Removed orphan pending file" > /dev/null 2>&1; then
     CANCEL_FOUND=true
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Cancelled pending file log... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for pending file cancel/cleanup log... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$CANCEL_FOUND" = true ]; then
-  pass "Cancelled pending file log found (cancelPendingFilesBySession ran)"
+  pass "Pending file cancel/cleanup log found (cancelPendingFilesBySession ran)"
 else
-  fail "Cancelled pending file log not found within ${TIMEOUT}s"
+  fail "Pending file cancel/cleanup log not found within ${TIMEOUT}s"
 fi
 
 # Check that pending files were cleaned up (removed by hook.go after status=cancelled)

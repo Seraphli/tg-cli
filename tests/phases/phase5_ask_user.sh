@@ -89,11 +89,11 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
 
   # Verify bot logged the selection with label
   sleep 2
-  RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "AskUserQuestion auto-resolved\|AskUserQuestion option" | tail -1)
+  RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "AskUserQuestion responded\|AskUserQuestion option" | tail -1)
   if [ -n "$RESOLVE_LOG" ]; then
     pass "AskUserQuestion option selection logged"
-    if echo "$RESOLVE_LOG" | grep -q "label=."; then
-      SELECTED_LABEL=$(echo "$RESOLVE_LOG" | grep -oP 'label=\K\S+')
+    if echo "$RESOLVE_LOG" | grep -q "answers=\|label="; then
+      SELECTED_LABEL=$(echo "$RESOLVE_LOG" | grep -oP '(answers|label)=\K\S+')
       pass "AskUserQuestion option log contains label=$SELECTED_LABEL"
     else
       fail "AskUserQuestion option log missing label"
@@ -364,4 +364,71 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
 
 else
   fail "AskUserQuestion not triggered within ${TIMEOUT}s"
+fi
+
+# --- AskUserQuestion Cancel button test ---
+echo ""
+echo "--- AskUserQuestion Cancel button test ---"
+
+wait_for_cc_idle
+LOG_BEFORE_AQCANCEL=$(wc -l < "$LOG_FILE")
+
+pane_log "[ask_cancel] BEFORE sending AskUserQuestion cancel prompt"
+
+inject_prompt "First write a brief paragraph, then ask me one question using AskUserQuestion tool with header 'Cancel Test' and two options: 'Keep' with description 'Keep current', 'Change' with description 'Change it'. Question: 'Should we proceed?'"
+
+pane_log "[ask_cancel] AFTER sending cancel prompt"
+
+# Wait for AskUserQuestion notification
+ELAPSED=0
+AQCANCEL_FOUND=false
+AQCANCEL_UUID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_AQCANCEL" ]; then
+    NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQCANCEL + 1))" "$LOG_FILE")
+    if echo "$NEW_LOGS" | grep "AskUserQuestion sent" > /dev/null 2>&1; then
+      AQCANCEL_FOUND=true
+      AQCANCEL_UUID=$(grep -oPm1 'AskUserQuestion sent.*uuid=\K[^ ]+' <<< "$NEW_LOGS" || true)
+      break
+    fi
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+pane_log "[ask_cancel] AFTER AskUserQuestion detected"
+
+if [ "$AQCANCEL_FOUND" = true ] && [ -n "$AQCANCEL_UUID" ]; then
+  pass "AskUserQuestion cancel test: notification sent (uuid=$AQCANCEL_UUID)"
+
+  # Cancel via /pending/cancel API
+  pane_log "[ask_cancel] BEFORE cancel API call"
+  CANCEL_URL="http://127.0.0.1:$TEST_PORT/pending/cancel?uuid=$AQCANCEL_UUID"
+  echo "  API call: POST $CANCEL_URL"
+  CANCEL_RESP=$(curl -s -X POST "$CANCEL_URL")
+  pane_log "[ask_cancel] AFTER cancel API call"
+
+  # Wait for cancel confirmation in log
+  ELAPSED=0
+  AQCANCEL_LOGGED=false
+  while [ $ELAPSED -lt $TIMEOUT ]; do
+    if tail -n +"$((LOG_BEFORE_AQCANCEL + 1))" "$LOG_FILE" | grep "AskUserQuestion cancelled: msg_id=" > /dev/null 2>&1; then
+      AQCANCEL_LOGGED=true
+      break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+  done
+
+  if [ "$AQCANCEL_LOGGED" = true ]; then
+    pass "AskUserQuestion cancelled via /pending/cancel API"
+  else
+    fail "AskUserQuestion cancel log not found within ${TIMEOUT}s"
+  fi
+
+  wait_for_cc_idle
+  pane_log "[ask_cancel] AFTER CC idle"
+else
+  fail "AskUserQuestion cancel test: notification not triggered within ${TIMEOUT}s"
 fi

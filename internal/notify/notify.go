@@ -158,11 +158,13 @@ func BuildPermissionText(data PermissionData) string {
 	}
 	lines = append(lines, "", "🔧 Tool: "+data.ToolName)
 	// Show key fields from tool_input
-	for _, key := range []string{"command", "file_path", "old_string", "new_string", "replace_all", "url", "query", "pattern", "prompt"} {
+	for _, key := range []string{"command", "description", "file_path", "old_string", "new_string", "replace_all", "url", "query", "pattern", "prompt"} {
 		if v, ok := data.ToolInput[key]; ok {
 			s := fmt.Sprintf("%v", v)
 			if key == "old_string" || key == "new_string" {
 				lines = append(lines, key+":\n```\n"+s+"\n```")
+			} else if key == "description" {
+				lines = append(lines, "ℹ️ "+s)
 			} else {
 				lines = append(lines, key+": "+s)
 			}

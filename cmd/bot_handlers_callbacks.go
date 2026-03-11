@@ -1,8 +1,9 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,41 +52,22 @@ func registerCallbackHandlers(bot *tele.Bot) {
 
 	bot.Handle(&tele.InlineButton{Unique: "perm"}, func(c tele.Context) error {
 		decision := c.Data()
-		// Check session alive before resolving permission
-		if permTarget, ok := pendingPerms.getTarget(c.Message().ID); ok && permTarget != "" && !checkSessionAlive(permTarget, bot) {
-			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
+		if decision == "cancel" {
+			doCancelPerm(bot, c.Message().ID)
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Cancelled"})
 		}
-		uuid, uuidOk := pendingPerms.getUUID(c.Message().ID)
-		if !uuidOk {
-			uuid, uuidOk = pendingFiles.get(c.Message().ID)
-		}
-		sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(c.Message().ID))
-		d, err := resolvePermission(c.Message().ID, decision, nil)
+		d, err := doDecidePerm(bot, c.Message().ID, decision)
 		if err != nil {
+			if err.Error() == "session disconnected" {
+				return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
+			}
 			return c.Respond(&tele.CallbackResponse{Text: "Expired or invalid"})
 		}
-		if uuidOk {
-			var updatedPerms []interface{}
-			if d.UpdatedPermissions != nil {
-				var perms []interface{}
-				json.Unmarshal(d.UpdatedPermissions, &perms)
-				updatedPerms = perms
-			}
-			ccOutput := buildPermCCOutput(d.Behavior, d.Message, updatedPerms)
-			if err := writePendingAnswer(uuid, ccOutput); err != nil {
-				logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-			}
-		}
-		logger.Info(fmt.Sprintf("Permission resolved via TG button: msg_id=%d decision=%s uuid=%s", c.Message().ID, decision, uuid))
-		retryEdit(bot, c.Message(), c.Message().Text, buildFrozenPermMarkup(decision, sugLabel))
 		displayText := decision
 		if decision == "sAll" || strings.HasPrefix(decision, "s") {
 			displayText = "Always Allow"
 		}
-		targetPtr, err := extractTmuxTarget(c.Message().Text)
-		if err == nil && targetPtr != nil {
-			reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(*targetPtr))
-		}
+		_ = d
 		return c.Respond(&tele.CallbackResponse{Text: "✅ " + displayText})
 	})
 
@@ -108,53 +90,18 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			if entry.resolved {
 				return c.Respond(&tele.CallbackResponse{Text: "Already answered"})
 			}
-			if parts[1] == "chat" {
-				uuid, ok := pendingFiles.get(c.Message().ID)
-				if !ok {
-					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
+			if parts[1] == "cancel" {
+				doCancelAsk(bot, c.Message().ID)
+				return c.Respond(&tele.CallbackResponse{Text: "❌ Cancelled"})
+			} else if parts[1] == "chat" {
+				if err := doChatAsk(bot, c.Message().ID); err != nil {
+					return c.Respond(&tele.CallbackResponse{Text: "❌ " + err.Error()})
 				}
-				if handleStalePending(c.Message().ID, uuid, bot) {
-					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-				}
-				path := filepath.Join(pendingDir(), uuid+".json")
-				pf, err := readPendingFile(path)
-				if err != nil {
-					cleanupPendingState(c.Message().ID, uuid, bot, "file missing on chat button")
-					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-				}
-				answers := map[string]string{"__chat": "true"}
-				ccOutput := buildAskCCOutput(pf.Payload, answers)
-				if err := writePendingAnswer(uuid, ccOutput); err != nil {
-					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
-				}
-				toolNotifs.markResolved(c.Message().ID)
-				retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, "💬 Chat mode selected"))
-				logger.Info(fmt.Sprintf("AskUserQuestion 'Chat about this' selected: msg_id=%d uuid=%s", c.Message().ID, uuid))
 				return c.Respond(&tele.CallbackResponse{Text: "Chat mode"})
 			} else if parts[1] == "submit" {
-				uuid, ok := pendingFiles.get(c.Message().ID)
-				if !ok {
-					return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
+				if err := doRespondAsk(bot, c.Message().ID, buildAnswers(entry), ""); err != nil {
+					return c.Respond(&tele.CallbackResponse{Text: "❌ " + err.Error()})
 				}
-				if handleStalePending(c.Message().ID, uuid, bot) {
-					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-				}
-				path := filepath.Join(pendingDir(), uuid+".json")
-				pf, err := readPendingFile(path)
-				if err != nil {
-					cleanupPendingState(c.Message().ID, uuid, bot, "file missing on submit button")
-					return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-				}
-				answers := buildAnswers(entry)
-				ccOutput := buildAskCCOutput(pf.Payload, answers)
-				if err := writePendingAnswer(uuid, ccOutput); err != nil {
-					logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-					return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
-				}
-				toolNotifs.markResolved(c.Message().ID)
-				retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
-				logger.Info(fmt.Sprintf("AskUserQuestion submitted: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 				return c.Respond(&tele.CallbackResponse{Text: "✅ Submitted"})
 			} else {
 				split := strings.SplitN(parts[1], ":", 2)
@@ -179,28 +126,9 @@ func registerCallbackHandlers(bot *tele.Bot) {
 						}
 					}
 					if !hasSubmit {
-						uuid, ok := pendingFiles.get(c.Message().ID)
-						if !ok {
-							return c.Respond(&tele.CallbackResponse{Text: "Pending file not found"})
+						if err := doRespondAsk(bot, c.Message().ID, buildAnswers(entry), ""); err != nil {
+							return c.Respond(&tele.CallbackResponse{Text: "❌ " + err.Error()})
 						}
-						if handleStalePending(c.Message().ID, uuid, bot) {
-							return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-						}
-						path := filepath.Join(pendingDir(), uuid+".json")
-						pf, err := readPendingFile(path)
-						if err != nil {
-							cleanupPendingState(c.Message().ID, uuid, bot, "file missing on option select")
-							return c.Respond(&tele.CallbackResponse{Text: "❌ Question expired"})
-						}
-						answers := buildAnswers(entry)
-						ccOutput := buildAskCCOutput(pf.Payload, answers)
-						if err := writePendingAnswer(uuid, ccOutput); err != nil {
-							logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-							return c.Respond(&tele.CallbackResponse{Text: "Failed to save answer"})
-						}
-						toolNotifs.markResolved(c.Message().ID)
-						retryEdit(bot, c.Message(), c.Message().Text, buildFrozenMarkup(entry, ""))
-						logger.Info(fmt.Sprintf("AskUserQuestion auto-resolved: msg_id=%d uuid=%s answers=%v", c.Message().ID, uuid, answers))
 						return c.Respond(&tele.CallbackResponse{Text: "✅ Selected"})
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.optionLabels[optIdx]))
@@ -210,9 +138,6 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					}
 				}
 			}
-		}
-		if entry, ok := toolNotifs.get(c.Message().ID); ok {
-			reactAndTrack(bot, c.Message().Chat, c.Message(), entry.tmuxTarget)
 		}
 		return c.Respond()
 	})
@@ -286,7 +211,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if _, err := retryEdit(bot, c.Message(), c.Message().Text, markup); err != nil {
 			logger.Debug(fmt.Sprintf("resume edit markup error: %v", err))
 		}
-		reactAndTrack(bot, c.Message().Chat, c.Message(), injector.FormatTarget(*targetPtr))
+		recordPending(injector.FormatTarget(*targetPtr), c.Message().Chat.ID, c.Message().ID)
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Resuming"})
 	})
 
@@ -399,6 +324,30 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond(&tele.CallbackResponse{Text: toolName + ": " + action})
 	})
 
+	bot.Handle(&tele.InlineButton{Unique: "tools_toggle_all"}, func(c tele.Context) error {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		// Toggle: if all selected, clear; otherwise select all
+		if len(cfg.ToolNotifyList) == len(availTools) {
+			cfg.ToolNotifyList = nil
+		} else {
+			cfg.ToolNotifyList = make([]string, len(availTools))
+			copy(cfg.ToolNotifyList, availTools)
+		}
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		menu := buildToolsMenu(cfg.ToolNotifyList)
+		c.Edit("🔧 Select tools for notifications:\n(Click to toggle)", menu)
+		action := "All ON"
+		if len(cfg.ToolNotifyList) == 0 {
+			action = "All OFF"
+		}
+		return c.Respond(&tele.CallbackResponse{Text: action})
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "bot_new"}, func(c tele.Context) error {
 		data := c.Data()
 		msgID := c.Message().ID
@@ -491,6 +440,134 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		}
 		logger.Info(fmt.Sprintf("Route unbound (project): cwd=%s", up.cwd))
 		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(up.cwd)))
+		return c.Respond()
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "voice"}, func(c tele.Context) error {
+		data := c.Data()
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		if strings.HasPrefix(data, "engine:") {
+			engine := strings.TrimPrefix(data, "engine:")
+			if engine == "sensevoice" {
+				retryEdit(bot, c.Message(), "⏳ Checking sensevoice dependencies...")
+				sherpaPath, err := ensureSherpaOnnx()
+				if err != nil {
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ sherpa-onnx: %v", err))
+					return c.Respond()
+				}
+				cfg.SherpaOnnxPath = sherpaPath
+				modelPath, err := ensureSenseVoiceModel()
+				if err != nil {
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ SenseVoice model: %v", err))
+					return c.Respond()
+				}
+				cfg.SenseVoiceModelPath = modelPath
+			}
+			if engine == "whisper" {
+				whisperPath := cfg.WhisperPath
+				if whisperPath == "" {
+					for _, name := range []string{"whisper-cli", "whisper-cpp", "whisper"} {
+						if p, err := exec.LookPath(name); err == nil {
+							whisperPath = p
+							break
+						}
+					}
+				}
+				if whisperPath == "" {
+					retryEdit(bot, c.Message(), "❌ whisper.cpp not found. Install: `yay -S whisper.cpp-cuda`")
+					return c.Respond()
+				}
+				cfg.WhisperPath = whisperPath
+				retryEdit(bot, c.Message(), "⏳ Checking whisper model...")
+				modelPath, err := ensureWhisperModel()
+				if err != nil {
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Whisper model: %v", err))
+					return c.Respond()
+				}
+				cfg.ModelPath = modelPath
+			}
+			cfg.VoiceEngine = engine
+			if err := config.SaveAppConfig(cfg); err != nil {
+				return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+			}
+			text := buildVoiceText(cfg)
+			menu := buildVoiceMenu(engine)
+			c.Edit(text, menu)
+			logger.Info(fmt.Sprintf("Voice engine changed to: %s", engine))
+			return c.Respond(&tele.CallbackResponse{Text: "✅ Engine: " + engine})
+		}
+		if strings.HasPrefix(data, "lang:") {
+			lang := strings.TrimPrefix(data, "lang:")
+			if lang == "auto" {
+				cfg.Language = ""
+			} else {
+				cfg.Language = lang
+			}
+			if err := config.SaveAppConfig(cfg); err != nil {
+				return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+			}
+			engine := cfg.VoiceEngine
+			if engine == "" {
+				engine = "whisper"
+			}
+			text := buildVoiceText(cfg)
+			menu := buildVoiceMenu(engine)
+			c.Edit(text, menu)
+			logger.Info(fmt.Sprintf("Voice language changed to: %s", lang))
+			return c.Respond(&tele.CallbackResponse{Text: "✅ Language: " + lang})
+		}
+		if strings.HasPrefix(data, "model:") {
+			modelName := strings.TrimPrefix(data, "model:")
+			var selected modelInfo
+			found := false
+			for _, m := range whisperModels {
+				if m.name == modelName {
+					selected = m
+					found = true
+					break
+				}
+			}
+			if !found {
+				return c.Respond(&tele.CallbackResponse{Text: "❌ Unknown model"})
+			}
+			retryEdit(bot, c.Message(), fmt.Sprintf("⏳ Checking whisper model %s...", selected.name))
+			modelsDir := filepath.Join(config.GetConfigDir(), "models")
+			home, _ := os.UserHomeDir()
+			systemModelsDir := filepath.Join(home, ".local", "share", "whisper.cpp", "models")
+			var modelPath string
+			if fileExists(filepath.Join(modelsDir, selected.filename)) {
+				modelPath = filepath.Join(modelsDir, selected.filename)
+			} else if fileExists(filepath.Join(systemModelsDir, selected.filename)) {
+				modelPath = filepath.Join(systemModelsDir, selected.filename)
+			} else {
+				modelPath = filepath.Join(systemModelsDir, selected.filename)
+				modelURL := fmt.Sprintf("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/%s", selected.filename)
+				if err := os.MkdirAll(systemModelsDir, 0755); err != nil {
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to create dir: %v", err))
+					return c.Respond()
+				}
+				if err := downloadFile(modelPath, modelURL); err != nil {
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Download failed: %v", err))
+					return c.Respond()
+				}
+			}
+			cfg.ModelPath = modelPath
+			if err := config.SaveAppConfig(cfg); err != nil {
+				return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+			}
+			engine := cfg.VoiceEngine
+			if engine == "" {
+				engine = "whisper"
+			}
+			text := buildVoiceText(cfg)
+			menu := buildVoiceMenu(engine)
+			c.Edit(text, menu)
+			logger.Info(fmt.Sprintf("Whisper model changed to: %s path=%s", selected.name, modelPath))
+			return c.Respond(&tele.CallbackResponse{Text: "✅ Model: " + selected.name})
+		}
 		return c.Respond()
 	})
 }

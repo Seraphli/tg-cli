@@ -574,9 +574,29 @@ func parseSuggestionLabel(suggestionsRaw json.RawMessage) (btnLabel string, desc
 		case "addRules":
 			var ruleParts []string
 			for _, r := range sug.Rules {
-				ruleParts = append(ruleParts, r.RuleContent)
+				rc := strings.ReplaceAll(r.RuleContent, "//", "/")
+				if strings.Contains(rc, " ") {
+					rc = "*"
+				}
+				if rc != "*" {
+					// Show only the last meaningful path component + glob (e.g., ".tg-cli/**")
+					parts := strings.Split(rc, "/")
+					for i := len(parts) - 1; i >= 0; i-- {
+						if parts[i] != "" && parts[i] != "**" && parts[i] != "*" {
+							rc = parts[i] + "/" + strings.Join(parts[i+1:], "/")
+							break
+						}
+					}
+				}
+				if rc != "*" {
+					ruleParts = append(ruleParts, rc)
+				}
 			}
-			desc = "don't ask again for: " + strings.Join(ruleParts, ", ")
+			if len(ruleParts) > 0 {
+				desc = "don't ask again for: " + strings.Join(ruleParts, ", ")
+			} else {
+				desc = "don't ask again"
+			}
 		case "toolAlwaysAllow":
 			desc = "always allow " + sug.Tool
 		case "setMode":
@@ -590,17 +610,37 @@ func parseSuggestionLabel(suggestionsRaw json.RawMessage) (btnLabel string, desc
 					allowPattern = sug.Rules[0].RuleContent
 				}
 			}
+			if allowPattern != "" {
+				allowPattern = strings.ReplaceAll(allowPattern, "//", "/")
+			}
 			desc = "always allow"
 			if toolName != "" {
 				desc += " " + toolName
 			}
 			if allowPattern != "" && allowPattern != "*" {
-				desc += " (" + allowPattern + ")"
+				if strings.Contains(allowPattern, " ") {
+					allowPattern = "*"
+				}
+				if allowPattern != "*" {
+					desc += " (" + allowPattern + ")"
+				}
 			}
 		}
 		descs = append(descs, desc)
 	}
 	return "Always Allow", strings.Join(descs, "; ")
+}
+
+// reactSeen adds an eyes emoji reaction to indicate the message was received.
+func reactSeen(bot *tele.Bot, chat *tele.Chat, msg *tele.Message) {
+	bot.React(chat, msg, tele.ReactionOptions{
+		Reactions: []tele.Reaction{{Type: "emoji", Emoji: "👀"}},
+	})
+}
+
+// recordPending records a message for later ✍ reaction when UserPromptSubmit fires.
+func recordPending(tmuxTarget string, chatID int64, msgID int) {
+	reactionTracker.recordPending(tmuxTarget, chatID, msgID)
 }
 
 // buildFrozenPermMarkup creates frozen markup for PermissionRequest showing the selected decision.
@@ -664,7 +704,7 @@ func selectToolOption(msgID int, optIdx int) error {
 }
 
 // detectPermMode captures pane content and detects the current CC permission mode.
-// Returns (mode, rawContent, error). Mode is one of: "default", "plan", "auto", "bypass", "unknown".
+// Returns (mode, rawContent, error). Mode is one of: "default", "plan", "auto", "bypass", "question".
 func detectPermMode(t injector.TmuxTarget) (string, string, error) {
 	content, err := injector.CapturePane(t)
 	if err != nil {
@@ -684,6 +724,9 @@ func detectPermMode(t injector.TmuxTarget) (string, string, error) {
 		return "plan", content, nil
 	case strings.Contains(bottom, "accept edits"):
 		return "auto", content, nil
+	case strings.Contains(bottom, "options") || strings.Contains(bottom, "answer"):
+		// CC is showing an AskUserQuestion dialog
+		return "question", content, nil
 	default:
 		return "default", content, nil
 	}
@@ -734,6 +777,14 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 	// All other values are treated as target mode
 	finalMode, err := switchPermMode(target, cmd)
 	if err != nil {
+		// Detect current state to give informative error message
+		currentMode, _, detectErr := detectPermMode(target)
+		if detectErr == nil && currentMode == "question" {
+			return c.Reply(fmt.Sprintf("❌ Switch failed: CC is currently in question state (AskUserQuestion dialog). Answer or cancel the question first.\nError: %v", err))
+		}
+		if detectErr == nil {
+			return c.Reply(fmt.Sprintf("❌ Switch failed: current state is '%s'. Error: %v", currentMode, err))
+		}
 		return c.Reply(fmt.Sprintf("❌ Switch failed: %v", err))
 	}
 	return c.Reply(fmt.Sprintf("🔐 Switched to %s mode", finalMode))
@@ -838,6 +889,8 @@ type hookPayload struct {
 	Project         string          `json:"project"`
 	Source               string          `json:"source"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	AgentID   string `json:"agent_id"`
+	AgentType string `json:"agent_type"`
 }
 
 func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
@@ -1039,6 +1092,158 @@ func buildAskCCOutput(payload json.RawMessage, answers map[string]string) json.R
 	}
 	result, _ := json.Marshal(output)
 	return result
+}
+
+// doCancelPerm cancels a PermissionRequest: disk write + ESC + resolve + edit TG msg
+func doCancelPerm(bot *tele.Bot, msgID int) string {
+	sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
+	uuid, uuidOk := pendingFiles.get(msgID)
+	if uuidOk {
+		path := filepath.Join(pendingDir(), uuid+".json")
+		pf, err := readPendingFile(path)
+		if err == nil {
+			pf.Status = "cancelled"
+			writePendingFile(path, pf)
+		}
+	}
+	msgText := pendingPerms.getMsgText(msgID)
+	chatID := pendingPerms.getChatID(msgID)
+	targetPtr, err := extractTmuxTarget(msgText)
+	if err == nil && targetPtr != nil {
+		injector.SendKeys(*targetPtr, "Escape")
+	}
+	pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
+	if chatID != 0 && msgText != "" {
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+	}
+	logger.Info(fmt.Sprintf("Permission cancelled: msg_id=%d uuid=%s", msgID, uuid))
+	return uuid
+}
+
+// doCancelAsk cancels an AskUserQuestion: disk write + ESC + resolve + edit TG msg
+func doCancelAsk(bot *tele.Bot, msgID int) string {
+	uuid, uuidOk := pendingFiles.get(msgID)
+	if uuidOk {
+		path := filepath.Join(pendingDir(), uuid+".json")
+		pf, err := readPendingFile(path)
+		if err == nil {
+			pf.Status = "cancelled"
+			writePendingFile(path, pf)
+		}
+	}
+	if entry, ok := toolNotifs.get(msgID); ok {
+		targetPtr, err := extractTmuxTarget(entry.msgText)
+		if err == nil && targetPtr != nil {
+			injector.SendKeys(*targetPtr, "Escape")
+		}
+		toolNotifs.markResolved(msgID)
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+	}
+	logger.Info(fmt.Sprintf("AskUserQuestion cancelled: msg_id=%d uuid=%s", msgID, uuid))
+	return uuid
+}
+
+// doDecidePerm resolves a PermissionRequest: resolve + writePendingAnswer + edit + recordPending
+func doDecidePerm(bot *tele.Bot, msgID int, decision string) (*permDecision, error) {
+	if permTarget, ok := pendingPerms.getTarget(msgID); ok && permTarget != "" && !checkSessionAlive(permTarget, bot) {
+		return nil, fmt.Errorf("session disconnected")
+	}
+	uuid, uuidOk := pendingPerms.getUUID(msgID)
+	if !uuidOk {
+		uuid, uuidOk = pendingFiles.get(msgID)
+	}
+	sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
+	d, err := resolvePermission(msgID, decision, nil)
+	if err != nil {
+		return nil, err
+	}
+	if uuidOk {
+		var updatedPerms []interface{}
+		if d.UpdatedPermissions != nil {
+			var perms []interface{}
+			json.Unmarshal(d.UpdatedPermissions, &perms)
+			updatedPerms = perms
+		}
+		ccOutput := buildPermCCOutput(d.Behavior, d.Message, updatedPerms)
+		if err := writePendingAnswer(uuid, ccOutput); err != nil {
+			logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
+		}
+	}
+	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
+	msgText := pendingPerms.getMsgText(msgID)
+	chatID := pendingPerms.getChatID(msgID)
+	if chatID != 0 && msgText != "" {
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
+	}
+	targetPtr, err2 := extractTmuxTarget(msgText)
+	if err2 == nil && targetPtr != nil {
+		recordPending(injector.FormatTarget(*targetPtr), chatID, msgID)
+	}
+	return &d, nil
+}
+
+// doRespondAsk responds to AskUserQuestion: handleStalePending + writePendingAnswer + edit + recordPending
+func doRespondAsk(bot *tele.Bot, msgID int, answers map[string]string, frozenLabel string) error {
+	uuid, ok := pendingFiles.get(msgID)
+	if !ok {
+		return fmt.Errorf("pending file not found")
+	}
+	if handleStalePending(msgID, uuid, bot) {
+		return fmt.Errorf("hook dead (stale pending)")
+	}
+	path := filepath.Join(pendingDir(), uuid+".json")
+	pf, err := readPendingFile(path)
+	if err != nil {
+		cleanupPendingState(msgID, uuid, bot, "file missing on respond")
+		return fmt.Errorf("question expired")
+	}
+	ccOutput := buildAskCCOutput(pf.Payload, answers)
+	if err := writePendingAnswer(uuid, ccOutput); err != nil {
+		logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+		return fmt.Errorf("failed to save answer")
+	}
+	if entry, entryOk := toolNotifs.get(msgID); entryOk {
+		toolNotifs.markResolved(msgID)
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, frozenLabel))
+		recordPending(entry.tmuxTarget, entry.chatID, msgID)
+	}
+	logger.Info(fmt.Sprintf("AskUserQuestion responded: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
+	return nil
+}
+
+// doChatAsk handles chat mode for AskUserQuestion: handleStalePending + write __chat answer + edit
+func doChatAsk(bot *tele.Bot, msgID int) error {
+	uuid, ok := pendingFiles.get(msgID)
+	if !ok {
+		return fmt.Errorf("pending file not found")
+	}
+	if handleStalePending(msgID, uuid, bot) {
+		return fmt.Errorf("question expired")
+	}
+	path := filepath.Join(pendingDir(), uuid+".json")
+	pf, err := readPendingFile(path)
+	if err != nil {
+		cleanupPendingState(msgID, uuid, bot, "file missing on chat button")
+		return fmt.Errorf("question expired")
+	}
+	answers := map[string]string{"__chat": "true"}
+	ccOutput := buildAskCCOutput(pf.Payload, answers)
+	if err := writePendingAnswer(uuid, ccOutput); err != nil {
+		logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
+		return fmt.Errorf("failed to save answer")
+	}
+	if entry, entryOk := toolNotifs.get(msgID); entryOk {
+		toolNotifs.markResolved(msgID)
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "💬 Chat mode selected"))
+		recordPending(entry.tmuxTarget, entry.chatID, msgID)
+	}
+	logger.Info(fmt.Sprintf("AskUserQuestion chat mode: msg_id=%d uuid=%s", msgID, uuid))
+	return nil
 }
 
 // buildPermCCOutput builds CC output for PermissionRequest
@@ -1738,4 +1943,71 @@ func parseUsageOutput(raw string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+func buildVoiceText(cfg config.AppConfig) string {
+	engine := cfg.VoiceEngine
+	if engine == "" {
+		engine = "whisper"
+	}
+	lang := cfg.Language
+	if lang == "" {
+		lang = "auto"
+	}
+	text := fmt.Sprintf("🎙 Voice Settings\nEngine: %s", engine)
+	if engine == "whisper" {
+		model := currentWhisperModelName()
+		if model == "" {
+			model = "none"
+		}
+		text += fmt.Sprintf("\nModel: %s", model)
+	}
+	text += fmt.Sprintf("\nLanguage: %s", lang)
+	return text
+}
+
+func buildVoiceMenu(engine string) *tele.ReplyMarkup {
+	menu := &tele.ReplyMarkup{}
+	btnWhisper := menu.Data("🔊 whisper", "voice", "engine:whisper")
+	btnSenseVoice := menu.Data("🔊 sensevoice", "voice", "engine:sensevoice")
+	btnLangAuto := menu.Data("🌐 auto", "voice", "lang:auto")
+	btnLangZh := menu.Data("🇨🇳 zh", "voice", "lang:zh")
+	btnLangEn := menu.Data("🇺🇸 en", "voice", "lang:en")
+	btnLangJa := menu.Data("🇯🇵 ja", "voice", "lang:ja")
+	rows := []tele.Row{
+		menu.Row(btnWhisper, btnSenseVoice),
+	}
+	if engine == "" || engine == "whisper" {
+		rows = append(rows,
+			menu.Row(
+				menu.Data("tiny", "voice", "model:tiny"),
+				menu.Data("base", "voice", "model:base"),
+				menu.Data("small", "voice", "model:small"),
+			),
+			menu.Row(
+				menu.Data("medium", "voice", "model:medium"),
+				menu.Data("turbo", "voice", "model:large-v3-turbo"),
+				menu.Data("large", "voice", "model:large-v3"),
+			),
+		)
+	}
+	rows = append(rows, menu.Row(btnLangAuto, btnLangZh, btnLangEn, btnLangJa))
+	menu.Inline(rows...)
+	return menu
+}
+
+// handleVoiceCommand handles /bot_voice — shows voice config and allows engine/language switch.
+func handleVoiceCommand(c tele.Context) error {
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+	}
+	engine := cfg.VoiceEngine
+	if engine == "" {
+		engine = "whisper"
+	}
+	text := buildVoiceText(cfg)
+	menu := buildVoiceMenu(engine)
+	_, err = retrySend(c.Bot(), c.Chat(), text, menu)
+	return err
 }

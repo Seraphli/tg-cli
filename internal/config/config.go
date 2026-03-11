@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"time"
 )
 
 type Credentials struct {
@@ -92,30 +94,38 @@ func SaveCredentials(creds Credentials) error {
 }
 
 type AppConfig struct {
-	WhisperPath       string   `json:"whisperPath"`
-	ModelPath         string   `json:"modelPath"`
-	Language          string   `json:"language"`
-	FFmpegPath        string   `json:"ffmpegPath"`
-	WhisperPrompt     string   `json:"whisperPrompt"`
-	VoicePrefix       string   `json:"voicePrefix"`
-	ToolNotifyList    []string `json:"toolNotifyList,omitempty"`
-	ToolNotifyEnabled *bool    `json:"toolNotifyEnabled,omitempty"`
-	ClaudeCommand     string   `json:"claudeCommand"`
-	DefaultSessionName string  `json:"defaultSessionName"`
-	DefaultWorkDir    string   `json:"defaultWorkDir"`
+	WhisperPath        string   `json:"whisperPath"`
+	ModelPath          string   `json:"modelPath"`
+	Language           string   `json:"language"`
+	FFmpegPath         string   `json:"ffmpegPath"`
+	WhisperPrompt      string   `json:"whisperPrompt"`
+	VoicePrefix        string   `json:"voicePrefix"`
+	ToolNotifyList     []string `json:"toolNotifyList,omitempty"`
+	ToolNotifyEnabled  *bool    `json:"toolNotifyEnabled,omitempty"`
+	ClaudeCommand      string   `json:"claudeCommand"`
+	DefaultSessionName string   `json:"defaultSessionName"`
+	DefaultWorkDir     string   `json:"defaultWorkDir"`
+	VoiceEngine        string   `json:"voiceEngine"`
+	SherpaOnnxPath     string   `json:"sherpaOnnxPath"`
+	SenseVoiceModelPath string `json:"senseVoiceModelPath"`
+	VoiceRetainCount    int    `json:"voiceRetainCount,omitempty"`
 }
+
+// appConfigCache stores the last loaded config for dynamic reload support.
+var appConfigCache atomic.Pointer[AppConfig]
+var lastLoadMtime atomic.Value // stores time.Time
 
 func GetConfigPath() string {
 	return filepath.Join(GetConfigDir(), "config.json")
 }
 
-func LoadAppConfig() (AppConfig, error) {
+func loadAppConfigFromDisk() (AppConfig, error) {
 	if err := ensureConfigDir(); err != nil {
 		return AppConfig{}, err
 	}
 	path := GetConfigPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️", ClaudeCommand: "claude", DefaultSessionName: "tg-cli", DefaultWorkDir: filepath.Join(GetConfigDir(), "workspace")}, nil
+		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️", ClaudeCommand: "claude", DefaultSessionName: "tg-cli", DefaultWorkDir: filepath.Join(GetConfigDir(), "workspace"), VoiceEngine: "whisper"}, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -140,7 +150,47 @@ func LoadAppConfig() (AppConfig, error) {
 	if cfg.DefaultWorkDir == "" {
 		cfg.DefaultWorkDir = filepath.Join(GetConfigDir(), "workspace")
 	}
+	if cfg.VoiceEngine == "" {
+		cfg.VoiceEngine = "whisper"
+	}
+	if cfg.VoiceRetainCount == 0 {
+		cfg.VoiceRetainCount = 5
+	}
 	return cfg, nil
+}
+
+// LoadAppConfig returns config from cache if available and file unchanged, otherwise loads from disk.
+func LoadAppConfig() (AppConfig, error) {
+	if cached := appConfigCache.Load(); cached != nil {
+		if info, err := os.Stat(GetConfigPath()); err == nil {
+			if stored, ok := lastLoadMtime.Load().(time.Time); ok && !info.ModTime().After(stored) {
+				return *cached, nil
+			}
+		} else {
+			return *cached, nil
+		}
+		appConfigCache.Store(nil)
+	}
+	cfg, err := loadAppConfigFromDisk()
+	if err != nil {
+		return cfg, err
+	}
+	if info, err := os.Stat(GetConfigPath()); err == nil {
+		lastLoadMtime.Store(info.ModTime())
+	}
+	appConfigCache.Store(&cfg)
+	return cfg, nil
+}
+
+// ReloadAppConfig clears the cache and reloads config from disk.
+func ReloadAppConfig() (AppConfig, error) {
+	appConfigCache.Store(nil)
+	return LoadAppConfig()
+}
+
+// UpdateAppConfigCache updates the in-memory cache with the given config.
+func UpdateAppConfigCache(cfg AppConfig) {
+	appConfigCache.Store(&cfg)
 }
 
 func SaveAppConfig(cfg AppConfig) error {
@@ -151,5 +201,12 @@ func SaveAppConfig(cfg AppConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(GetConfigPath(), data, 0644)
+	if err := os.WriteFile(GetConfigPath(), data, 0644); err != nil {
+		return err
+	}
+	UpdateAppConfigCache(cfg)
+	if info, err := os.Stat(GetConfigPath()); err == nil {
+		lastLoadMtime.Store(info.ModTime())
+	}
+	return nil
 }
