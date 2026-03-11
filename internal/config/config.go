@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -191,6 +192,35 @@ func ReloadAppConfig() (AppConfig, error) {
 // UpdateAppConfigCache updates the in-memory cache with the given config.
 func UpdateAppConfigCache(cfg AppConfig) {
 	appConfigCache.Store(&cfg)
+}
+
+// MigrateChat updates all credential references from oldID to newID.
+func MigrateChat(oldID, newID int64) error {
+	creds, err := LoadCredentials()
+	if err != nil {
+		return err
+	}
+	migrated := false
+	for k, v := range creds.RouteMap {
+		if v == oldID {
+			creds.RouteMap[k] = newID
+			migrated = true
+		}
+	}
+	for k, v := range creds.ProjectRouteMap {
+		if v == oldID {
+			creds.ProjectRouteMap[k] = newID
+			migrated = true
+		}
+	}
+	if creds.PairingAllow.DefaultChatID == strconv.FormatInt(oldID, 10) {
+		creds.PairingAllow.DefaultChatID = strconv.FormatInt(newID, 10)
+		migrated = true
+	}
+	if !migrated {
+		return nil
+	}
+	return SaveCredentials(creds)
 }
 
 func SaveAppConfig(cfg AppConfig) error {

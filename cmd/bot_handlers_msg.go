@@ -145,8 +145,13 @@ func restoreSpoilers(text string, entities []tele.MessageEntity) string {
 // resolveReplyTarget extracts and validates tmux target from reply message.
 // If the pane is alive but not in sessionState, recovers it.
 func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
+	if replyText == "" {
+		logger.Debug("resolveReplyTarget: empty replyText")
+		return injector.TmuxTarget{}, fmt.Errorf("no target found")
+	}
 	targetPtr, err := extractTmuxTarget(replyText)
 	if err != nil {
+		logger.Debug(fmt.Sprintf("resolveReplyTarget: extractTmuxTarget failed: %v text=%s", err, truncateStr(replyText, 100)))
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
 	target := *targetPtr

@@ -268,8 +268,9 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 	}
 }
 
-// retrySend sends a Telegram message with unlimited retries.
-// On FloodError it waits the RetryAfter duration; on other errors it backs off up to 10s.
+// retrySend sends a Telegram message with retries.
+// On FloodError it waits the RetryAfter duration; on GroupError it auto-migrates chat ID;
+// on other errors it retries up to 3 times with backoff.
 func retrySend(b *tele.Bot, to tele.Recipient, what interface{}, opts ...interface{}) (*tele.Message, error) {
 	var msg *tele.Message
 	var err error
@@ -287,17 +288,30 @@ func retrySend(b *tele.Bot, to tele.Recipient, what interface{}, opts ...interfa
 			time.Sleep(wait)
 			continue
 		}
-		wait := time.Duration(attempt) * time.Second
-		if wait > 10*time.Second {
-			wait = 10 * time.Second
+		var groupErr tele.GroupError
+		if errors.As(err, &groupErr) {
+			newID := groupErr.MigratedTo
+			if chat, ok := to.(*tele.Chat); ok && newID != 0 {
+				logger.Info(fmt.Sprintf("GroupError: migrating chat %d → %d", chat.ID, newID))
+				if merr := config.MigrateChat(chat.ID, newID); merr != nil {
+					logger.Error(fmt.Sprintf("Auto-migrate failed: %v", merr))
+				}
+				chat.ID = newID
+				continue
+			}
 		}
+		if attempt >= 3 {
+			logger.Error(fmt.Sprintf("Send failed after %d attempts: %v", attempt, err))
+			return nil, err
+		}
+		wait := time.Duration(attempt) * time.Second
 		logger.Error(fmt.Sprintf("Send failed (attempt %d): %v, retrying in %v", attempt, err, wait))
 		time.Sleep(wait)
 	}
 }
 
-// retryEdit edits a Telegram message with unlimited retries.
-// On FloodError it waits the RetryAfter duration; on other errors it backs off up to 10s.
+// retryEdit edits a Telegram message with retries.
+// On FloodError it waits the RetryAfter duration; on other errors it retries up to 3 times with backoff.
 func retryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interface{}) (*tele.Message, error) {
 	var result *tele.Message
 	var err error
@@ -315,10 +329,11 @@ func retryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interfa
 			time.Sleep(wait)
 			continue
 		}
-		wait := time.Duration(attempt) * time.Second
-		if wait > 10*time.Second {
-			wait = 10 * time.Second
+		if attempt >= 3 {
+			logger.Error(fmt.Sprintf("Edit failed after %d attempts: %v", attempt, err))
+			return nil, err
 		}
+		wait := time.Duration(attempt) * time.Second
 		logger.Error(fmt.Sprintf("Edit failed (attempt %d): %v, retrying in %v", attempt, err, wait))
 		time.Sleep(wait)
 	}
@@ -1155,6 +1170,8 @@ func doDecidePerm(bot *tele.Bot, msgID int, decision string) (*permDecision, err
 		uuid, uuidOk = pendingFiles.get(msgID)
 	}
 	sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(msgID))
+	msgText := pendingPerms.getMsgText(msgID)
+	chatID := pendingPerms.getChatID(msgID)
 	d, err := resolvePermission(msgID, decision, nil)
 	if err != nil {
 		return nil, err
@@ -1172,8 +1189,6 @@ func doDecidePerm(bot *tele.Bot, msgID int, decision string) (*permDecision, err
 		}
 	}
 	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
-	msgText := pendingPerms.getMsgText(msgID)
-	chatID := pendingPerms.getChatID(msgID)
 	if chatID != 0 && msgText != "" {
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
 		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))

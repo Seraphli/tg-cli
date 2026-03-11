@@ -50,11 +50,30 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					msgType = "voice"
 				}
 				preview := truncateStr(c.Text(), 50)
-				logger.Info(fmt.Sprintf("TG recv %s: chat=%d sender=%d msg_id=%d text=%s",
-					msgType, c.Chat().ID, c.Sender().ID, msg.ID, preview))
+				replyInfo := ""
+				if msg.ReplyTo != nil {
+					replyInfo = fmt.Sprintf(" reply_to=%d", msg.ReplyTo.ID)
+				}
+				threadInfo := ""
+				if msg.ThreadID != 0 {
+					threadInfo = fmt.Sprintf(" thread_id=%d", msg.ThreadID)
+				}
+				logger.Info(fmt.Sprintf("TG recv %s: chat=%d sender=%d msg_id=%d%s%s text=%s",
+					msgType, c.Chat().ID, c.Sender().ID, msg.ID, replyInfo, threadInfo, preview))
 			}
 			return next(c)
 		}
+	})
+	bot.Handle(tele.OnMigration, func(c tele.Context) error {
+		from, to := c.Migration()
+		logger.Info(fmt.Sprintf("Chat migration detected: %d → %d", from, to))
+		if err := config.MigrateChat(from, to); err != nil {
+			logger.Error(fmt.Sprintf("Failed to migrate chat: %v", err))
+			return nil
+		}
+		logger.Info(fmt.Sprintf("Chat migration completed: %d → %d", from, to))
+		retrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to))
+		return nil
 	})
 	// Build TG→CC name mapping
 	ccCommandMap := make(map[string]string)
@@ -301,7 +320,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			for tmux, cid := range creds.RouteMap {
 				chatName := fmt.Sprintf("%d", cid)
 				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = chat.Title
+					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
 				}
 				lines = append(lines, fmt.Sprintf("  %s → %s", getPaneLabel(tmux), chatName))
 			}
@@ -314,7 +333,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			for cwd, cid := range creds.ProjectRouteMap {
 				chatName := fmt.Sprintf("%d", cid)
 				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = chat.Title
+					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
 				}
 				lines = append(lines, fmt.Sprintf("  %s → %s", notify.CompressPath(cwd), chatName))
 			}
@@ -327,7 +346,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if cid, ok := creds.ProjectRouteMap[info.cwd]; ok {
 				chatName = fmt.Sprintf("%d", cid)
 				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = chat.Title
+					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
 				}
 			}
 			label := notify.FormatPaneID(info.tmuxTarget)
