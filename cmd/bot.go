@@ -42,25 +42,17 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 				if !isSessionRunning(info.tmuxTarget) {
 					continue
 				}
-				// Check tmux route first
-				if chatID, ok := creds.RouteMap[info.tmuxTarget]; ok {
-					if !sentChats[chatID] {
-						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
-						sentChats[chatID] = true
-					}
-				} else if info.cwd != "" {
-					// Check project route map
-					if chatID, ok := creds.ProjectRouteMap[info.cwd]; ok {
-						if !sentChats[chatID] {
-							bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
-							sentChats[chatID] = true
+				// Check name route map
+				if info.name != "" {
+					if route, ok := creds.NameRouteMap[info.name]; ok {
+						if !sentChats[route.ChatID] {
+							bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing)
+							sentChats[route.ChatID] = true
 						}
-					} else {
-						anyUnboundRunning = true
+						continue
 					}
-				} else {
-					anyUnboundRunning = true
 				}
+				anyUnboundRunning = true
 			}
 			if anyUnboundRunning {
 				defaultChatIDStr := pairing.GetDefaultChatID()
@@ -174,8 +166,11 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
 		tele.Command{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
 		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
-		tele.Command{Text: "bot_bind", Description: "Bind a tmux session to this chat"},
-		tele.Command{Text: "bot_unbind", Description: "Unbind a tmux session from this chat"},
+		tele.Command{Text: "bot_bind", Description: "Bind agent name to this chat/topic"},
+		tele.Command{Text: "bot_unbind", Description: "Unbind an agent name route"},
+		tele.Command{Text: "bot_name", Description: "Set agent name for a session"},
+		tele.Command{Text: "bot_names", Description: "List and name active sessions"},
+		tele.Command{Text: "bot_cwd", Description: "Configure CWD source (tmux/payload)"},
 		tele.Command{Text: "resume", Description: "Resume a previous Claude Code session"},
 		tele.Command{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
 		tele.Command{Text: "bot_tools", Description: "Configure which tools send notifications"},

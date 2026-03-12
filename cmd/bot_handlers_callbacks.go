@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -142,37 +143,36 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond()
 	})
 
-	bot.Handle(&tele.InlineButton{Unique: "bind"}, func(c tele.Context) error {
-		val, ok := bindPending.Load(c.Message().ID)
+	// "names" callback: pending session name input (step 1: session selected)
+	var namesPendingSession sync.Map // msgID -> sessionID
+	bot.Handle(&tele.InlineButton{Unique: "names"}, func(c tele.Context) error {
+		sessionID := c.Data()
+		info, ok := sessionState.all()[sessionID]
 		if !ok {
-			return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+			return c.Respond(&tele.CallbackResponse{Text: "Session not found"})
 		}
-		bp := val.(bindPendingInfo)
-		bindType := c.Data() // "tmux" or "project"
-		bindPending.Delete(c.Message().ID)
-
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
-			return c.Respond()
-		}
-		var resultMsg string
-		if bindType == "tmux" {
-			creds.RouteMap[bp.tmuxTarget] = bp.chatID
-			resultMsg = fmt.Sprintf("✅ Bound tmux session to this chat.\n📟 %s", bp.tmuxTarget)
-			logger.Info(fmt.Sprintf("Route bound (tmux): tmux=%s → chat=%d", bp.tmuxTarget, bp.chatID))
-		} else {
-			creds.ProjectRouteMap[bp.cwd] = bp.chatID
-			resultMsg = fmt.Sprintf("✅ Bound project to this chat.\n📂 %s", notify.CompressPath(bp.cwd))
-			logger.Info(fmt.Sprintf("Route bound (project): cwd=%s → chat=%d", bp.cwd, bp.chatID))
-		}
-		if err := config.SaveCredentials(creds); err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
-			return c.Respond()
-		}
-		retryEdit(bot, c.Message(), resultMsg)
-		return c.Respond()
+		retryEdit(bot, c.Message(), fmt.Sprintf("Session: %s\nReply with the new name for this session.", notify.FormatPaneID(info.tmuxTarget)))
+		namesPendingSession.Store(c.Message().ID, sessionID)
+		return c.Respond(&tele.CallbackResponse{Text: "Reply with name"})
 	})
+
+	// "cwd" callback: update CWDSource setting
+	bot.Handle(&tele.InlineButton{Unique: "cwd"}, func(c tele.Context) error {
+		source := c.Data() // "tmux" or "payload"
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		cfg.CWDSource = source
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ CWD source set to: %s", source))
+		logger.Info(fmt.Sprintf("CWDSource updated to: %s", source))
+		return c.Respond(&tele.CallbackResponse{Text: "✅ Saved: " + source})
+	})
+
+	// namesPendingSession is used for tracking session name inputs
 
 	bot.Handle(&tele.InlineButton{Unique: "resume"}, func(c tele.Context) error {
 		sessionID := c.Data()
@@ -215,6 +215,41 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Resuming"})
 	})
 
+	bot.Handle(&tele.InlineButton{Unique: "bind_select"}, func(c tele.Context) error {
+		data := strings.TrimSpace(c.Data())
+		num, err := strconv.Atoi(data)
+		if err != nil {
+			retryEdit(bot, c.Message(), "❌ Invalid selection.")
+			return c.Respond()
+		}
+		val, ok := bindMenuItems.LoadAndDelete(c.Message().ID)
+		if !ok {
+			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_bind again.")
+			return c.Respond()
+		}
+		ctx := val.(bindMenuContext)
+		idx := num - 1
+		if idx < 0 || idx >= len(ctx.items) {
+			retryEdit(bot, c.Message(), "❌ Selection out of range.")
+			return c.Respond()
+		}
+		item := ctx.items[idx]
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			return c.Respond()
+		}
+		creds.NameRouteMap[item.key] = config.NameRoute{ChatID: ctx.chatID, TopicID: ctx.topicID}
+		config.SaveCredentials(creds)
+		topicStr := ""
+		if ctx.topicID != 0 {
+			topicStr = fmt.Sprintf(", topic=%d", ctx.topicID)
+		}
+		logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.key, ctx.chatID, ctx.topicID))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", item.label, ctx.chatID, topicStr))
+		return c.Respond()
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "unbind_select"}, func(c tele.Context) error {
 		data := strings.TrimSpace(c.Data())
 		num, err := strconv.Atoi(data)
@@ -227,39 +262,22 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_unbind again.")
 			return c.Respond()
 		}
-		items := val.([]unbindItem)
+		keys := val.([]string)
 		idx := num - 1
-		if idx < 0 || idx >= len(items) {
+		if idx < 0 || idx >= len(keys) {
 			retryEdit(bot, c.Message(), "❌ Selection out of range.")
 			return c.Respond()
 		}
-		item := items[idx]
-		switch item.kind {
-		case "tmux":
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
-				return c.Respond()
-			}
-			delete(creds.RouteMap, item.key)
-			config.SaveCredentials(creds)
-			logger.Info(fmt.Sprintf("Route unbound (menu/tmux): tmux=%s", item.key))
-			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound tmux route.\n📟 %s", getPaneLabel(item.key)))
-		case "project":
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
-				return c.Respond()
-			}
-			delete(creds.ProjectRouteMap, item.key)
-			config.SaveCredentials(creds)
-			logger.Info(fmt.Sprintf("Route unbound (menu/project): cwd=%s", item.key))
-			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(item.key)))
-		case "session":
-			sessionState.remove(item.key)
-			logger.Info(fmt.Sprintf("Route unbound (menu/session): sid=%s", item.key))
-			retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound session.\n🔑 %s", item.key[:8]))
+		name := keys[idx]
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			return c.Respond()
 		}
+		delete(creds.NameRouteMap, name)
+		config.SaveCredentials(creds)
+		logger.Info(fmt.Sprintf("Route unbound (menu/name): name=%s", name))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound agent name route: %s", name))
 		return c.Respond()
 	})
 
@@ -415,33 +433,6 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond()
 	})
 
-	bot.Handle(&tele.InlineButton{Unique: "unbind_confirm"}, func(c tele.Context) error {
-		action := c.Data() // "yes" or "no"
-		val, ok := unbindPending.Load(c.Message().ID)
-		if !ok {
-			return c.Respond(&tele.CallbackResponse{Text: "Expired"})
-		}
-		up := val.(unbindPendingInfo)
-		unbindPending.Delete(c.Message().ID)
-
-		if action != "yes" {
-			retryEdit(bot, c.Message(), "❌ Unbind cancelled.")
-			return c.Respond()
-		}
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
-			return c.Respond()
-		}
-		delete(creds.ProjectRouteMap, up.cwd)
-		if err := config.SaveCredentials(creds); err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save: %v", err))
-			return c.Respond()
-		}
-		logger.Info(fmt.Sprintf("Route unbound (project): cwd=%s", up.cwd))
-		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound project route.\n📂 %s", notify.CompressPath(up.cwd)))
-		return c.Respond()
-	})
 
 	bot.Handle(&tele.InlineButton{Unique: "voice"}, func(c tele.Context) error {
 		data := c.Data()

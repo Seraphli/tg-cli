@@ -9,12 +9,16 @@ import (
 	"time"
 )
 
+type NameRoute struct {
+	ChatID  int64 `json:"chatId"`
+	TopicID int   `json:"topicId,omitempty"`
+}
+
 type Credentials struct {
-	BotToken        string           `json:"botToken"`
-	PairingAllow    PairingAllow     `json:"pairingAllow"`
-	Port            int              `json:"port"`
-	RouteMap        map[string]int64 `json:"routeMap,omitempty"`
-	ProjectRouteMap map[string]int64 `json:"projectRouteMap,omitempty"`
+	BotToken     string               `json:"botToken"`
+	PairingAllow PairingAllow         `json:"pairingAllow"`
+	Port         int                  `json:"port"`
+	NameRouteMap map[string]NameRoute `json:"nameRouteMap,omitempty"`
 }
 
 type PairingAllow struct {
@@ -70,11 +74,8 @@ func LoadCredentials() (Credentials, error) {
 	if creds.Port == 0 {
 		creds.Port = 12500
 	}
-	if creds.RouteMap == nil {
-		creds.RouteMap = make(map[string]int64)
-	}
-	if creds.ProjectRouteMap == nil {
-		creds.ProjectRouteMap = make(map[string]int64)
+	if creds.NameRouteMap == nil {
+		creds.NameRouteMap = make(map[string]NameRoute)
 	}
 	return creds, nil
 }
@@ -110,6 +111,7 @@ type AppConfig struct {
 	SherpaOnnxPath     string   `json:"sherpaOnnxPath"`
 	SenseVoiceModelPath string `json:"senseVoiceModelPath"`
 	VoiceRetainCount    int    `json:"voiceRetainCount,omitempty"`
+	CWDSource           string `json:"cwdSource,omitempty"`
 }
 
 // appConfigCache stores the last loaded config for dynamic reload support.
@@ -157,6 +159,9 @@ func loadAppConfigFromDisk() (AppConfig, error) {
 	if cfg.VoiceRetainCount == 0 {
 		cfg.VoiceRetainCount = 5
 	}
+	if cfg.CWDSource == "" {
+		cfg.CWDSource = "tmux"
+	}
 	return cfg, nil
 }
 
@@ -201,15 +206,10 @@ func MigrateChat(oldID, newID int64) error {
 		return err
 	}
 	migrated := false
-	for k, v := range creds.RouteMap {
-		if v == oldID {
-			creds.RouteMap[k] = newID
-			migrated = true
-		}
-	}
-	for k, v := range creds.ProjectRouteMap {
-		if v == oldID {
-			creds.ProjectRouteMap[k] = newID
+	for k, v := range creds.NameRouteMap {
+		if v.ChatID == oldID {
+			v.ChatID = newID
+			creds.NameRouteMap[k] = v
 			migrated = true
 		}
 	}

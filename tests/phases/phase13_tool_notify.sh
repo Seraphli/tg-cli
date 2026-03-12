@@ -47,7 +47,7 @@ if [ "$TOOL_NOTIFY_FOUND" = true ]; then
 
   # Verify the full TG message contains "🔧 Bash" header (in DEBUG full_text log)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
-  if echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" | grep "🔧 Bash" > /dev/null 2>&1; then
+  if echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" | grep "🔧.*Bash" > /dev/null 2>&1; then
     pass "ToolUse TG message contains '🔧 Bash' header"
   else
     fail "ToolUse TG message does not contain '🔧 Bash' header"

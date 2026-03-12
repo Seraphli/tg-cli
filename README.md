@@ -129,11 +129,8 @@ Interactive setup for whisper.cpp model download and language configuration.
     "defaultChatId": "123456"
   },
   "port": 12500,
-  "routeMap": {
-    "tmux-session:0.0": "group-chat-id"
-  },
-  "projectRouteMap": {
-    "/path/to/project": "group-chat-id"
+  "nameRouteMap": {
+    "agent-name": {"chatID": 123456, "topicID": 0}
   }
 }
 ```

@@ -199,9 +199,6 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Free-text API returned $FT_CODE"
     fi
 
-    wait_for_cc_idle
-    pane_log "[ask_user] AFTER free-text API call (idle)"
-
     # Wait for Stop notification
     ELAPSED=0
     FT_STOP_FOUND=false

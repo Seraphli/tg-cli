@@ -334,35 +334,49 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 	delete(s.locks, sessionID)
 }
 
-// sessionInfo holds the tmux target, working directory, and project dir for a CC session.
+// sessionInfo holds the tmux target, working directory, project dir, and agent name for a CC session.
 type sessionInfo struct {
 	tmuxTarget string
 	cwd        string
 	projectDir string
+	name       string
 }
 
 // sessionStateStore tracks active CC sessions and their associated info.
 type sessionStateStore struct {
-	mu       sync.RWMutex
-	sessions map[string]sessionInfo // session_id -> sessionInfo
+	mu           sync.RWMutex
+	sessions     map[string]sessionInfo // session_id -> sessionInfo
+	pendingNames map[string]string      // tmuxTarget -> name (preserved across remove/add)
 }
 
-var sessionState = &sessionStateStore{sessions: make(map[string]sessionInfo)}
+var sessionState = &sessionStateStore{sessions: make(map[string]sessionInfo), pendingNames: make(map[string]string)}
 
 func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath string) {
 	s.mu.Lock()
-	// Remove stale sessions using the same pane but different session IDs
+	// Remove stale sessions using the same pane but different session IDs, preserving name
+	staleName := ""
 	for id, info := range s.sessions {
 		if info.tmuxTarget == tmuxTarget && id != sessionID {
+			if info.name != "" {
+				staleName = info.name
+			}
 			delete(s.sessions, id)
 		}
 	}
+	// Consume pending name from remove() if no stale name found
+	if staleName == "" {
+		if pn, ok := s.pendingNames[tmuxTarget]; ok {
+			staleName = pn
+		}
+	}
+	delete(s.pendingNames, tmuxTarget)
 	// If session already exists with a CWD, preserve it to avoid drift from cd commands
 	if existing, ok := s.sessions[sessionID]; ok && existing.cwd != "" {
 		existing.tmuxTarget = tmuxTarget
 		if existing.projectDir == "" && transcriptPath != "" {
 			existing.projectDir = filepath.Dir(transcriptPath)
 		}
+		// Preserve name from existing entry
 		s.sessions[sessionID] = existing
 		s.mu.Unlock()
 		s.save()
@@ -376,16 +390,25 @@ func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath strin
 	if transcriptPath != "" {
 		projectDir = filepath.Dir(transcriptPath)
 	}
-	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir}
+	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir, name: staleName}
 	s.mu.Unlock()
 	s.save()
 }
 
 func (s *sessionStateStore) remove(sessionID string) {
 	s.mu.Lock()
+	if info, ok := s.sessions[sessionID]; ok && info.name != "" {
+		s.pendingNames[info.tmuxTarget] = info.name
+	}
 	delete(s.sessions, sessionID)
 	s.mu.Unlock()
 	s.save()
+}
+
+func (s *sessionStateStore) clearPendingName(tmuxTarget string) {
+	s.mu.Lock()
+	delete(s.pendingNames, tmuxTarget)
+	s.mu.Unlock()
 }
 
 // sessionEntry is the JSON-serializable form of sessionInfo.
@@ -393,6 +416,7 @@ type sessionEntry struct {
 	TmuxTarget string `json:"tmux_target"`
 	CWD        string `json:"cwd"`
 	ProjectDir string `json:"project_dir,omitempty"`
+	Name       string `json:"name,omitempty"`
 }
 
 // save persists the current session map to disk.
@@ -400,7 +424,7 @@ func (s *sessionStateStore) save() {
 	s.mu.RLock()
 	data := make(map[string]sessionEntry, len(s.sessions))
 	for sid, info := range s.sessions {
-		data[sid] = sessionEntry{TmuxTarget: info.tmuxTarget, CWD: info.cwd, ProjectDir: info.projectDir}
+		data[sid] = sessionEntry{TmuxTarget: info.tmuxTarget, CWD: info.cwd, ProjectDir: info.projectDir, Name: info.name}
 	}
 	s.mu.RUnlock()
 	b, err := json.Marshal(data)
@@ -432,7 +456,7 @@ func (s *sessionStateStore) loadFromFile() {
 	}
 	s.mu.Lock()
 	for sid, entry := range data {
-		s.sessions[sid] = sessionInfo{tmuxTarget: entry.TmuxTarget, cwd: entry.CWD, projectDir: entry.ProjectDir}
+		s.sessions[sid] = sessionInfo{tmuxTarget: entry.TmuxTarget, cwd: entry.CWD, projectDir: entry.ProjectDir, name: entry.Name}
 	}
 	s.mu.Unlock()
 	s.save()
@@ -499,6 +523,54 @@ func (s *sessionStateStore) findByCWD(cwd string) *sessionInfo {
 		}
 	}
 	return nil
+}
+
+// setName sets the agent name for the session with the given sessionID.
+func (s *sessionStateStore) setName(sessionID, name string) (bool, string) {
+	s.mu.Lock()
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		s.mu.Unlock()
+		return false, "session not found"
+	}
+	if name != "" {
+		for sid, other := range s.sessions {
+			if sid != sessionID && other.name == name {
+				s.mu.Unlock()
+				return false, fmt.Sprintf("name '%s' already used by session %s", name, sid[:8])
+			}
+		}
+	}
+	info.name = name
+	s.sessions[sessionID] = info
+	s.mu.Unlock()
+	s.save()
+	return true, ""
+}
+
+// findByName returns the sessionInfo for the first active session with matching name, or nil.
+func (s *sessionStateStore) findByName(name string) *sessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, info := range s.sessions {
+		if info.name == name {
+			cp := info
+			return &cp
+		}
+	}
+	return nil
+}
+
+// findInfoByID returns the sessionInfo for a session ID, or nil.
+func (s *sessionStateStore) findInfoByID(sessionID string) *sessionInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	cp := info
+	return &cp
 }
 
 type reactionEntry struct {

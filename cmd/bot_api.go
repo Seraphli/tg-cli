@@ -194,13 +194,16 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		var req struct {
-			TmuxTarget string `json:"tmux_target"`
-			ChatID     int64  `json:"chat_id"`
-			CWD        string `json:"cwd"`
-			Type       string `json:"type"`
+			Name    string `json:"name"`
+			ChatID  int64  `json:"chat_id"`
+			TopicID int    `json:"topic_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
 			return
 		}
 		creds, err := config.LoadCredentials()
@@ -208,20 +211,12 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if req.Type == "project" {
-			if req.CWD == "" {
-				http.Error(w, "cwd required for project binding", http.StatusBadRequest)
-				return
-			}
-			creds.ProjectRouteMap[req.CWD] = req.ChatID
-		} else {
-			creds.RouteMap[req.TmuxTarget] = req.ChatID
-		}
+		creds.NameRouteMap[req.Name] = config.NameRoute{ChatID: req.ChatID, TopicID: req.TopicID}
 		if err := config.SaveCredentials(creds); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Route bound via API: type=%s tmux=%s cwd=%s → chat=%d", req.Type, req.TmuxTarget, req.CWD, req.ChatID))
+		logger.Info(fmt.Sprintf("Route bound via API: name=%s → chat=%d topic=%d", req.Name, req.ChatID, req.TopicID))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -231,9 +226,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		var req struct {
-			TmuxTarget string `json:"tmux_target"`
-			CWD        string `json:"cwd"`
-			Type       string `json:"type"`
+			Name string `json:"name"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -244,16 +237,12 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if req.Type == "project" {
-			delete(creds.ProjectRouteMap, req.CWD)
-		} else {
-			delete(creds.RouteMap, req.TmuxTarget)
-		}
+		delete(creds.NameRouteMap, req.Name)
 		if err := config.SaveCredentials(creds); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Route unbound via API: type=%s tmux=%s cwd=%s", req.Type, req.TmuxTarget, req.CWD))
+		logger.Info(fmt.Sprintf("Route unbound via API: name=%s", req.Name))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -265,8 +254,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"routes":         creds.RouteMap,
-			"project_routes": creds.ProjectRouteMap,
+			"name_routes": creds.NameRouteMap,
 		})
 	})
 	mux.HandleFunc("/inject", func(w http.ResponseWriter, r *http.Request) {
@@ -504,6 +492,17 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			"sessions": result,
 		})
 	})
+	mux.HandleFunc("/session/name", func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		name := r.URL.Query().Get("name")
+		ok, errMsg := sessionState.setName(sessionID, name)
+		if !ok {
+			http.Error(w, errMsg, 400)
+			return
+		}
+		logger.Info(fmt.Sprintf("Session name set via API: session=%s name=%s", sessionID, name))
+		w.Write([]byte(`{"ok":true}`))
+	})
 	mux.HandleFunc("/pending/cancel", func(w http.ResponseWriter, r *http.Request) {
 		uuid := r.URL.Query().Get("uuid")
 		if uuid == "" {
@@ -551,7 +550,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file too large: %d bytes (max 50MB for Telegram Bot API)", info.Size())})
 			return
 		}
-		chat, _ := resolveChat("", req.CWD)
+		chat, _, _ := resolveChat("", req.CWD)
 		doc := &tele.Document{
 			File:     tele.FromDisk(req.FilePath),
 			FileName: filepath.Base(req.FilePath),

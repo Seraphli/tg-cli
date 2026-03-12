@@ -8,24 +8,31 @@ echo "--- Group routing test ---"
 
 ensure_infrastructure
 
-# Extract tmux_target from SessionStart log
-TMUX_TARGET=""
-SESSION_START_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -m1 "Notification sent.*SessionStart" || true)
-if [ -n "$SESSION_START_LINE" ]; then
-  # Extract tmux target like "session:window.pane" from the log body
-  TMUX_TARGET=$(echo "$SESSION_START_LINE" | grep -oP 'tmux=\K[^[:space:]]+' || true)
-fi
+# Use a fixed agent name for testing
+AGENT_NAME="e2e-test"
 
-if [ -n "$TMUX_TARGET" ]; then
-  pass "Extracted tmux_target from SessionStart log: $TMUX_TARGET"
+# Extract session ID from bot log (Session tracked log)
+SESSION_ID=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -oP 'Session tracked: \K[^ ]+' | head -1 || true)
+if [ -n "$SESSION_ID" ]; then
+  pass "Extracted session ID: $SESSION_ID"
 else
-  fail "Could not extract tmux_target from SessionStart log"
+  fail "Could not extract session ID from log"
   exit 1
 fi
 
+# Set agent name via API before binding route
+echo "  Setting agent name: session=$SESSION_ID name=$AGENT_NAME"
+NAME_RESP=$(curl -s -w "\n%{http_code}" "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=$AGENT_NAME")
+NAME_CODE=$(echo "$NAME_RESP" | tail -1)
+if [ "$NAME_CODE" = "200" ]; then
+  pass "Agent name set to '$AGENT_NAME'"
+else
+  fail "Failed to set agent name (HTTP $NAME_CODE)"
+fi
+
 # Call POST /route/bind
-echo "  Binding route: tmux=$TMUX_TARGET → chat=$DEFAULT_CHAT_ID"
-BIND_PAYLOAD=$(jq -n --arg t "$TMUX_TARGET" --argjson c "$DEFAULT_CHAT_ID" '{tmux_target: $t, chat_id: $c}')
+echo "  Binding route: name=$AGENT_NAME → chat=$DEFAULT_CHAT_ID"
+BIND_PAYLOAD=$(jq -n --arg n "$AGENT_NAME" --argjson c "$DEFAULT_CHAT_ID" '{name: $n, chat_id: $c, topic_id: 0}')
 BIND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "$BIND_PAYLOAD" \
@@ -39,7 +46,7 @@ fi
 
 # Call GET /route/list and verify the binding
 LIST_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/route/list")
-if echo "$LIST_RESP" | jq -e ".routes[\"$TMUX_TARGET\"] == ($DEFAULT_CHAT_ID | tonumber)" > /dev/null 2>&1; then
+if echo "$LIST_RESP" | jq -e ".name_routes[\"$AGENT_NAME\"].chatId == ($DEFAULT_CHAT_ID | tonumber)" > /dev/null 2>&1; then
   pass "/route/list contains bound route"
 else
   fail "/route/list missing bound route"
@@ -74,16 +81,16 @@ else
 fi
 
 # Verify "Route resolved" log line exists
-if tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep "Route resolved: tmux=" > /dev/null 2>&1; then
-  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -m1 "Route resolved: tmux=" || true)
+if tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep "Route resolved: name=" > /dev/null 2>&1; then
+  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -m1 "Route resolved: name=" || true)
   pass "Route resolved log found: $ROUTE_LOG"
 else
   fail "Route resolved log not found"
 fi
 
 # Call POST /route/unbind
-echo "  Unbinding route: tmux=$TMUX_TARGET"
-UNBIND_PAYLOAD=$(jq -n --arg t "$TMUX_TARGET" '{tmux_target: $t}')
+echo "  Unbinding route: name=$AGENT_NAME"
+UNBIND_PAYLOAD=$(jq -n --arg n "$AGENT_NAME" '{name: $n}')
 UNBIND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "$UNBIND_PAYLOAD" \
@@ -97,7 +104,7 @@ fi
 
 # Verify routes is now empty
 LIST_RESP_AFTER=$(curl -s "http://127.0.0.1:$TEST_PORT/route/list")
-ROUTE_COUNT=$(echo "$LIST_RESP_AFTER" | jq '.routes | length')
+ROUTE_COUNT=$(echo "$LIST_RESP_AFTER" | jq '.name_routes | length')
 if [ "$ROUTE_COUNT" = "0" ]; then
   pass "/route/list is empty after unbind"
 else
@@ -107,7 +114,7 @@ fi
 # Inject another prompt (should fall back to default chat)
 LOG_BEFORE_DEFAULT=$(wc -l < "$LOG_FILE")
 # Count existing "Route resolved" lines before this test
-ROUTE_COUNT_BEFORE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: tmux=" || echo 0)
+ROUTE_COUNT_BEFORE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: name=" || echo 0)
 
 pane_log "[group_routing] BEFORE 'say test default' prompt"
 inject_prompt "say test default"
@@ -136,7 +143,7 @@ else
 fi
 
 # Verify NO NEW "Route resolved" line appeared (should fall back to default)
-ROUTE_COUNT_AFTER=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: tmux=" || echo 0)
+ROUTE_COUNT_AFTER=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: name=" || echo 0)
 if [ "$ROUTE_COUNT_AFTER" = "$ROUTE_COUNT_BEFORE" ]; then
   pass "No new route resolution after unbind (fell back to default)"
 else

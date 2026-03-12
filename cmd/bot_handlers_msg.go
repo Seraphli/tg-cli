@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -19,64 +18,44 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// resolveGroupTarget finds the unique bound tmux target for a group chat.
-// Checks both direct tmux routes and project routes with active sessions.
+// resolveGroupTarget finds the unique bound tmux target for a group/topic chat.
+// Uses NameRouteMap: finds name routes matching (chatID, threadID), then finds active session by name.
 func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
 	creds, _ := config.LoadCredentials()
 	var targets []string
-	// Direct tmux routes — validate pane still exists
-	for t, cid := range creds.RouteMap {
-		if cid == chatID {
-			target, err := injector.ParseTarget(t)
-			if err != nil || !injector.SessionExists(target) {
-				continue
-			}
-			targets = append(targets, t)
+	for key, route := range creds.NameRouteMap {
+		if route.ChatID != chatID {
+			continue
 		}
-	}
-	// Project routes: find active sessions with matching CWD
-	for cwd, cid := range creds.ProjectRouteMap {
-		if cid == chatID {
-			addedFromState := false
-			if info := sessionState.findByCWD(cwd); info != nil {
-				target, err := injector.ParseTarget(info.tmuxTarget)
-				if err == nil && injector.SessionExists(target) {
-					normalized := notify.FormatPaneID(info.tmuxTarget)
-					found := false
-					for _, t := range targets {
-						if notify.FormatPaneID(t) == normalized {
-							found = true
-							break
-						}
-					}
-					if !found {
-						targets = append(targets, info.tmuxTarget)
-					}
-					addedFromState = true
-				}
+		// Try as name first
+		var tmuxTarget string
+		info := sessionState.findByName(key)
+		if info != nil {
+			tmuxTarget = info.tmuxTarget
+		} else {
+			// Try as session ID
+			sessionInfo := sessionState.findInfoByID(key)
+			if sessionInfo != nil {
+				tmuxTarget = sessionInfo.tmuxTarget
 			}
-			// Fall through to tmux scan if sessionState had no live pane
-			if !addedFromState {
-				out, scanErr := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}").Output()
-				if scanErr == nil {
-					for _, pl := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-						parts := strings.SplitN(pl, "\t", 2)
-						if len(parts) >= 2 && parts[1] == cwd {
-							normalized := notify.FormatPaneID(parts[0])
-							found := false
-							for _, t := range targets {
-								if notify.FormatPaneID(t) == normalized {
-									found = true
-									break
-								}
-							}
-							if !found {
-								targets = append(targets, parts[0])
-							}
-						}
-					}
-				}
+		}
+		if tmuxTarget == "" {
+			continue
+		}
+		target, err := injector.ParseTarget(tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			continue
+		}
+		normalized := notify.FormatPaneID(tmuxTarget)
+		found := false
+		for _, t := range targets {
+			if notify.FormatPaneID(t) == normalized {
+				found = true
+				break
 			}
+		}
+		if !found {
+			targets = append(targets, tmuxTarget)
 		}
 	}
 	if len(targets) == 0 {

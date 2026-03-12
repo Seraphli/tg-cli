@@ -16,24 +16,21 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-var bindPending sync.Map // msgID (int) -> bindPendingInfo
+// unbindMenuItems maps msgID to list of name-route keys for /bot_unbind inline menu
+var unbindMenuItems sync.Map // msgID (int) -> []string (name keys)
 
-type bindPendingInfo struct {
-	tmuxTarget string
-	cwd        string
-	chatID     int64
+// bindMenuItems maps msgID to bind menu context for /bot_bind inline menu
+var bindMenuItems sync.Map // msgID (int) -> bindMenuContext
+
+type bindMenuItem struct {
+	key   string // name or sessionID
+	label string
 }
 
-var unbindPending sync.Map // msgID (int) -> unbindPendingInfo
-var unbindMenuItems sync.Map // msgID (int) -> []unbindItem
-
-type unbindPendingInfo struct {
-	cwd string
-}
-
-type unbindItem struct {
-	kind string // "tmux", "project", "session"
-	key  string
+type bindMenuContext struct {
+	items   []bindMenuItem
+	chatID  int64
+	topicID int
 }
 
 // registerTGHandlers registers all Telegram bot handlers
@@ -309,226 +306,332 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 		creds, _ := config.LoadCredentials()
 		sessions := sessionState.all()
-		if len(creds.RouteMap) == 0 && len(creds.ProjectRouteMap) == 0 && len(sessions) == 0 {
-			return c.Send("No active route bindings.")
-		}
 		var sections []string
-		// Section 1: Tmux routes
-		if len(creds.RouteMap) > 0 {
+		// Section 1: Agent routes (NameRouteMap)
+		if len(creds.NameRouteMap) > 0 {
 			var lines []string
-			lines = append(lines, "📟 Tmux routes:")
-			for tmux, cid := range creds.RouteMap {
-				chatName := fmt.Sprintf("%d", cid)
-				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
+			lines = append(lines, "📋 Agent routes:")
+			for name, route := range creds.NameRouteMap {
+				chatName := fmt.Sprintf("%d", route.ChatID)
+				topicStr := ""
+				if ch, err := bot.ChatByID(route.ChatID); err == nil {
+					if ch.Title != "" {
+						chatName = fmt.Sprintf("%s (%d)", ch.Title, route.ChatID)
+					}
+					if ch.Type == tele.ChatSuperGroup {
+						if route.TopicID == 0 {
+							topicStr = ", topic=General"
+						} else {
+							topicStr = fmt.Sprintf(", topic=#%d", route.TopicID)
+						}
+					}
 				}
-				lines = append(lines, fmt.Sprintf("  %s → %s", getPaneLabel(tmux), chatName))
+				paneID := ""
+				if info := sessionState.findByName(name); info != nil {
+					paneID = " (" + notify.FormatPaneID(info.tmuxTarget) + ")"
+				}
+				lines = append(lines, fmt.Sprintf("  %s%s → %s%s", name, paneID, chatName, topicStr))
 			}
 			sections = append(sections, strings.Join(lines, "\n"))
 		}
-		// Section 2: Project routes
-		if len(creds.ProjectRouteMap) > 0 {
-			var lines []string
-			lines = append(lines, "📂 Project routes:")
-			for cwd, cid := range creds.ProjectRouteMap {
-				chatName := fmt.Sprintf("%d", cid)
-				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
-				}
-				lines = append(lines, fmt.Sprintf("  %s → %s", notify.CompressPath(cwd), chatName))
-			}
-			sections = append(sections, strings.Join(lines, "\n"))
-		}
-		// Section 3: Active sessions
-		var sessLines []string
+		// Section 2: Unnamed sessions
+		var unnamedLines []string
 		for _, info := range sessions {
-			chatName := ""
-			if cid, ok := creds.ProjectRouteMap[info.cwd]; ok {
-				chatName = fmt.Sprintf("%d", cid)
-				if chat, err := bot.ChatByID(cid); err == nil && chat.Title != "" {
-					chatName = fmt.Sprintf("%s (%d)", chat.Title, cid)
-				}
+			if info.name != "" {
+				continue
 			}
 			label := notify.FormatPaneID(info.tmuxTarget)
-			line := fmt.Sprintf("  %s → %s", label, notify.CompressPath(info.cwd))
-			if chatName != "" {
-				line += fmt.Sprintf(" → %s", chatName)
-			}
-			sessLines = append(sessLines, line)
+			unnamedLines = append(unnamedLines, fmt.Sprintf("  %s → %s", label, notify.CompressPath(info.cwd)))
 		}
-		if len(sessLines) > 0 {
-			sections = append(sections, "📟 Active sessions:\n"+strings.Join(sessLines, "\n"))
+		if len(unnamedLines) > 0 {
+			sections = append(sections, "📟 Unnamed sessions:\n"+strings.Join(unnamedLines, "\n"))
+		}
+		if len(sections) == 0 {
+			return c.Send("No active route bindings or sessions.")
 		}
 		return c.Send("🗺 Route bindings:\n" + strings.Join(sections, "\n\n"))
 	})
 
 	bot.Handle("/bot_bind", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
 			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
-		if c.Message().ReplyTo == nil {
-			return c.Reply("❌ Reply to a notification message with /bot_bind to bind that session to this chat.")
-		}
-		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-		if err != nil {
-			return c.Reply("❌ No tmux session info (📟) found in the replied message.")
-		}
-		tmuxStr := injector.FormatTarget(*target)
-		if tmuxStr == "" {
-			return c.Reply("❌ Empty tmux target, cannot bind.")
-		}
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-		}
-		info := sessionState.findInfoByTarget(target.PaneID)
-		if info != nil && info.cwd != "" {
-			// Show choice buttons
-			sel := &tele.ReplyMarkup{}
-			btnTmux := sel.Data("📟 Tmux", "bind", "tmux")
-			btnProject := sel.Data("📂 Project", "bind", "project")
-			sel.Inline(sel.Row(btnTmux, btnProject))
-			sent, err := retrySend(bot, c.Chat(), fmt.Sprintf("Choose binding type:\n📟 %s\n📂 %s", tmuxStr, notify.CompressPath(info.cwd)), sel)
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
-			}
-			bindPending.Store(sent.ID, bindPendingInfo{tmuxTarget: tmuxStr, cwd: info.cwd, chatID: c.Chat().ID})
-			return nil
-		}
-		// No CWD available — bind tmux directly
-		creds.RouteMap[tmuxStr] = c.Chat().ID
-		if err := config.SaveCredentials(creds); err != nil {
-			return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
-		}
-		logger.Info(fmt.Sprintf("Route bound: tmux=%s → chat=%d by user=%s", tmuxStr, c.Chat().ID, userID))
-		return c.Reply(fmt.Sprintf("✅ Bound tmux session to this chat.\n📟 %s", tmuxStr))
-	})
+		chatID := c.Chat().ID
+		topicID := c.Message().ThreadID
 
-	bot.Handle("/bot_unbind", func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Reply("❌ Not paired.")
-		}
-		if c.Message().ReplyTo == nil {
+		// Mode 1: /bot_bind <name> — bind by name
+		name := strings.TrimSpace(c.Message().Payload)
+		if name != "" {
 			creds, err := config.LoadCredentials()
 			if err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 			}
-			sessions := sessionState.all()
-			if len(creds.RouteMap) == 0 && len(creds.ProjectRouteMap) == 0 && len(sessions) == 0 {
-				return c.Reply("No active route bindings to unbind.")
+			creds.NameRouteMap[name] = config.NameRoute{ChatID: chatID, TopicID: topicID}
+			if err := config.SaveCredentials(creds); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 			}
-			// Build grouped list: RouteMap -> ProjectRouteMap -> sessions
-			sel := &tele.ReplyMarkup{}
-			var rows []tele.Row
-			var lines []string
-			var items []unbindItem
-			idx := 1
-			// Tmux routes group
-			var tmuxBtns []tele.Btn
-			for tmux := range creds.RouteMap {
-				label := getPaneLabel(tmux)
-				lines = append(lines, fmt.Sprintf("  %d. %s", idx, label))
-				items = append(items, unbindItem{"tmux", tmux})
-				tmuxBtns = append(tmuxBtns, sel.Data(fmt.Sprintf("📟 %d", idx), "unbind_select", fmt.Sprintf("%d", idx)))
-				idx++
+			topicStr := ""
+			if topicID != 0 {
+				topicStr = fmt.Sprintf(", topic=%d", topicID)
 			}
-			if len(tmuxBtns) > 0 {
-				lines = append([]string{"📟 Tmux routes:"}, lines...)
-				for i := 0; i < len(tmuxBtns); i += 2 {
-					if i+1 < len(tmuxBtns) {
-						rows = append(rows, sel.Row(tmuxBtns[i], tmuxBtns[i+1]))
-					} else {
-						rows = append(rows, sel.Row(tmuxBtns[i]))
-					}
-				}
-			}
-			// Project routes group
-			var projLines []string
-			var projBtns []tele.Btn
-			for cwd := range creds.ProjectRouteMap {
-				projLines = append(projLines, fmt.Sprintf("  %d. %s", idx, notify.CompressPath(cwd)))
-				items = append(items, unbindItem{"project", cwd})
-				projBtns = append(projBtns, sel.Data(fmt.Sprintf("📂 %d", idx), "unbind_select", fmt.Sprintf("%d", idx)))
-				idx++
-			}
-			if len(projBtns) > 0 {
-				lines = append(lines, "", "📂 Project routes:")
-				lines = append(lines, projLines...)
-				for i := 0; i < len(projBtns); i += 2 {
-					if i+1 < len(projBtns) {
-						rows = append(rows, sel.Row(projBtns[i], projBtns[i+1]))
-					} else {
-						rows = append(rows, sel.Row(projBtns[i]))
-					}
-				}
-			}
-			// Active sessions group
-			var sesLines []string
-			var sesBtns []tele.Btn
-			for sid, info := range sessions {
-				label := notify.FormatPaneID(info.tmuxTarget)
-				sesLines = append(sesLines, fmt.Sprintf("  %d. %s → %s", idx, label, notify.CompressPath(info.cwd)))
-				items = append(items, unbindItem{"session", sid})
-				sesBtns = append(sesBtns, sel.Data(fmt.Sprintf("📟 %d", idx), "unbind_select", fmt.Sprintf("%d", idx)))
-				idx++
-			}
-			if len(sesBtns) > 0 {
-				lines = append(lines, "", "📟 Active sessions:")
-				lines = append(lines, sesLines...)
-				for i := 0; i < len(sesBtns); i += 2 {
-					if i+1 < len(sesBtns) {
-						rows = append(rows, sel.Row(sesBtns[i], sesBtns[i+1]))
-					} else {
-						rows = append(rows, sel.Row(sesBtns[i]))
-					}
-				}
-			}
-			sel.Inline(rows...)
-			sent, err := bot.Reply(c.Message(), "Select a route to unbind:\n"+strings.Join(lines, "\n"), sel)
-			if err == nil {
-				unbindMenuItems.Store(sent.ID, items)
-			}
-			return err
+			logger.Info(fmt.Sprintf("Route bound: name=%s → chat=%d topic=%d by user=%s", name, chatID, topicID, userID))
+			return c.Reply(fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", name, chatID, topicStr))
 		}
-		target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-		if err != nil {
-			return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+
+		// Mode 2: reply to notification — bind session from replied message
+		if c.Message().ReplyTo != nil {
+			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+			}
+			tmuxStr := injector.FormatTarget(*target)
+			sid, found := sessionState.findByTarget(tmuxStr)
+			if !found {
+				return c.Reply("❌ Session not found for that pane.")
+			}
+			info := sessionState.findInfoByTarget(tmuxStr)
+			// Use name if available, otherwise session ID
+			key := sid
+			keyLabel := fmt.Sprintf("session:%s", sid[:8])
+			if info != nil && info.name != "" {
+				key = info.name
+				keyLabel = info.name
+			}
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+			}
+			creds.NameRouteMap[key] = config.NameRoute{ChatID: chatID, TopicID: topicID}
+			if err := config.SaveCredentials(creds); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
+			}
+			topicStr := ""
+			if topicID != 0 {
+				topicStr = fmt.Sprintf(", topic=%d", topicID)
+			}
+			logger.Info(fmt.Sprintf("Route bound: key=%s → chat=%d topic=%d by user=%s", key, chatID, topicID, userID))
+			return c.Reply(fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", keyLabel, chatID, topicStr))
 		}
-		tmuxStr := injector.FormatTarget(*target)
+
+		// Mode 3: no args, no reply — show session list buttons
+		sessions := sessionState.all()
+		if len(sessions) == 0 {
+			return c.Reply("No active sessions to bind.")
+		}
+		sel := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var lines []string
+		var items []bindMenuItem
+		idx := 1
+		for sid, info := range sessions {
+			key := sid
+			label := fmt.Sprintf("session:%s", sid[:8])
+			if info.name != "" {
+				key = info.name
+				label = info.name
+			}
+			cwdStr := ""
+			if info.cwd != "" {
+				cwdStr = " " + notify.CompressPath(info.cwd)
+			}
+			lines = append(lines, fmt.Sprintf("  %d. %s%s", idx, label, cwdStr))
+			items = append(items, bindMenuItem{key: key, label: label})
+			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🔗 %d: %s", idx, label), "bind_select", fmt.Sprintf("%d", idx))))
+			idx++
+		}
+		sel.Inline(rows...)
+		sent, err := bot.Reply(c.Message(), fmt.Sprintf("Select a session to bind to this chat:\n%s", strings.Join(lines, "\n")), sel)
+		if err == nil {
+			bindMenuItems.Store(sent.ID, bindMenuContext{items: items, chatID: chatID, topicID: topicID})
+		}
+		return err
+	})
+
+	bot.Handle("/bot_unbind", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
+			return c.Reply("❌ Not paired.")
+		}
+		// Mode 1: reply to notification — unbind session from replied message
+		if c.Message().ReplyTo != nil {
+			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+			}
+			tmuxStr := injector.FormatTarget(*target)
+			sid, found := sessionState.findByTarget(tmuxStr)
+			if !found {
+				return c.Reply("❌ Session not found for that pane.")
+			}
+			info := sessionState.findInfoByTarget(tmuxStr)
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+			}
+			// Try unbind by name first, then by session ID
+			var unboundKey string
+			if info != nil && info.name != "" {
+				if _, ok := creds.NameRouteMap[info.name]; ok {
+					delete(creds.NameRouteMap, info.name)
+					unboundKey = info.name
+				}
+			}
+			if unboundKey == "" {
+				if _, ok := creds.NameRouteMap[sid]; ok {
+					delete(creds.NameRouteMap, sid)
+					unboundKey = fmt.Sprintf("session:%s", sid[:8])
+				}
+			}
+			if unboundKey == "" {
+				return c.Reply("❌ No route binding found for this session.")
+			}
+			if err := config.SaveCredentials(creds); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+			}
+			logger.Info(fmt.Sprintf("Route unbound (reply): key=%s by user=%s", unboundKey, userID))
+			return c.Reply(fmt.Sprintf("✅ Unbound: %s", unboundKey))
+		}
+		// With arg: direct delete
+		name := strings.TrimSpace(c.Message().Payload)
+		if name != "" {
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
+			}
+			if _, ok := creds.NameRouteMap[name]; !ok {
+				return c.Reply(fmt.Sprintf("❌ No route binding found for name: %s", name))
+			}
+			delete(creds.NameRouteMap, name)
+			if err := config.SaveCredentials(creds); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+			}
+			logger.Info(fmt.Sprintf("Route unbound (name): name=%s by user=%s", name, userID))
+			return c.Reply(fmt.Sprintf("✅ Unbound agent name: %s", name))
+		}
+		// No arg: show inline buttons listing NameRouteMap entries
 		creds, err := config.LoadCredentials()
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 		}
-		// Check tmux route first — direct unbind
-		if _, ok := creds.RouteMap[tmuxStr]; ok {
-			delete(creds.RouteMap, tmuxStr)
-			if err := config.SaveCredentials(creds); err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
-			}
-			logger.Info(fmt.Sprintf("Route unbound (tmux): tmux=%s by user=%s", tmuxStr, userID))
-			return c.Reply(fmt.Sprintf("✅ Unbound tmux session.\n📟 %s", tmuxStr))
+		if len(creds.NameRouteMap) == 0 {
+			return c.Reply("No agent name route bindings to unbind.")
 		}
-		// Check project route — needs confirmation
-		if info := sessionState.findInfoByTarget(target.PaneID); info != nil && info.cwd != "" {
-			if _, ok := creds.ProjectRouteMap[info.cwd]; ok {
-				sel := &tele.ReplyMarkup{}
-				btnYes := sel.Data("✅ Yes, unbind", "unbind_confirm", "yes")
-				btnNo := sel.Data("❌ Cancel", "unbind_confirm", "no")
-				sel.Inline(sel.Row(btnYes, btnNo))
-				sent, err := retrySend(bot, c.Chat(), fmt.Sprintf("Unbind project route?\n📂 %s\n⚠️ This affects all sessions in this project.", notify.CompressPath(info.cwd)), sel)
-				if err != nil {
-					return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
-				}
-				unbindPending.Store(sent.ID, unbindPendingInfo{cwd: info.cwd})
-				return nil
+		sel := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var lines []string
+		var keys []string
+		idx := 1
+		for n, route := range creds.NameRouteMap {
+			topicStr := ""
+			if route.TopicID != 0 {
+				topicStr = fmt.Sprintf(" topic=%d", route.TopicID)
 			}
+			lines = append(lines, fmt.Sprintf("  %d. %s → %d%s", idx, n, route.ChatID, topicStr))
+			keys = append(keys, n)
+			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🗑 %d: %s", idx, n), "unbind_select", fmt.Sprintf("%d", idx))))
+			idx++
 		}
-		return c.Reply("❌ No binding found for this session.")
+		sel.Inline(rows...)
+		sent, err := bot.Reply(c.Message(), "Select a route to unbind:\n"+strings.Join(lines, "\n"), sel)
+		if err == nil {
+			unbindMenuItems.Store(sent.ID, keys)
+		}
+		return err
 	})
+	bot.Handle("/bot_name", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
+			return c.Reply("❌ Not paired.")
+		}
+		name := strings.TrimSpace(c.Message().Payload)
+		if name == "" {
+			return c.Reply("❌ Usage: /bot_name <name>")
+		}
+		// Resolve session: from replied message or single active session
+		var sessionID string
+		if c.Message().ReplyTo != nil {
+			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
+			if err != nil {
+				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
+			}
+			sid, found := sessionState.findByTarget(injector.FormatTarget(*target))
+			if !found {
+				return c.Reply("❌ Session not found for that pane.")
+			}
+			sessionID = sid
+		} else {
+			sessions := sessionState.all()
+			if len(sessions) == 0 {
+				return c.Reply("❌ No active sessions found.")
+			}
+			if len(sessions) > 1 {
+				return c.Reply("❌ Multiple active sessions. Reply to a notification to target a specific session.")
+			}
+			for sid := range sessions {
+				sessionID = sid
+			}
+		}
+		ok, errMsg := sessionState.setName(sessionID, name)
+		if !ok {
+			return c.Reply(fmt.Sprintf("❌ Failed to set name: %s", errMsg))
+		}
+		logger.Info(fmt.Sprintf("Session name set: session=%s name=%s by user=%s", sessionID, name, userID))
+		return c.Reply(fmt.Sprintf("✅ Session named: %s", name))
+	})
+
+	bot.Handle("/bot_names", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
+			return c.Reply("❌ Not paired.")
+		}
+		sessions := sessionState.all()
+		if len(sessions) == 0 {
+			return c.Reply("No active sessions.")
+		}
+		sel := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var lines []string
+		for sid, info := range sessions {
+			label := notify.FormatPaneID(info.tmuxTarget)
+			nameTag := ""
+			if info.name != "" {
+				nameTag = " [" + info.name + "]"
+			}
+			lines = append(lines, fmt.Sprintf("  %s%s → %s", label, nameTag, notify.CompressPath(info.cwd)))
+			btnLabel := label + nameTag
+			rows = append(rows, sel.Row(sel.Data(btnLabel, "names", sid)))
+		}
+		sel.Inline(rows...)
+		_, err := retrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel)
+		return err
+	})
+
+	bot.Handle("/bot_cwd", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
+			return c.Reply("❌ Not paired.")
+		}
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Reply("❌ Failed to load config")
+		}
+		current := cfg.CWDSource
+		if current == "" {
+			current = "tmux"
+		}
+		sel := &tele.ReplyMarkup{}
+		btnTmux := sel.Data("📟 tmux CWD (current)", "cwd", "tmux")
+		btnPayload := sel.Data("📦 payload CWD", "cwd", "payload")
+		sel.Inline(sel.Row(btnTmux, btnPayload))
+		return c.Reply(fmt.Sprintf("🔧 CWD source: %s\n\nSelect source for working directory:", current), sel)
+	})
+
 	bot.Handle("/bot_verbose", func(c tele.Context) error {
 		cfg, err := config.LoadAppConfig()
 		if err != nil {

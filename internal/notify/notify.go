@@ -14,6 +14,7 @@ type NotificationData struct {
 	Body              string
 	TmuxTarget        string
 	ToolName          string
+	AgentName         string
 	Page              int // 0 = no pagination
 	TotalPages        int
 	ContextUsedPct    int // -1 means no data
@@ -28,6 +29,7 @@ type PermissionData struct {
 	ToolName       string
 	ToolInput      map[string]interface{}
 	SuggestionDesc string
+	AgentName      string
 }
 
 type QuestionOption struct {
@@ -50,6 +52,7 @@ type QuestionData struct {
 	Question          string
 	Options           []QuestionOption
 	Questions         []QuestionEntry
+	AgentName         string
 	ContextUsedPct    int
 	ContextUsedTokens int
 	ContextWindowSize int
@@ -119,13 +122,18 @@ func BuildNotificationText(data NotificationData) string {
 		emoji = "✅"
 		status = "Task Completed"
 	}
-	statusLine := emoji + " " + status
+	var statusLine string
+	if data.AgentName != "" {
+		statusLine = emoji + " [" + data.AgentName + "] " + status
+	} else {
+		statusLine = emoji + " " + status
+	}
 	if data.Page > 0 {
 		statusLine += fmt.Sprintf(" (%d/%d)", data.Page, data.TotalPages)
 	}
 	lines := []string{
 		statusLine,
-		"Project: " + projectDisplay(data.Project, data.CWD),
+		"📂 " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
@@ -149,9 +157,13 @@ func HeaderLen(data NotificationData) int {
 }
 
 func BuildPermissionText(data PermissionData) string {
+	firstLine := "🔐 Permission Request"
+	if data.AgentName != "" {
+		firstLine = "🔐 [" + data.AgentName + "] Permission Request"
+	}
 	lines := []string{
-		"🔐 Permission Request",
-		"Project: " + projectDisplay(data.Project, data.CWD),
+		firstLine,
+		"📂 " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
@@ -294,9 +306,13 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 }
 
 func BuildQuestionText(data QuestionData) string {
+	firstLine := "❓ Question"
+	if data.AgentName != "" {
+		firstLine = "❓ [" + data.AgentName + "] Question"
+	}
 	lines := []string{
-		"❓ Question",
-		"Project: " + projectDisplay(data.Project, data.CWD),
+		firstLine,
+		"📂 " + projectDisplay(data.Project, data.CWD),
 	}
 	if data.TmuxTarget != "" {
 		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))

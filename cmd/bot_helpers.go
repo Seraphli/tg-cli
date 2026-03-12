@@ -217,13 +217,14 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	return pct, int(used), int(effectiveLimit), true
 }
 
-func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName string) {
+func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) {
 	nd := notify.NotificationData{
 		Event:          event,
 		Project:        project,
 		CWD:            cwd,
 		TmuxTarget:     tmuxTarget,
 		ToolName:       toolName,
+		AgentName:      agentName,
 		ContextUsedPct: -1,
 	}
 	if usedPct, usedTokens, windowSize, ok := readContextUsage(sessionID); ok {
@@ -234,10 +235,14 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 	headerLen := notify.HeaderLen(nd)
 	maxBodyRunes := 4000 - headerLen - 100
 	chunks := splitBody(body, maxBodyRunes)
+	var sendOpts []interface{}
+	if topicID > 0 {
+		sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+	}
 	if len(chunks) <= 1 {
 		nd.Body = body
 		text := notify.BuildNotificationText(nd)
-		_, err := retrySend(b, chat, text)
+		_, err := retrySend(b, chat, text, sendOpts...)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
@@ -250,7 +255,8 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		nd.TotalPages = len(chunks)
 		text := notify.BuildNotificationText(nd)
 		kb := buildPageKeyboard(1, len(chunks))
-		sent, err := retrySend(b, chat, text, kb)
+		opts := append([]interface{}{kb}, sendOpts...)
+		sent, err := retrySend(b, chat, text, opts...)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
 		} else {
@@ -920,28 +926,32 @@ func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
 	return &p, body, nil
 }
 
-func resolveChat(tmuxTarget, cwd string) (*tele.Chat, string) {
+func resolveChat(tmuxTarget, cwd string) (*tele.Chat, string, int) {
 	creds, err := config.LoadCredentials()
-	if err == nil {
-		if cwd != "" && len(creds.ProjectRouteMap) > 0 {
-			if chatID, ok := creds.ProjectRouteMap[cwd]; ok {
-				logger.Info(fmt.Sprintf("Route resolved: cwd=%s → chat=%d (project route)", cwd, chatID))
-				return &tele.Chat{ID: chatID}, strconv.FormatInt(chatID, 10)
+	if err == nil && tmuxTarget != "" {
+		sid, found := sessionState.findByTarget(tmuxTarget)
+		if found {
+			info := sessionState.findInfoByTarget(tmuxTarget)
+			// Priority 1: name route
+			if info != nil && info.name != "" {
+				if route, ok := creds.NameRouteMap[info.name]; ok {
+					logger.Info(fmt.Sprintf("Route resolved: name=%s → chat=%d topic=%d (name route)", info.name, route.ChatID, route.TopicID))
+					return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
+				}
 			}
-		}
-		if tmuxTarget != "" && len(creds.RouteMap) > 0 {
-			if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
-				logger.Info(fmt.Sprintf("Route resolved: tmux=%s → chat=%d (tmux route)", tmuxTarget, chatID))
-				return &tele.Chat{ID: chatID}, strconv.FormatInt(chatID, 10)
+			// Priority 2: session ID route
+			if route, ok := creds.NameRouteMap[sid]; ok {
+				logger.Info(fmt.Sprintf("Route resolved: sessionID=%s → chat=%d topic=%d (session route)", sid[:8], route.ChatID, route.TopicID))
+				return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
 			}
 		}
 	}
-	chatID := pairing.GetDefaultChatID()
-	if chatID == "" {
-		return nil, ""
+	chatIDStr := pairing.GetDefaultChatID()
+	if chatIDStr == "" {
+		return nil, "", 0
 	}
-	chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-	return &tele.Chat{ID: chatIDInt}, chatID
+	chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
+	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
 }
 
 // checkSessionAlive checks if a tmux session still exists; cleans up dead sessions.
@@ -965,19 +975,10 @@ func cleanDeadSession(tmuxTarget string, bot *tele.Bot) {
 	}
 	if sid, found := sessionState.findByTarget(tmuxTarget); found {
 		sessionState.remove(sid)
+		sessionState.clearPendingName(tmuxTarget)
 		pages.cleanupSession(sid)
 		sessionCounts.cleanup(sid)
 		cleanPendingFilesBySession(sid)
-	}
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return
-	}
-	if chatID, ok := creds.RouteMap[tmuxTarget]; ok {
-		delete(creds.RouteMap, tmuxTarget)
-		config.SaveCredentials(creds)
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
-		logger.Info(fmt.Sprintf("Auto-unbound dead session: tmux=%s chat=%d", tmuxTarget, chatID))
 	}
 }
 
@@ -1767,38 +1768,9 @@ func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 	return nil
 }
 
-// cleanStaleRoutes removes RouteMap entries whose tmux session no longer exists
-// and notifies the associated chat.
+// cleanStaleRoutes validates active sessions on startup.
+// With NameRouteMap, routes are not auto-unbound since they're tied to names, not tmux targets.
 func cleanStaleRoutes(bot *tele.Bot) {
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		return
-	}
-	var stale []string
-	for tmuxTarget := range creds.RouteMap {
-		target, err := injector.ParseTarget(tmuxTarget)
-		if err != nil {
-			stale = append(stale, tmuxTarget)
-			continue
-		}
-		if !injector.SessionExists(target) {
-			stale = append(stale, tmuxTarget)
-		}
-	}
-	if len(stale) == 0 {
-		return
-	}
-	for _, tmuxTarget := range stale {
-		paneID := tmuxTarget
-		if idx := strings.Index(paneID, "@"); idx != -1 {
-			paneID = paneID[:idx]
-		}
-		chatID := creds.RouteMap[tmuxTarget]
-		delete(creds.RouteMap, tmuxTarget)
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("⚠️ Session disconnected\n📟 %s\nTmux route auto-unbound.", paneID))
-		logger.Info(fmt.Sprintf("Startup cleanup: removed stale route tmux=%s chat=%d", tmuxTarget, chatID))
-	}
-	config.SaveCredentials(creds)
 }
 
 // getPaneLabel returns a human-readable label (session:window.pane) for the given tmux target.
