@@ -219,7 +219,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 				toolNotifs.markResolved(msgID)
 				logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 				editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel), tele.ModeHTML)
 			}
 			sendFeedback(tmuxStr)
 			return nil
@@ -324,7 +324,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 			toolNotifs.markResolved(replyTo.ID)
 			editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
-			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel))
+			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel), tele.ModeHTML)
 			injector.SendKeys(target, "Escape")
 			go func() {
 				time.Sleep(3 * time.Second)

@@ -65,6 +65,7 @@ type pageEntry struct {
 	cwd        string
 	tmuxTarget string
 	permRows   []tele.Row // non-nil for permission messages
+	rawMode    bool        // true = plain text, no HTML parse mode
 	chatID     int64
 }
 

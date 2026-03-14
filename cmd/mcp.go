@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,7 +40,14 @@ func runMcp(cmd *cobra.Command, args []string) error {
 	if port == 0 {
 		port = 12500
 	}
-	cwd, _ := os.Getwd()
+	tmuxTarget := ""
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		tmuxTarget = pane
+		if tmuxEnv := os.Getenv("TMUX"); tmuxEnv != "" {
+			parts := strings.SplitN(tmuxEnv, ",", 2)
+			tmuxTarget = pane + "@" + parts[0]
+		}
+	}
 
 	s := server.NewMCPServer("tg-cli", Version)
 	tool := mcp.NewTool("send_file",
@@ -70,9 +78,9 @@ func runMcp(cmd *cobra.Command, args []string) error {
 
 		// POST to bot
 		body, _ := json.Marshal(map[string]string{
-			"file_path": filePath,
-			"caption":   caption,
-			"cwd":       cwd,
+			"file_path":   filePath,
+			"caption":     caption,
+			"tmux_target": tmuxTarget,
 		})
 		resp, err := http.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/mcp/send-file", port),

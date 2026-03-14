@@ -15,6 +15,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -118,7 +119,7 @@ func askSessionName(bot *tele.Bot, chatID int64, state *LaunchState) {
 	btnDefault := sel.Data(fmt.Sprintf("Use default: %s", cfg.DefaultSessionName), "bot_new", "session_default")
 	btnCancel := sel.Data("❌ Cancel", "bot_new", "cancel")
 	sel.Inline(sel.Row(btnDefault, btnCancel))
-	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("📦 Session name\nDefault: %s\n\n💡 Click the button to use default, or reply to this message with a custom name.", cfg.DefaultSessionName), sel)
+	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("📦 Session name\nDefault: %s\n\n💡 Click the button to use default, or reply to this message with a custom name.", markdown.EscapeHTML(cfg.DefaultSessionName)), sel, tele.ModeHTML)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askSessionName: failed to send: %v", err))
 		return
@@ -150,8 +151,8 @@ func askWorkDir(bot *tele.Bot, chatID int64, state *LaunchState) {
 		dirs = []string{}
 	}
 	kb := buildDirKeyboard(dirs, 0, state.ShowHidden)
-	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", state.BrowsePath, len(dirs))
-	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, text, kb)
+	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", markdown.EscapeHTML(state.BrowsePath), len(dirs))
+	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, text, kb, tele.ModeHTML)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askWorkDir: failed to send: %v", err))
 		return
@@ -171,7 +172,7 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: failed to load config: %v", err))
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to load config: %v", err))
+		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 		return
 	}
 	// Fill defaults for any still-empty fields
@@ -196,11 +197,11 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 	var paneID string
 	if injector.NamedSessionExists(state.SessionName) {
 		// Session exists — create a new window
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("ℹ️ Session '%s' already exists, creating a new window in it.", state.SessionName))
+		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("ℹ️ Session '%s' already exists, creating a new window in it.", markdown.EscapeHTML(state.SessionName)), tele.ModeHTML)
 		id, err := injector.CreateWindow(state.SessionName, state.WorkDir)
 		if err != nil {
 			logger.Error(fmt.Sprintf("executeLaunch: CreateWindow failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create window in session %s: %v", state.SessionName, err))
+			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create window in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			deleteLaunchState(state.UUID)
 			return
 		}
@@ -210,14 +211,14 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 		// Session does not exist — create a new session
 		if err := injector.CreateSession(state.SessionName, state.WorkDir); err != nil {
 			logger.Error(fmt.Sprintf("executeLaunch: CreateSession failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create session %s: %v", state.SessionName, err))
+			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			deleteLaunchState(state.UUID)
 			return
 		}
 		panes, err := injector.ListPanes(state.SessionName)
 		if err != nil || len(panes) == 0 {
 			logger.Error(fmt.Sprintf("executeLaunch: ListPanes failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to list panes in session %s: %v", state.SessionName, err))
+			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to list panes in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			deleteLaunchState(state.UUID)
 			return
 		}
@@ -233,7 +234,7 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 	// Type command into the pane using set-buffer + paste + Enter
 	if err := injector.InjectText(target, cmd); err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: InjectText failed: pane=%s cmd=%s err=%v", paneID, cmd, err))
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to inject command to pane %s: %v", paneID, err))
+		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to inject command to pane %s: %s", markdown.EscapeHTML(paneID), markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 		deleteLaunchState(state.UUID)
 		return
 	}
@@ -251,8 +252,8 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 		}
 	}()
 
-	msg := fmt.Sprintf("🚀 CC launched\n📦 %s\n📟 %s\n📂 %s\n💻 %s", state.SessionName, paneID, state.WorkDir, cmd)
-	retrySend(bot, &tele.Chat{ID: chatID}, msg)
+	msg := fmt.Sprintf("🚀 CC launched\n📦 %s\n📟 %s\n📂 %s\n💻 %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(paneID), markdown.EscapeHTML(state.WorkDir), markdown.EscapeHTML(cmd))
+	retrySend(bot, &tele.Chat{ID: chatID}, msg, tele.ModeHTML)
 	logger.Info(fmt.Sprintf("executeLaunch: done session=%s pane=%s workdir=%s cmd=%s", state.SessionName, paneID, state.WorkDir, cmd))
 
 	state.Step = "done"
@@ -384,7 +385,7 @@ func refreshDirBrowser(bot *tele.Bot, msg *tele.Message, state *LaunchState) {
 		dirs = []string{}
 	}
 	kb := buildDirKeyboard(dirs, state.DirPage, state.ShowHidden)
-	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", state.BrowsePath, len(dirs))
-	retryEdit(bot, msg, text, kb)
+	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", markdown.EscapeHTML(state.BrowsePath), len(dirs))
+	retryEdit(bot, msg, text, kb, tele.ModeHTML)
 	writeLaunchState(state)
 }

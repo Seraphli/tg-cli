@@ -20,6 +20,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
@@ -64,9 +65,69 @@ func scanCustomCommands() map[string]customCmd {
 	return result
 }
 
+// htmlTags lists Telegram-supported HTML tags that need open/close tracking.
+var htmlTags = []string{"b", "i", "code", "pre", "s", "a", "blockquote"}
+
+// findUnclosedTags returns a list of unclosed tag names (in open order) in s.
+func findUnclosedTags(s string) []string {
+	var stack []string
+	i := 0
+	for i < len(s) {
+		if s[i] != '<' {
+			i++
+			continue
+		}
+		end := strings.Index(s[i:], ">")
+		if end < 0 {
+			break
+		}
+		tag := s[i+1 : i+end]
+		i += end + 1
+		closing := strings.HasPrefix(tag, "/")
+		if closing {
+			name := strings.ToLower(strings.TrimSpace(tag[1:]))
+			for j := len(stack) - 1; j >= 0; j-- {
+				if stack[j] == name {
+					stack = append(stack[:j], stack[j+1:]...)
+					break
+				}
+			}
+		} else {
+			// Self-closing or unknown — only track known Telegram tags
+			name := strings.ToLower(strings.Fields(tag)[0])
+			for _, t := range htmlTags {
+				if name == t {
+					stack = append(stack, name)
+					break
+				}
+			}
+		}
+	}
+	return stack
+}
+
+// closingTags returns closing HTML tags for the given open tag names (reverse order).
+func closingTags(open []string) string {
+	var b strings.Builder
+	for i := len(open) - 1; i >= 0; i-- {
+		fmt.Fprintf(&b, "</%s>", open[i])
+	}
+	return b.String()
+}
+
+// openingTags returns opening HTML tags for the given tag names.
+func openingTags(open []string) string {
+	var b strings.Builder
+	for _, t := range open {
+		fmt.Fprintf(&b, "<%s>", t)
+	}
+	return b.String()
+}
+
 // splitBody splits body text into chunks fitting within maxRuneLen.
 // Tries to split at paragraph boundaries (\n\n), then line boundaries (\n),
 // falling back to hard rune-boundary split.
+// Checks for unclosed HTML tags after each split and appends/prepends closing/opening tags.
 func splitBody(body string, maxRuneLen int) []string {
 	runes := []rune(body)
 	if len(runes) <= maxRuneLen {
@@ -79,17 +140,26 @@ func splitBody(body string, maxRuneLen int) []string {
 			break
 		}
 		chunk := string(runes[:maxRuneLen])
+		var end int
+		var skip int
 		if idx := strings.LastIndex(chunk, "\n\n"); idx > 0 {
-			end := len([]rune(chunk[:idx]))
-			chunks = append(chunks, string(runes[:end]))
-			runes = runes[end+2:]
+			end = len([]rune(chunk[:idx]))
+			skip = 2
 		} else if idx := strings.LastIndex(chunk, "\n"); idx > 0 {
-			end := len([]rune(chunk[:idx]))
-			chunks = append(chunks, string(runes[:end]))
-			runes = runes[end+1:]
+			end = len([]rune(chunk[:idx]))
+			skip = 1
 		} else {
-			chunks = append(chunks, chunk)
-			runes = runes[maxRuneLen:]
+			end = maxRuneLen
+			skip = 0
+		}
+		part := string(runes[:end])
+		unclosed := findUnclosedTags(part)
+		if len(unclosed) > 0 {
+			chunks = append(chunks, part+closingTags(unclosed))
+			runes = []rune(openingTags(unclosed) + string(runes[end+skip:]))
+		} else {
+			chunks = append(chunks, part)
+			runes = runes[end+skip:]
 		}
 	}
 	return chunks
@@ -164,9 +234,15 @@ func processTranscriptUpdates(sessionID, transcriptPath string, isQuestion ...bo
 		sessionCounts.counts[sessionID] = count
 		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, count))
 	}
-	time.Sleep(2 * time.Second)
-	texts := readAssistantTexts(transcriptPath)
 	notified := sessionCounts.counts[sessionID]
+	var texts []string
+	for retry := 0; retry < 5; retry++ {
+		time.Sleep(2 * time.Second)
+		texts = readAssistantTexts(transcriptPath)
+		if len(texts) > notified {
+			break
+		}
+	}
 	if len(texts) <= notified {
 		return ""
 	}
@@ -232,19 +308,58 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		nd.ContextUsedTokens = usedTokens
 		nd.ContextWindowSize = windowSize
 	}
+	cfg, _ := config.LoadAppConfig()
+	// Extract tables for image rendering, convert remaining to Telegram HTML
+	var tableImages [][]byte
+	parseMode := tele.ModeHTML
+	if cfg.NotifyFormat == "raw" {
+		// Raw mode: send body as-is without HTML conversion or table image rendering
+		parseMode = ""
+	} else if event != "ToolUse" {
+		tableMode := cfg.TableMode
+		if tableMode == "" {
+			tableMode = "image"
+		}
+		if tableMode == "image" {
+			tables := markdown.ExtractTableData(body)
+			if len(tables) > 0 {
+				body = markdown.RemoveTables(body)
+				for _, t := range tables {
+					img, err := markdown.RenderTableImageChrome(t.Headers, t.Rows)
+					if err != nil {
+						logger.Info(fmt.Sprintf("Chrome table render failed (falling back to code): %v", err))
+						img, err = markdown.RenderTableImage(t.Headers, t.Rows)
+						if err != nil {
+							logger.Error(fmt.Sprintf("Table image render failed: %v", err))
+							continue
+						}
+					}
+					tableImages = append(tableImages, img)
+				}
+			}
+		}
+		body = markdown.RenderTelegramHTML(body)
+	}
 	headerLen := notify.HeaderLen(nd)
-	maxBodyRunes := 4000 - headerLen - 100
+	paginationMax := 4000
+	if cfg.PaginationMaxRunes > 0 {
+		paginationMax = cfg.PaginationMaxRunes
+	}
+	maxBodyRunes := paginationMax - headerLen - 100
 	chunks := splitBody(body, maxBodyRunes)
 	var sendOpts []interface{}
 	if topicID > 0 {
 		sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+	}
+	if parseMode != "" {
+		sendOpts = append(sendOpts, parseMode)
 	}
 	if len(chunks) <= 1 {
 		nd.Body = body
 		text := notify.BuildNotificationText(nd)
 		_, err := retrySend(b, chat, text, sendOpts...)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, truncateStr(text, 500)))
 		} else {
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), truncateStr(body, 200)))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
@@ -258,7 +373,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		opts := append([]interface{}{kb}, sendOpts...)
 		sent, err := retrySend(b, chat, text, opts...)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send notification: %v", err))
+			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, truncateStr(text, 500)))
 		} else {
 			pages.store(sent.ID, sessionID, &pageEntry{
 				chunks:     chunks,
@@ -270,6 +385,22 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			})
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), truncateStr(body, 200)))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
+		}
+	}
+	// Send table images as separate Photo messages
+	for i, imgBytes := range tableImages {
+		photo := &tele.Photo{
+			File: tele.FromReader(bytes.NewReader(imgBytes)),
+		}
+		var photoOpts []interface{}
+		if topicID > 0 {
+			photoOpts = append(photoOpts, &tele.SendOptions{ThreadID: topicID})
+		}
+		_, err := retrySend(b, chat, photo, photoOpts...)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Failed to send table image %d: %v", i+1, err))
+		} else {
+			logger.Info(fmt.Sprintf("Table image %d sent to chat %s for event %s", i+1, chatID, event))
 		}
 	}
 }
@@ -865,6 +996,7 @@ func handleCaptureCommand(c tele.Context, target injector.TmuxTarget) error {
 	pages.store(sent.ID, "", &pageEntry{
 		chunks:   chunks,
 		permRows: []tele.Row{},
+		rawMode:  true,
 	})
 	return nil
 }
@@ -926,7 +1058,7 @@ func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
 	return &p, body, nil
 }
 
-func resolveChat(tmuxTarget, cwd string) (*tele.Chat, string, int) {
+func resolveChat(tmuxTarget string) (*tele.Chat, string, int) {
 	creds, err := config.LoadCredentials()
 	if err == nil && tmuxTarget != "" {
 		sid, found := sessionState.findByTarget(tmuxTarget)
@@ -1079,7 +1211,7 @@ func cleanupPendingState(msgID int, uuid string, bot *tele.Bot, reason string) {
 	if entry, ok := toolNotifs.get(msgID); ok && !entry.resolved {
 		toolNotifs.markResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
 	}
 	if _, ok := pendingPerms.getTarget(msgID); ok {
 		pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
@@ -1131,7 +1263,7 @@ func doCancelPerm(bot *tele.Bot, msgID int) string {
 	pendingPerms.resolve(msgID, permDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
 	if chatID != 0 && msgText != "" {
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel), tele.ModeHTML)
 	}
 	logger.Info(fmt.Sprintf("Permission cancelled: msg_id=%d uuid=%s", msgID, uuid))
 	return uuid
@@ -1155,7 +1287,7 @@ func doCancelAsk(bot *tele.Bot, msgID int) string {
 		}
 		toolNotifs.markResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion cancelled: msg_id=%d uuid=%s", msgID, uuid))
 	return uuid
@@ -1192,7 +1324,7 @@ func doDecidePerm(bot *tele.Bot, msgID int, decision string) (*permDecision, err
 	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 	if chatID != 0 && msgText != "" {
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel))
+		retryEdit(bot, editMsg, msgText, buildFrozenPermMarkup(decision, sugLabel), tele.ModeHTML)
 	}
 	targetPtr, err2 := extractTmuxTarget(msgText)
 	if err2 == nil && targetPtr != nil {
@@ -1224,7 +1356,7 @@ func doRespondAsk(bot *tele.Bot, msgID int, answers map[string]string, frozenLab
 	if entry, entryOk := toolNotifs.get(msgID); entryOk {
 		toolNotifs.markResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, frozenLabel))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, frozenLabel), tele.ModeHTML)
 		recordPending(entry.tmuxTarget, entry.chatID, msgID)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion responded: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
@@ -1255,7 +1387,7 @@ func doChatAsk(bot *tele.Bot, msgID int) error {
 	if entry, entryOk := toolNotifs.get(msgID); entryOk {
 		toolNotifs.markResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "💬 Chat mode selected"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "💬 Chat mode selected"), tele.ModeHTML)
 		recordPending(entry.tmuxTarget, entry.chatID, msgID)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion chat mode: msg_id=%d uuid=%s", msgID, uuid))
@@ -1812,7 +1944,7 @@ func shouldNotifyTool(toolName string) bool {
 // handleUsageCommand launches a temporary CC session, runs /usage, and sends the result to TG.
 func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	// Send feedback message
-	msg, err := retrySend(bot, c.Chat(), "⏳ Fetching CC usage...")
+	msg, err := retrySend(bot, c.Chat(), "⏳ Fetching CC usage...", tele.ModeHTML)
 	if err != nil {
 		return err
 	}
@@ -1822,7 +1954,7 @@ func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
 	if err := cmd.Run(); err != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
-		retryEdit(bot, msg, "❌ Failed to create temp session")
+		retryEdit(bot, msg, "❌ Failed to create temp session", tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
@@ -1835,7 +1967,7 @@ func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	// Wait for CC ready (poll for ❯ prompt, 30s for cold start)
 	if !waitForPaneContent(target, "❯", 30*time.Second) {
 		logger.Error("handleUsageCommand: CC failed to initialize (timeout waiting for ❯)")
-		retryEdit(bot, msg, "❌ CC failed to initialize")
+		retryEdit(bot, msg, "❌ CC failed to initialize", tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: CC ready session=%s", sessionName))
@@ -1845,7 +1977,7 @@ func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	// Wait for usage output (poll for "used" keyword)
 	if !waitForPaneContent(target, "used", 10*time.Second) {
 		logger.Error("handleUsageCommand: failed to get usage data (timeout waiting for 'used')")
-		retryEdit(bot, msg, "❌ Failed to get usage data")
+		retryEdit(bot, msg, "❌ Failed to get usage data", tele.ModeHTML)
 		return nil
 	}
 	logger.Info("handleUsageCommand: usage output detected")
@@ -1855,7 +1987,7 @@ func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	content, err := injector.CapturePane(target)
 	if err != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: failed to capture pane err=%v", err))
-		retryEdit(bot, msg, "❌ Failed to capture usage data")
+		retryEdit(bot, msg, "❌ Failed to capture usage data", tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: pane captured len=%d", len(content)))
@@ -1863,17 +1995,19 @@ func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
 	formatted := parseUsageOutput(content)
 	if formatted == "" {
 		logger.Error("handleUsageCommand: failed to parse usage data (empty result)")
-		retryEdit(bot, msg, "❌ Failed to parse usage data")
+		retryEdit(bot, msg, "❌ Failed to parse usage data", tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
+	// Escape for HTML mode
+	formatted = markdown.EscapeHTML(formatted)
 	// Send formatted result (replace the ⏳ message)
 	chunks := splitBody(formatted, 4000)
 	if len(chunks) <= 1 {
-		retryEdit(bot, msg, formatted)
+		retryEdit(bot, msg, formatted, tele.ModeHTML)
 	} else {
 		kb := buildPageKeyboard(1, len(chunks))
-		retryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb)
+		retryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
 		pages.store(msg.ID, "", &pageEntry{chunks: chunks, permRows: []tele.Row{}})
 	}
 	logger.Info("handleUsageCommand: done")
@@ -1995,6 +2129,6 @@ func handleVoiceCommand(c tele.Context) error {
 	}
 	text := buildVoiceText(cfg)
 	menu := buildVoiceMenu(engine)
-	_, err = retrySend(c.Bot(), c.Chat(), text, menu)
+	_, err = retrySend(c.Bot(), c.Chat(), text, menu, tele.ModeHTML)
 	return err
 }

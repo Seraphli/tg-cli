@@ -112,6 +112,9 @@ type AppConfig struct {
 	SenseVoiceModelPath string `json:"senseVoiceModelPath"`
 	VoiceRetainCount    int    `json:"voiceRetainCount,omitempty"`
 	CWDSource           string `json:"cwdSource,omitempty"`
+	PaginationMaxRunes  int    `json:"paginationMaxRunes,omitempty"`
+	NotifyFormat        string `json:"notifyFormat,omitempty"` // "html" (default) or "raw"
+	TableMode           string `json:"tableMode,omitempty"`    // "image" (default) or "code"
 }
 
 // appConfigCache stores the last loaded config for dynamic reload support.

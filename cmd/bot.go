@@ -18,6 +18,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -187,6 +188,15 @@ func runBot(cmd *cobra.Command, args []string) {
 	for name, cmd := range customCmds {
 		commands = append(commands, tele.Command{Text: name, Description: cmd.desc})
 	}
+	// Register known slash commands for markdown renderer
+	cmds := make(map[string]bool)
+	for k := range ccBuiltinCommands {
+		cmds[k] = true
+	}
+	for c := range customCmds {
+		cmds[c] = true
+	}
+	markdown.SlashCommands = cmds
 	bot.SetCommands(commands)
 	// Register all Telegram handlers
 	registerTGHandlers(bot, &creds)

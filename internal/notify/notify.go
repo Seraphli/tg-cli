@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Seraphli/tg-cli/internal/markdown"
 )
 
 type NotificationData struct {
@@ -124,7 +126,7 @@ func BuildNotificationText(data NotificationData) string {
 	}
 	var statusLine string
 	if data.AgentName != "" {
-		statusLine = emoji + " [" + data.AgentName + "] " + status
+		statusLine = emoji + " [" + markdown.EscapeHTML(data.AgentName) + "] " + status
 	} else {
 		statusLine = emoji + " " + status
 	}
@@ -133,10 +135,10 @@ func BuildNotificationText(data NotificationData) string {
 	}
 	lines := []string{
 		statusLine,
-		"📂 " + projectDisplay(data.Project, data.CWD),
+		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
 	}
 	if data.ContextUsedPct >= 0 {
 		used := float64(data.ContextUsedTokens)
@@ -159,31 +161,31 @@ func HeaderLen(data NotificationData) int {
 func BuildPermissionText(data PermissionData) string {
 	firstLine := "🔐 Permission Request"
 	if data.AgentName != "" {
-		firstLine = "🔐 [" + data.AgentName + "] Permission Request"
+		firstLine = "🔐 [" + markdown.EscapeHTML(data.AgentName) + "] Permission Request"
 	}
 	lines := []string{
 		firstLine,
-		"📂 " + projectDisplay(data.Project, data.CWD),
+		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
 	}
-	lines = append(lines, "", "🔧 Tool: "+data.ToolName)
+	lines = append(lines, "", "🔧 Tool: "+markdown.EscapeHTML(data.ToolName))
 	// Show key fields from tool_input
 	for _, key := range []string{"command", "description", "file_path", "old_string", "new_string", "replace_all", "url", "query", "pattern", "prompt"} {
 		if v, ok := data.ToolInput[key]; ok {
 			s := fmt.Sprintf("%v", v)
 			if key == "old_string" || key == "new_string" {
-				lines = append(lines, key+":\n```\n"+s+"\n```")
+				lines = append(lines, key+":\n<pre>"+markdown.EscapeHTML(s)+"</pre>")
 			} else if key == "description" {
-				lines = append(lines, "ℹ️ "+s)
+				lines = append(lines, "ℹ️ "+markdown.EscapeHTML(s))
 			} else {
-				lines = append(lines, key+": "+s)
+				lines = append(lines, key+": "+markdown.EscapeHTML(s))
 			}
 		}
 	}
 	if data.SuggestionDesc != "" {
-		lines = append(lines, "", "💡 Always Allow: "+data.SuggestionDesc)
+		lines = append(lines, "", "💡 Always Allow: "+markdown.EscapeHTML(data.SuggestionDesc))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -205,33 +207,36 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		return string(toolInput)
 	}
 	var b strings.Builder
+	esc := func(v interface{}) string {
+		return markdown.EscapeHTML(fmt.Sprintf("%v", v))
+	}
 	switch toolName {
 	case "Bash":
 		if cmd, ok := fields["command"]; ok {
-			fmt.Fprintf(&b, "💻 %v", cmd)
+			fmt.Fprintf(&b, "💻 %s", esc(cmd))
 		}
 		if desc, ok := fields["description"]; ok {
-			fmt.Fprintf(&b, "\nℹ️ %v", desc)
+			fmt.Fprintf(&b, "\nℹ️ %s", esc(desc))
 		}
 		if timeout, ok := fields["timeout"]; ok {
-			fmt.Fprintf(&b, "\n⏱️ timeout: %v", timeout)
+			fmt.Fprintf(&b, "\n⏱️ timeout: %s", esc(timeout))
 		}
 	case "Edit":
 		if fp, ok := fields["file_path"]; ok {
-			fmt.Fprintf(&b, "📄 %v", fp)
+			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if ra, ok := fields["replace_all"]; ok {
-			fmt.Fprintf(&b, "\n🔄 replace_all: %v", ra)
+			fmt.Fprintf(&b, "\n🔄 replace_all: %s", esc(ra))
 		}
 		if old, ok := fields["old_string"]; ok {
-			fmt.Fprintf(&b, "\n\n- %v", old)
+			fmt.Fprintf(&b, "\n\n- %s", esc(old))
 		}
 		if ns, ok := fields["new_string"]; ok {
-			fmt.Fprintf(&b, "\n+ %v", ns)
+			fmt.Fprintf(&b, "\n+ %s", esc(ns))
 		}
 	case "Write":
 		if fp, ok := fields["file_path"]; ok {
-			fmt.Fprintf(&b, "📄 %v", fp)
+			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if content, ok := fields["content"]; ok {
 			s := fmt.Sprintf("%v", content)
@@ -239,62 +244,62 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 			if len(r) > 500 {
 				s = string(r[:500]) + "…"
 			}
-			fmt.Fprintf(&b, "\n\n%s", s)
+			fmt.Fprintf(&b, "\n\n%s", markdown.EscapeHTML(s))
 		}
 	case "Read":
 		if fp, ok := fields["file_path"]; ok {
-			fmt.Fprintf(&b, "📄 %v", fp)
+			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if offset, ok := fields["offset"]; ok {
-			fmt.Fprintf(&b, "\n📍 offset: %v", offset)
+			fmt.Fprintf(&b, "\n📍 offset: %s", esc(offset))
 		}
 		if limit, ok := fields["limit"]; ok {
-			fmt.Fprintf(&b, "\n📏 limit: %v", limit)
+			fmt.Fprintf(&b, "\n📏 limit: %s", esc(limit))
 		}
 	case "Glob":
 		if pattern, ok := fields["pattern"]; ok {
-			fmt.Fprintf(&b, "🔍 %v", pattern)
+			fmt.Fprintf(&b, "🔍 %s", esc(pattern))
 		}
 		if path, ok := fields["path"]; ok {
-			fmt.Fprintf(&b, "\n📂 %v", path)
+			fmt.Fprintf(&b, "\n📂 %s", esc(path))
 		}
 	case "Grep":
 		if pattern, ok := fields["pattern"]; ok {
-			fmt.Fprintf(&b, "🔍 %v", pattern)
+			fmt.Fprintf(&b, "🔍 %s", esc(pattern))
 		}
 		if path, ok := fields["path"]; ok {
-			fmt.Fprintf(&b, "\n📂 %v", path)
+			fmt.Fprintf(&b, "\n📂 %s", esc(path))
 		}
 		for _, key := range []string{"output_mode", "glob", "type", "-n", "-B", "-A", "-C", "-i"} {
 			if v, ok := fields[key]; ok {
-				fmt.Fprintf(&b, "\n%s: %v", key, v)
+				fmt.Fprintf(&b, "\n%s: %s", key, esc(v))
 			}
 		}
 	case "Agent":
 		if desc, ok := fields["description"]; ok {
-			fmt.Fprintf(&b, "ℹ️ %v", desc)
+			fmt.Fprintf(&b, "ℹ️ %s", esc(desc))
 		}
 		if st, ok := fields["subagent_type"]; ok {
-			fmt.Fprintf(&b, "\n🤖 %v", st)
+			fmt.Fprintf(&b, "\n🤖 %s", esc(st))
 		}
 		if model, ok := fields["model"]; ok {
-			fmt.Fprintf(&b, "\n🏷️ model: %v", model)
+			fmt.Fprintf(&b, "\n🏷️ model: %s", esc(model))
 		}
 	case "WebFetch":
 		if url, ok := fields["url"]; ok {
-			fmt.Fprintf(&b, "🌐 %v", url)
+			fmt.Fprintf(&b, "🌐 %s", esc(url))
 		}
 		if prompt, ok := fields["prompt"]; ok {
-			fmt.Fprintf(&b, "\nℹ️ %v", prompt)
+			fmt.Fprintf(&b, "\nℹ️ %s", esc(prompt))
 		}
 	case "WebSearch":
 		if query, ok := fields["query"]; ok {
-			fmt.Fprintf(&b, "🔍 %v", query)
+			fmt.Fprintf(&b, "🔍 %s", esc(query))
 		}
 	default:
 		// Unknown tool: key: value fallback
 		for k, v := range fields {
-			fmt.Fprintf(&b, "%s: %v\n", k, v)
+			fmt.Fprintf(&b, "%s: %s\n", k, esc(v))
 		}
 	}
 	result := b.String()
@@ -308,14 +313,14 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 func BuildQuestionText(data QuestionData) string {
 	firstLine := "❓ Question"
 	if data.AgentName != "" {
-		firstLine = "❓ [" + data.AgentName + "] Question"
+		firstLine = "❓ [" + markdown.EscapeHTML(data.AgentName) + "] Question"
 	}
 	lines := []string{
 		firstLine,
-		"📂 " + projectDisplay(data.Project, data.CWD),
+		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
 	}
 	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+FormatPaneID(data.TmuxTarget))
+		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
 	}
 	if data.ContextUsedPct >= 0 {
 		used := float64(data.ContextUsedTokens)
@@ -329,36 +334,36 @@ func BuildQuestionText(data QuestionData) string {
 			if q.MultiSelect {
 				multiTag = " (多选)"
 			}
-			lines = append(lines, "", fmt.Sprintf("**Q%d: %s**%s", qIdx+1, q.Header, multiTag))
-			lines = append(lines, q.Question)
+			lines = append(lines, "", fmt.Sprintf("<b>Q%d: %s</b>%s", qIdx+1, markdown.EscapeHTML(q.Header), multiTag))
+			lines = append(lines, markdown.EscapeHTML(q.Question))
 			for i, opt := range q.Options {
-				lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+				lines = append(lines, fmt.Sprintf("%d. %s", i+1, markdown.EscapeHTML(opt.Label)))
 				if opt.Description != "" {
-					lines = append(lines, "  → "+opt.Description)
+					lines = append(lines, "  → "+markdown.EscapeHTML(opt.Description))
 				}
 			}
 		}
 	} else if len(data.Questions) == 1 {
 		q := data.Questions[0]
 		if q.Header != "" {
-			lines = append(lines, "", "📋 "+q.Header)
+			lines = append(lines, "", "📋 "+markdown.EscapeHTML(q.Header))
 		}
-		lines = append(lines, "", q.Question)
+		lines = append(lines, "", markdown.EscapeHTML(q.Question))
 		for i, opt := range q.Options {
-			lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, markdown.EscapeHTML(opt.Label)))
 			if opt.Description != "" {
-				lines = append(lines, "  → "+opt.Description)
+				lines = append(lines, "  → "+markdown.EscapeHTML(opt.Description))
 			}
 		}
 	} else {
 		if data.Header != "" {
-			lines = append(lines, "", "📋 "+data.Header)
+			lines = append(lines, "", "📋 "+markdown.EscapeHTML(data.Header))
 		}
-		lines = append(lines, "", data.Question)
+		lines = append(lines, "", markdown.EscapeHTML(data.Question))
 		for i, opt := range data.Options {
-			lines = append(lines, fmt.Sprintf("%d. %s", i+1, opt.Label))
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, markdown.EscapeHTML(opt.Label)))
 			if opt.Description != "" {
-				lines = append(lines, "  → "+opt.Description)
+				lines = append(lines, "  → "+markdown.EscapeHTML(opt.Description))
 			}
 		}
 	}

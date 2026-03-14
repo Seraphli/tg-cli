@@ -12,6 +12,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
@@ -44,7 +45,11 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			})
 		}
 		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
-		_, err = retryEdit(bot, c.Message(), text, kb)
+		if entry.rawMode {
+			_, err = retryEdit(bot, c.Message(), text, kb)
+		} else {
+			_, err = retryEdit(bot, c.Message(), text, kb, tele.ModeHTML)
+		}
 		if err != nil {
 			logger.Debug(fmt.Sprintf("edit page error: %v", err))
 		}
@@ -116,7 +121,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					qm.selectedOptions[optIdx] = !qm.selectedOptions[optIdx]
 					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d state=%v label=%s", c.Message().ID, qIdx, optIdx, qm.selectedOptions[optIdx], qm.optionLabels[optIdx]))
 					newMarkup := rebuildAskMarkup(entry)
-					retryEdit(bot, c.Message(), c.Message().Text, newMarkup)
+					retryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
 					return c.Respond(&tele.CallbackResponse{Text: "Toggled"})
 				} else {
 					qm.selectedOption = optIdx
@@ -134,7 +139,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					} else {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.optionLabels[optIdx]))
 						newMarkup := rebuildAskMarkup(entry)
-						retryEdit(bot, c.Message(), c.Message().Text, newMarkup)
+						retryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
 						return c.Respond(&tele.CallbackResponse{Text: "Selected"})
 					}
 				}
@@ -151,7 +156,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if !ok {
 			return c.Respond(&tele.CallbackResponse{Text: "Session not found"})
 		}
-		retryEdit(bot, c.Message(), fmt.Sprintf("Session: %s\nReply with the new name for this session.", notify.FormatPaneID(info.tmuxTarget)))
+		retryEdit(bot, c.Message(), fmt.Sprintf("Session: %s\nReply with the new name for this session.", notify.FormatPaneID(info.tmuxTarget)), tele.ModeHTML)
 		namesPendingSession.Store(c.Message().ID, sessionID)
 		return c.Respond(&tele.CallbackResponse{Text: "Reply with name"})
 	})
@@ -167,7 +172,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if err := config.SaveAppConfig(cfg); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
-		retryEdit(bot, c.Message(), fmt.Sprintf("✅ CWD source set to: %s", source))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ CWD source set to: %s", source), tele.ModeHTML)
 		logger.Info(fmt.Sprintf("CWDSource updated to: %s", source))
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Saved: " + source})
 	})
@@ -208,7 +213,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			rows = append(rows, markup.Row(btns...))
 		}
 		markup.Inline(rows...)
-		if _, err := retryEdit(bot, c.Message(), c.Message().Text, markup); err != nil {
+		if _, err := retryEdit(bot, c.Message(), c.Message().Text, markup, tele.ModeHTML); err != nil {
 			logger.Debug(fmt.Sprintf("resume edit markup error: %v", err))
 		}
 		recordPending(injector.FormatTarget(*targetPtr), c.Message().Chat.ID, c.Message().ID)
@@ -219,24 +224,24 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		data := strings.TrimSpace(c.Data())
 		num, err := strconv.Atoi(data)
 		if err != nil {
-			retryEdit(bot, c.Message(), "❌ Invalid selection.")
+			retryEdit(bot, c.Message(), "❌ Invalid selection.", tele.ModeHTML)
 			return c.Respond()
 		}
 		val, ok := bindMenuItems.LoadAndDelete(c.Message().ID)
 		if !ok {
-			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_bind again.")
+			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_bind again.", tele.ModeHTML)
 			return c.Respond()
 		}
 		ctx := val.(bindMenuContext)
 		idx := num - 1
 		if idx < 0 || idx >= len(ctx.items) {
-			retryEdit(bot, c.Message(), "❌ Selection out of range.")
+			retryEdit(bot, c.Message(), "❌ Selection out of range.", tele.ModeHTML)
 			return c.Respond()
 		}
 		item := ctx.items[idx]
 		creds, err := config.LoadCredentials()
 		if err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			return c.Respond()
 		}
 		creds.NameRouteMap[item.key] = config.NameRoute{ChatID: ctx.chatID, TopicID: ctx.topicID}
@@ -246,7 +251,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			topicStr = fmt.Sprintf(", topic=%d", ctx.topicID)
 		}
 		logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.key, ctx.chatID, ctx.topicID))
-		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", item.label, ctx.chatID, topicStr))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", markdown.EscapeHTML(item.label), ctx.chatID, topicStr), tele.ModeHTML)
 		return c.Respond()
 	})
 
@@ -254,30 +259,30 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		data := strings.TrimSpace(c.Data())
 		num, err := strconv.Atoi(data)
 		if err != nil {
-			retryEdit(bot, c.Message(), "❌ Invalid selection.")
+			retryEdit(bot, c.Message(), "❌ Invalid selection.", tele.ModeHTML)
 			return c.Respond()
 		}
 		val, ok := unbindMenuItems.LoadAndDelete(c.Message().ID)
 		if !ok {
-			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_unbind again.")
+			retryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_unbind again.", tele.ModeHTML)
 			return c.Respond()
 		}
 		keys := val.([]string)
 		idx := num - 1
 		if idx < 0 || idx >= len(keys) {
-			retryEdit(bot, c.Message(), "❌ Selection out of range.")
+			retryEdit(bot, c.Message(), "❌ Selection out of range.", tele.ModeHTML)
 			return c.Respond()
 		}
 		name := keys[idx]
 		creds, err := config.LoadCredentials()
 		if err != nil {
-			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %v", err))
+			retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			return c.Respond()
 		}
 		delete(creds.NameRouteMap, name)
 		config.SaveCredentials(creds)
 		logger.Info(fmt.Sprintf("Route unbound (menu/name): name=%s", name))
-		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound agent name route: %s", name))
+		retryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound agent name route: %s", markdown.EscapeHTML(name)), tele.ModeHTML)
 		return c.Respond()
 	})
 
@@ -443,16 +448,16 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		if strings.HasPrefix(data, "engine:") {
 			engine := strings.TrimPrefix(data, "engine:")
 			if engine == "sensevoice" {
-				retryEdit(bot, c.Message(), "⏳ Checking sensevoice dependencies...")
+				retryEdit(bot, c.Message(), "⏳ Checking sensevoice dependencies...", tele.ModeHTML)
 				sherpaPath, err := ensureSherpaOnnx()
 				if err != nil {
-					retryEdit(bot, c.Message(), fmt.Sprintf("❌ sherpa-onnx: %v", err))
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ sherpa-onnx: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 					return c.Respond()
 				}
 				cfg.SherpaOnnxPath = sherpaPath
 				modelPath, err := ensureSenseVoiceModel()
 				if err != nil {
-					retryEdit(bot, c.Message(), fmt.Sprintf("❌ SenseVoice model: %v", err))
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ SenseVoice model: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 					return c.Respond()
 				}
 				cfg.SenseVoiceModelPath = modelPath
@@ -468,14 +473,14 @@ func registerCallbackHandlers(bot *tele.Bot) {
 					}
 				}
 				if whisperPath == "" {
-					retryEdit(bot, c.Message(), "❌ whisper.cpp not found. Install: `yay -S whisper.cpp-cuda`")
+					retryEdit(bot, c.Message(), "❌ whisper.cpp not found. Install: `yay -S whisper.cpp-cuda`", tele.ModeHTML)
 					return c.Respond()
 				}
 				cfg.WhisperPath = whisperPath
-				retryEdit(bot, c.Message(), "⏳ Checking whisper model...")
+				retryEdit(bot, c.Message(), "⏳ Checking whisper model...", tele.ModeHTML)
 				modelPath, err := ensureWhisperModel()
 				if err != nil {
-					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Whisper model: %v", err))
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Whisper model: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 					return c.Respond()
 				}
 				cfg.ModelPath = modelPath
@@ -524,7 +529,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			if !found {
 				return c.Respond(&tele.CallbackResponse{Text: "❌ Unknown model"})
 			}
-			retryEdit(bot, c.Message(), fmt.Sprintf("⏳ Checking whisper model %s...", selected.name))
+			retryEdit(bot, c.Message(), fmt.Sprintf("⏳ Checking whisper model %s...", markdown.EscapeHTML(selected.name)), tele.ModeHTML)
 			modelsDir := filepath.Join(config.GetConfigDir(), "models")
 			home, _ := os.UserHomeDir()
 			systemModelsDir := filepath.Join(home, ".local", "share", "whisper.cpp", "models")
@@ -537,11 +542,11 @@ func registerCallbackHandlers(bot *tele.Bot) {
 				modelPath = filepath.Join(systemModelsDir, selected.filename)
 				modelURL := fmt.Sprintf("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/%s", selected.filename)
 				if err := os.MkdirAll(systemModelsDir, 0755); err != nil {
-					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to create dir: %v", err))
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to create dir: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 					return c.Respond()
 				}
 				if err := downloadFile(modelPath, modelURL); err != nil {
-					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Download failed: %v", err))
+					retryEdit(bot, c.Message(), fmt.Sprintf("❌ Download failed: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 					return c.Respond()
 				}
 			}

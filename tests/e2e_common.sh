@@ -183,7 +183,7 @@ MINEOF
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
   local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions"
-  echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\"}" > "$TEST_CONFIG_DIR/config.json"
+  echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
 

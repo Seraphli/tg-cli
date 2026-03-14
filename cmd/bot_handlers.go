@@ -11,6 +11,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
@@ -69,7 +70,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return nil
 		}
 		logger.Info(fmt.Sprintf("Chat migration completed: %d → %d", from, to))
-		retrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to))
+		retrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to), tele.ModeHTML)
 		return nil
 	})
 	// Build TG→CC name mapping
@@ -124,7 +125,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 									toolNotifs.markResolved(msgID)
 									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-									retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+									retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 								}
 							}
 						}
@@ -170,7 +171,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 							toolNotifs.markResolved(msgID)
 							logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-							retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+							retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 						}
 					}
 				}
@@ -265,10 +266,10 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if s.SummarySource == "user" {
 				prefix = "👤"
 			}
-			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, truncateStr(s.Summary, 500), relativeTime(s.Modified)))
+			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, markdown.EscapeHTML(truncateStr(s.Summary, 500)), relativeTime(s.Modified)))
 		}
 		text := strings.Join(lines, "\n")
-		_, err = retrySend(bot, c.Chat(), text, kb)
+		_, err = retrySend(bot, c.Chat(), text, kb, tele.ModeHTML)
 		if err != nil {
 			return c.Send(fmt.Sprintf("❌ Failed to send: %v", err))
 		}
@@ -598,16 +599,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		var lines []string
 		for sid, info := range sessions {
 			label := notify.FormatPaneID(info.tmuxTarget)
-			nameTag := ""
+			rawNameTag := ""
+			escapedNameTag := ""
 			if info.name != "" {
-				nameTag = " [" + info.name + "]"
+				rawNameTag = " [" + info.name + "]"
+				escapedNameTag = " [" + markdown.EscapeHTML(info.name) + "]"
 			}
-			lines = append(lines, fmt.Sprintf("  %s%s → %s", label, nameTag, notify.CompressPath(info.cwd)))
-			btnLabel := label + nameTag
-			rows = append(rows, sel.Row(sel.Data(btnLabel, "names", sid)))
+			lines = append(lines, fmt.Sprintf("  %s%s → %s", markdown.EscapeHTML(label), escapedNameTag, markdown.EscapeHTML(notify.CompressPath(info.cwd))))
+			rows = append(rows, sel.Row(sel.Data(label+rawNameTag, "names", sid)))
 		}
 		sel.Inline(rows...)
-		_, err := retrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel)
+		_, err := retrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel, tele.ModeHTML)
 		return err
 	})
 

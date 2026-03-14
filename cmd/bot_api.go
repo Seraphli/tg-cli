@@ -13,6 +13,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
@@ -58,7 +59,11 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		}
 		kb := buildPageKeyboardWithExtra(pageNum, len(entry.chunks), entry.permRows)
 		editMsg := &tele.Message{ID: msgID, Chat: chat}
-		_, err = retryEdit(bot, editMsg, text, kb)
+		if entry.rawMode {
+			_, err = retryEdit(bot, editMsg, text, kb)
+		} else {
+			_, err = retryEdit(bot, editMsg, text, kb, tele.ModeHTML)
+		}
 		if err != nil {
 			logger.Error(fmt.Sprintf("Callback edit failed: %v", err))
 			http.Error(w, "edit failed: "+err.Error(), 500)
@@ -158,7 +163,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					newMarkup := rebuildAskMarkup(entry)
 					editChat := &tele.Chat{ID: entry.chatID}
 					editMsg := &tele.Message{ID: msgID, Chat: editChat}
-					retryEdit(bot, editMsg, entry.msgText, newMarkup)
+					retryEdit(bot, editMsg, entry.msgText, newMarkup, tele.ModeHTML)
 				} else {
 					qm.selectedOption = optIdx
 					hasSubmit := len(entry.questions) > 1
@@ -177,7 +182,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 						newMarkup := rebuildAskMarkup(entry)
 						editChat := &tele.Chat{ID: entry.chatID}
 						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						retryEdit(bot, editMsg, entry.msgText, newMarkup)
+						retryEdit(bot, editMsg, entry.msgText, newMarkup, tele.ModeHTML)
 					}
 				}
 			}
@@ -416,7 +421,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		toolNotifs.markResolved(msgID)
 		logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"))
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 		fmt.Fprintf(w, "resolved")
 	})
 	mux.HandleFunc("/perm/switch", func(w http.ResponseWriter, r *http.Request) {
@@ -525,9 +530,9 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	})
 	mux.HandleFunc("/mcp/send-file", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			FilePath string `json:"file_path"`
-			Caption  string `json:"caption"`
-			CWD      string `json:"cwd"`
+			FilePath    string `json:"file_path"`
+			Caption     string `json:"caption"`
+			TmuxTarget  string `json:"tmux_target"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -550,13 +555,17 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file too large: %d bytes (max 50MB for Telegram Bot API)", info.Size())})
 			return
 		}
-		chat, _, _ := resolveChat("", req.CWD)
+		chat, _, topicID := resolveChat(req.TmuxTarget)
 		doc := &tele.Document{
 			File:     tele.FromDisk(req.FilePath),
 			FileName: filepath.Base(req.FilePath),
 			Caption:  req.Caption,
 		}
-		msg, err := retrySend(bot, chat, doc)
+		var sendOpts []interface{}
+		if topicID > 0 {
+			sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+		}
+		msg, err := retrySend(bot, chat, doc, sendOpts...)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})
@@ -651,7 +660,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		switch {
 		case data == "session_default":
 			state.SessionName = cfg.DefaultSessionName
-			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", markdown.EscapeHTML(state.SessionName)), tele.ModeHTML)
 			launchPending.Delete(msgID)
 			if state.WorkDir == "" {
 				askWorkDir(bot, chatID, state)
@@ -660,7 +669,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			}
 		case data == "dir_select":
 			state.WorkDir = state.BrowsePath
-			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", markdown.EscapeHTML(state.WorkDir)), tele.ModeHTML)
 			launchPending.Delete(msgID)
 			go executeLaunch(bot, chatID, state)
 		case data == "cd_up":
@@ -693,7 +702,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			state.DirPage++
 			refreshDirBrowser(bot, msg, state)
 		case data == "cancel":
-			retryEdit(bot, msg, "❌ Launch cancelled.")
+			retryEdit(bot, msg, "❌ Launch cancelled.", tele.ModeHTML)
 			launchPending.Delete(msgID)
 			deleteLaunchState(state.UUID)
 			logger.Info(fmt.Sprintf("bot_new API: cancel pressed msg_id=%d uuid=%s", msgID, state.UUID))
@@ -729,7 +738,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		switch state.Step {
 		case "session":
 			state.SessionName = strings.TrimSpace(text)
-			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
+			retryEdit(bot, msg, fmt.Sprintf("📦 Session name\n✅ %s", markdown.EscapeHTML(state.SessionName)), tele.ModeHTML)
 			if state.WorkDir == "" {
 				askWorkDir(bot, chatID, state)
 			} else {
@@ -742,7 +751,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 				customValue = home + customValue[1:]
 			}
 			state.WorkDir = customValue
-			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
+			retryEdit(bot, msg, fmt.Sprintf("📂 Working directory\n✅ %s", markdown.EscapeHTML(state.WorkDir)), tele.ModeHTML)
 			go executeLaunch(bot, chatID, state)
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -52,7 +52,7 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				if notifEntry, ok := toolNotifs.get(pf.TgMsgID); ok && !notifEntry.resolved {
 					toolNotifs.markResolved(pf.TgMsgID)
 					editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: pf.TgChatID}}
-					retryEdit(bot, editMsg, notifEntry.msgText, buildFrozenMarkup(notifEntry, "⌨️ Answered on desktop"))
+					retryEdit(bot, editMsg, notifEntry.msgText, buildFrozenMarkup(notifEntry, "⌨️ Answered on desktop"), tele.ModeHTML)
 				}
 				pendingFiles.remove(pf.TgMsgID)
 			}
@@ -62,7 +62,7 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(pf.TgMsgID))
 				pendingPerms.resolve(pf.TgMsgID, permDecision{Behavior: "deny", Message: "Cancelled by session event"})
 				editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: permChatID}}
-				retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel))
+				retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel), tele.ModeHTML)
 			}
 			if !isHookAlive(pf.HookPID) {
 				os.Remove(path)
@@ -128,7 +128,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	if info != nil {
 		agentName = info.name
 	}
-	chat, chatID, topicID := resolveChat(p.TmuxTarget, cwdForRoute)
+	chat, chatID, topicID := resolveChat(p.TmuxTarget)
 	if chat == nil {
 		logger.Info(fmt.Sprintf("No chat for pending request %s, skipping", uuid))
 		return
@@ -235,6 +235,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		if topicID > 0 {
 			askSendOpts = append(askSendOpts, &tele.SendOptions{ThreadID: topicID})
 		}
+		askSendOpts = append(askSendOpts, tele.ModeHTML)
 		sent, err := retrySend(bot, chat, text, askSendOpts...)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send AskUserQuestion: %v", err))
@@ -305,6 +306,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	if topicID > 0 {
 		permSendOpts = append(permSendOpts, &tele.SendOptions{ThreadID: topicID})
 	}
+	permSendOpts = append(permSendOpts, tele.ModeHTML)
 	sent, err := retrySend(bot, chat, text, permSendOpts...)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to send permission message: %v", err))
@@ -382,7 +384,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		if hookInfo != nil {
 			hookAgentName = hookInfo.name
 		}
-		chat, chatID, hookTopicID := resolveChat(p.TmuxTarget, cwdForRoute)
+		chat, chatID, hookTopicID := resolveChat(p.TmuxTarget)
 		switch event {
 		case "SessionStart":
 			if chat == nil || p.TmuxTarget == "" {
@@ -398,6 +400,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				AgentName: hookAgentName,
 			})
 			var sessionStartOpts []interface{}
+			sessionStartOpts = append(sessionStartOpts, tele.ModeHTML)
 			if hookTopicID > 0 {
 				sessionStartOpts = append(sessionStartOpts, &tele.SendOptions{ThreadID: hookTopicID})
 			}
@@ -414,6 +417,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 					AgentName: hookAgentName,
 				})
 				var sessionEndOpts []interface{}
+				sessionEndOpts = append(sessionEndOpts, tele.ModeHTML)
 				if hookTopicID > 0 {
 					sessionEndOpts = append(sessionEndOpts, &tele.SendOptions{ThreadID: hookTopicID})
 				}
