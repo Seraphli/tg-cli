@@ -367,7 +367,20 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		}
 		// Toggle: if all selected, clear; otherwise select all
 		allTools := builtinTools
-		if len(cfg.ToolNotifyList) == len(allTools) {
+		allSelected := len(cfg.ToolNotifyList) >= len(allTools)
+		if allSelected {
+			toolSet := make(map[string]bool, len(cfg.ToolNotifyList))
+			for _, t := range cfg.ToolNotifyList {
+				toolSet[t] = true
+			}
+			for _, t := range allTools {
+				if !toolSet[t] {
+					allSelected = false
+					break
+				}
+			}
+		}
+		if allSelected {
 			cfg.ToolNotifyList = nil
 		} else {
 			cfg.ToolNotifyList = make([]string, len(allTools))
@@ -383,6 +396,45 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			action = "All OFF"
 		}
 		return c.Respond(&tele.CallbackResponse{Text: action})
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "merge_submit"}, func(c tele.Context) error {
+		chatID := c.Message().Chat.ID
+		topicID := c.Message().ThreadID
+		key := mergeKey(chatID, topicID)
+		buf, ok := mergeBuffers.finish(key)
+		if !ok || len(buf.items) == 0 {
+			c.Respond(&tele.CallbackResponse{Text: "⚠️ No messages to submit"})
+			return c.Edit("📎 <b>Merge mode</b>\n❌ No messages collected.", tele.ModeHTML)
+		}
+		target, err := injector.ParseTarget(buf.tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			return c.Edit("📎 <b>Merge mode</b>\n❌ Session not found.", tele.ModeHTML)
+		}
+		merged := strings.Join(buf.items, "\n")
+		if err := injector.InjectText(target, merged); err != nil {
+			return c.Edit(fmt.Sprintf("📎 <b>Merge mode</b>\n❌ Injection failed: %v", err), tele.ModeHTML)
+		}
+		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
+		recordPending(buf.tmuxTarget, chatID, c.Message().ID)
+		c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Submitted %d messages", len(buf.items))})
+		var submitted strings.Builder
+		submitted.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> — ✅ Submitted (%d messages)\n──────\n", len(buf.items)))
+		for _, item := range buf.items {
+			submitted.WriteString(markdown.EscapeHTML(truncateStr(item, 100)))
+			submitted.WriteString("\n")
+		}
+		submitted.WriteString("──────")
+		return c.Edit(submitted.String(), tele.ModeHTML)
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "merge_cancel"}, func(c tele.Context) error {
+		chatID := c.Message().Chat.ID
+		topicID := c.Message().ThreadID
+		key := mergeKey(chatID, topicID)
+		mergeBuffers.finish(key)
+		c.Respond(&tele.CallbackResponse{Text: "Cancelled"})
+		return c.Edit("📎 <b>Merge mode</b>\n❌ Cancelled.", tele.ModeHTML)
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "bot_new"}, func(c tele.Context) error {

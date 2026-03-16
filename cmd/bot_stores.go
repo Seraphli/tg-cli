@@ -619,3 +619,72 @@ func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string)
 		logger.Debug(fmt.Sprintf("Reactions promoted: target=%s promoted=%d", tmuxTarget, len(newEntries)))
 	}
 }
+
+type mergeBuffer struct {
+	items       []string
+	chatID      int64
+	topicID     int
+	tmuxTarget  string
+	notifyMsgID int
+}
+
+type mergeBufferStore struct {
+	mu      sync.RWMutex
+	buffers map[string]*mergeBuffer
+}
+
+var mergeBuffers = &mergeBufferStore{
+	buffers: make(map[string]*mergeBuffer),
+}
+
+func mergeKey(chatID int64, topicID int) string {
+	return fmt.Sprintf("%d:%d", chatID, topicID)
+}
+
+func (ms *mergeBufferStore) start(key string, chatID int64, topicID int, tmuxTarget string, notifyMsgID int) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.buffers[key] = &mergeBuffer{
+		chatID:      chatID,
+		topicID:     topicID,
+		tmuxTarget:  tmuxTarget,
+		notifyMsgID: notifyMsgID,
+	}
+}
+
+func (ms *mergeBufferStore) get(key string) *mergeBuffer {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	return ms.buffers[key]
+}
+
+func (ms *mergeBufferStore) add(key, content string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if buf, ok := ms.buffers[key]; ok {
+		buf.items = append(buf.items, content)
+	}
+}
+
+func (ms *mergeBufferStore) addAndGetInfo(key, content string) ([]string, int, int64, bool) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	buf, ok := ms.buffers[key]
+	if !ok {
+		return nil, 0, 0, false
+	}
+	buf.items = append(buf.items, content)
+	itemsCopy := make([]string, len(buf.items))
+	copy(itemsCopy, buf.items)
+	return itemsCopy, buf.notifyMsgID, buf.chatID, true
+}
+
+func (ms *mergeBufferStore) finish(key string) (*mergeBuffer, bool) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	buf, ok := ms.buffers[key]
+	if ok {
+		delete(ms.buffers, key)
+	}
+	return buf, ok
+}

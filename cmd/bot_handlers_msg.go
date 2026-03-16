@@ -12,6 +12,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	"github.com/Seraphli/tg-cli/internal/voice"
@@ -97,6 +98,22 @@ func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
 	return text, nil
 }
 
+// downloadTGFile downloads a Telegram file to /tmp/tg-cli/uploads/
+func downloadTGFile(bot *tele.Bot, fileID, fileName string) (string, error) {
+	dir := "/tmp/tg-cli/uploads"
+	os.MkdirAll(dir, 0755)
+	file, err := bot.FileByID(fileID)
+	if err != nil {
+		return "", fmt.Errorf("file lookup failed: %w", err)
+	}
+	destPath := filepath.Join(dir, fileName)
+	if err := bot.Download(&file, destPath); err != nil {
+		return "", fmt.Errorf("download failed: %w", err)
+	}
+	logger.Info(fmt.Sprintf("File downloaded: %s -> %s", fileID, destPath))
+	return destPath, nil
+}
+
 // restoreSpoilers wraps spoiler entities back into ||spoiler|| markdown syntax.
 func restoreSpoilers(text string, entities []tele.MessageEntity) string {
 	if len(entities) == 0 {
@@ -156,6 +173,37 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 // text is the raw transcribed or typed text; isVoice indicates input method.
 // voicePrefix is prepended to injected text when isVoice is true.
 func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string) error {
+	// Merge mode: buffer content and return
+	key := mergeKey(c.Chat().ID, c.Message().ThreadID)
+	if buf := mergeBuffers.get(key); buf != nil {
+		content := text
+		if isVoice {
+			content = voicePrefix + " " + text
+		}
+		items, notifyMsgID, chatID, _ := mergeBuffers.addAndGetInfo(key, content)
+		reactSeen(bot, c.Message().Chat, c.Message())
+		if isVoice {
+			bot.Reply(c.Message(), voicePrefix+" "+text)
+		}
+		// Update notification with content preview
+		if notifyMsgID != 0 {
+			var preview strings.Builder
+			preview.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> (%d messages)\n──────\n", len(items)))
+			for _, item := range items {
+				line := truncateStr(item, 100)
+				preview.WriteString(markdown.EscapeHTML(line))
+				preview.WriteString("\n")
+			}
+			preview.WriteString("──────")
+			menu := &tele.ReplyMarkup{}
+			btnSubmit := menu.Data("📤 Submit", "merge_submit")
+			btnCancel := menu.Data("❌ Cancel", "merge_cancel")
+			menu.Inline(menu.Row(btnSubmit, btnCancel))
+			editMsg := &tele.Message{ID: notifyMsgID, Chat: &tele.Chat{ID: chatID}}
+			retryEdit(bot, editMsg, preview.String(), menu, tele.ModeHTML)
+		}
+		return nil
+	}
 	answerLabel := "✅ Text answer"
 	if isVoice {
 		answerLabel = "✅ Voice answer"
@@ -454,5 +502,44 @@ func registerMessageHandlers(bot *tele.Bot) {
 			return c.Reply("❌ Transcription produced empty text.")
 		}
 		return processUserInput(c, bot, text, true, voicePrefix)
+	})
+
+	bot.Handle(tele.OnDocument, func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("Not paired. Use /bot_pair first.")
+		}
+		doc := c.Message().Document
+		localPath, err := downloadTGFile(bot, doc.FileID, doc.FileName)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Document download failed: %v", err))
+			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
+		}
+		content := localPath
+		if c.Message().Caption != "" {
+			content = c.Message().Caption + "\n" + localPath
+		}
+		return processUserInput(c, bot, content, false, voicePrefix)
+	})
+
+	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("Not paired. Use /bot_pair first.")
+		}
+		photo := c.Message().Photo
+		fileName := fmt.Sprintf("photo_%d.jpg", time.Now().UnixNano())
+		localPath, err := downloadTGFile(bot, photo.FileID, fileName)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Photo download failed: %v", err))
+			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
+		}
+		content := localPath
+		if c.Message().Caption != "" {
+			content = c.Message().Caption + "\n" + localPath
+		}
+		return processUserInput(c, bot, content, false, voicePrefix)
 	})
 }

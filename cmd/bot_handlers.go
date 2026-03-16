@@ -696,6 +696,38 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return handleVoiceCommand(c)
 	})
 
+	bot.Handle("/bot_merge", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired.")
+		}
+		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
+			return c.Reply("❌ Merge mode is only available in groups.")
+		}
+		key := mergeKey(c.Chat().ID, c.Message().ThreadID)
+		if mergeBuffers.get(key) != nil {
+			return c.Reply("⚠️ Merge mode already active. Send messages, then click Submit.")
+		}
+		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+		if err != nil {
+			if err.Error() == "multiple sessions bound" {
+				return c.Reply("❌ Multiple sessions bound. Reply to a specific notification.")
+			}
+			return c.Reply("❌ No tmux session bound to this chat.")
+		}
+		menu := &tele.ReplyMarkup{}
+		btnSubmit := menu.Data("📤 Submit", "merge_submit")
+		btnCancel := menu.Data("❌ Cancel", "merge_cancel")
+		menu.Inline(menu.Row(btnSubmit, btnCancel))
+		sent, err := bot.Reply(c.Message(), "📎 <b>Merge mode active</b>\nSend messages (text/file/voice), then click Submit.", menu, tele.ModeHTML)
+		if err != nil {
+			return err
+		}
+		mergeBuffers.start(key, c.Chat().ID, c.Message().ThreadID, tmuxStr, sent.ID)
+		return nil
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
 }
@@ -727,8 +759,17 @@ func buildToolsMenu(selected []string) *tele.ReplyMarkup {
 		rows = append(rows, menu.Row(pending...))
 	}
 	// Add All toggle button on the last row
-	allLabel := "☑️ All"
-	if len(selected) == len(availTools) {
+	allSelected := len(selected) >= len(availTools)
+	if allSelected {
+		for _, tool := range availTools {
+			if !selectedSet[tool] {
+				allSelected = false
+				break
+			}
+		}
+	}
+	allLabel := "⬜ All"
+	if allSelected {
 		allLabel = "✅ All"
 	}
 	rows = append(rows, menu.Row(menu.Data(allLabel, "tools_toggle_all")))

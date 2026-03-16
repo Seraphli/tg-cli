@@ -841,4 +841,63 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	// Merge mode API (for E2E testing)
+	mux.HandleFunc("/merge/start", func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "target required", 400)
+			return
+		}
+		parsed, err := injector.ParseTarget(target)
+		if err != nil || !injector.SessionExists(parsed) {
+			http.Error(w, "invalid target", 400)
+			return
+		}
+		key := mergeKey(0, 0)
+		if mergeBuffers.get(key) != nil {
+			http.Error(w, "merge already active", 409)
+			return
+		}
+		mergeBuffers.start(key, 0, 0, target, 0)
+		logger.Info(fmt.Sprintf("Merge started via API: target=%s", target))
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/merge/add", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
+			http.Error(w, "text required", 400)
+			return
+		}
+		key := mergeKey(0, 0)
+		if mergeBuffers.get(key) == nil {
+			http.Error(w, "no active merge", 404)
+			return
+		}
+		mergeBuffers.add(key, req.Text)
+		logger.Info(fmt.Sprintf("Merge add via API: text=%s", truncateStr(req.Text, 200)))
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/merge/submit", func(w http.ResponseWriter, r *http.Request) {
+		key := mergeKey(0, 0)
+		buf, ok := mergeBuffers.finish(key)
+		if !ok || len(buf.items) == 0 {
+			http.Error(w, "no items to submit", 404)
+			return
+		}
+		target, err := injector.ParseTarget(buf.tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			http.Error(w, "session not found", 404)
+			return
+		}
+		merged := strings.Join(buf.items, "\n")
+		if err := injector.InjectText(target, merged); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		logger.Info(fmt.Sprintf("Merge submitted via API: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "items": len(buf.items)})
+	})
 }
