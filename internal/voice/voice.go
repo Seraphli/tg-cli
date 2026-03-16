@@ -45,6 +45,8 @@ func transcribeWhisper(oggPath string) (string, error) {
 		prompt = "Hello, how are you? 你好，请问有什么需要帮助的？"
 	}
 	args = append(args, "--prompt", prompt)
+	args = append(args, "--no-speech-thold", "0.8")
+	args = append(args, "--entropy-thold", "2.0")
 	wCmd := exec.Command(cfg.WhisperPath, args...)
 	if out, err := wCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("whisper failed: %w\n%s", err, out)
@@ -55,7 +57,32 @@ func transcribeWhisper(oggPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read transcription: %w", err)
 	}
-	return strings.TrimSpace(string(data)), nil
+	return stripHallucinations(strings.TrimSpace(string(data))), nil
+}
+
+// stripHallucinations removes common whisper hallucination phrases from the end of transcription.
+func stripHallucinations(text string) string {
+	hallucinations := []string{
+		"谢谢收听", "谢谢观看", "谢谢大家", "感谢收听", "感谢观看",
+		"请订阅", "别忘了点赞", "点赞关注", "欢迎订阅",
+		"Thank you.", "Thank you for watching.", "Thanks for watching.",
+		"Thank you for listening.", "Thanks for listening.",
+		"Please subscribe.", "Like and subscribe.",
+		"Subtitles by", "字幕", "配音",
+	}
+	changed := true
+	for changed {
+		changed = false
+		trimmed := strings.TrimSpace(text)
+		for _, h := range hallucinations {
+			if strings.HasSuffix(trimmed, h) {
+				trimmed = strings.TrimSpace(trimmed[:len(trimmed)-len(h)])
+				changed = true
+			}
+		}
+		text = trimmed
+	}
+	return text
 }
 
 // transcribeSherpaOnnx converts an OGG voice file to text using sherpa-onnx-offline + SenseVoice model.

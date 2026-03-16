@@ -19,12 +19,16 @@ import (
 )
 
 // resolveGroupTarget finds the unique bound tmux target for a group/topic chat.
-// Uses NameRouteMap: finds name routes matching (chatID, threadID), then finds active session by name.
-func resolveGroupTarget(chatID int64) (string, injector.TmuxTarget, error) {
+// Uses NameRouteMap: finds name routes matching (chatID, topicID), then finds active session by name.
+// Pass topicID=0 for non-topic group chats.
+func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget, error) {
 	creds, _ := config.LoadCredentials()
 	var targets []string
 	for key, route := range creds.NameRouteMap {
 		if route.ChatID != chatID {
+			continue
+		}
+		if route.TopicID != topicID {
 			continue
 		}
 		// Try as name first
@@ -162,6 +166,10 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		injectionText = voicePrefix + " " + text
 	}
 	reactSeen(bot, c.Message().Chat, c.Message())
+	// Skip forwarded messages globally (not just in group path)
+	if c.Message().OriginalUnixtime != 0 {
+		return nil
+	}
 	// sendFeedback sends the appropriate feedback message for a group or reply context
 	sendFeedback := func(tmuxTarget string) {
 		recordPending(tmuxTarget, c.Message().Chat.ID, c.Message().ID)
@@ -170,16 +178,15 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 	}
 
-	// Group path: no reply, group/supergroup chat
-	if c.Message().ReplyTo == nil {
+	// Group path: no reply (or reply is just the topic anchor), group/supergroup chat
+	// isTopicAnchor: ReplyTo exists but points to the topic anchor message (same ID as ThreadID),
+	// meaning the message was sent directly in a topic, not as a real reply.
+	isTopicAnchor := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
+	if c.Message().ReplyTo == nil || isTopicAnchor {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
-		// Skip forwarded messages (used for /bot_bind, not injection)
-		if c.Message().OriginalUnixtime != 0 {
-			return nil
-		}
-		tmuxStr, target, err := resolveGroupTarget(c.Chat().ID)
+		tmuxStr, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
 			if err.Error() == "no targets bound" {
 				return nil
@@ -368,7 +375,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /bot_pair first.")
+			return c.Reply("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
@@ -376,7 +383,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 					c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
 					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@")
 				if isCmd {
-					_, target, err := resolveGroupTarget(c.Chat().ID)
+					_, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 					if err != nil {
 						if err.Error() == "multiple sessions bound" {
 							return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
@@ -422,7 +429,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Send("Not paired. Use /bot_pair first.")
+			return c.Reply("Not paired. Use /bot_pair first.")
 		}
 		if c.Message().ReplyTo == nil {
 			if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {

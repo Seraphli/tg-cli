@@ -229,22 +229,17 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 			fmt.Fprintf(&b, "\n🔄 replace_all: %s", esc(ra))
 		}
 		if old, ok := fields["old_string"]; ok {
-			fmt.Fprintf(&b, "\n\n- %s", esc(old))
+			fmt.Fprintf(&b, "\n\n<pre>- %s</pre>", markdown.ReplaceLeadingSpaces(esc(old)))
 		}
 		if ns, ok := fields["new_string"]; ok {
-			fmt.Fprintf(&b, "\n+ %s", esc(ns))
+			fmt.Fprintf(&b, "\n<pre>+ %s</pre>", markdown.ReplaceLeadingSpaces(esc(ns)))
 		}
 	case "Write":
 		if fp, ok := fields["file_path"]; ok {
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if content, ok := fields["content"]; ok {
-			s := fmt.Sprintf("%v", content)
-			r := []rune(s)
-			if len(r) > 500 {
-				s = string(r[:500]) + "…"
-			}
-			fmt.Fprintf(&b, "\n\n%s", markdown.EscapeHTML(s))
+			fmt.Fprintf(&b, "\n\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(content)))
 		}
 	case "Read":
 		if fp, ok := fields["file_path"]; ok {
@@ -303,9 +298,12 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		}
 	}
 	result := b.String()
-	r := []rune(result)
-	if len(r) > 1000 {
-		result = string(r[:1000]) + "…"
+	// Edit and Write tools: skip truncation, let sendEventNotification pagination handle long content
+	if toolName != "Edit" && toolName != "Write" {
+		r := []rune(result)
+		if len(r) > 1000 {
+			result = string(r[:1000]) + "…"
+		}
 	}
 	return result
 }

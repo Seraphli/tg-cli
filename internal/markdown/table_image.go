@@ -164,18 +164,29 @@ func RenderTableImageChrome(headers []string, rows [][]string) ([]byte, error) {
 	defer cancel()
 	ctx, cancelTimeout := context.WithTimeout(ctx, 15*time.Second)
 	defer cancelTimeout()
+	var dims map[string]float64
 	var clip map[string]float64
 	var buf []byte
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate("file://"+tmpPath),
 		chromedp.WaitReady("table"),
+		// Get table dimensions to set viewport large enough for full table
 		chromedp.Evaluate(`(() => {
 			const r = document.querySelector('table').getBoundingClientRect();
-			const padX = r.width * 0.15;
-			const padY = r.height * 0.15;
-			document.body.style.padding = padY + 'px ' + padX + 'px';
+			return {width: r.width, height: r.height};
+		})()`, &dims),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// Set viewport tall enough to fit the entire table without scrolling
+			return chromedp.EmulateViewport(
+				int64(math.Ceil(dims["width"])+200),
+				int64(math.Ceil(dims["height"])+200),
+			).Do(ctx)
+		}),
+		// Apply fixed 15px padding on all sides
+		chromedp.Evaluate(`(() => {
+			document.body.style.padding = '15px';
 			const r2 = document.querySelector('table').getBoundingClientRect();
-			return {width: r2.x + r2.width + padX, height: r2.y + r2.height + padY};
+			return {width: r2.x + r2.width + 15, height: r2.y + r2.height + 15};
 		})()`, &clip),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var err error

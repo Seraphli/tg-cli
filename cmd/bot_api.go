@@ -556,16 +556,26 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		chat, _, topicID := resolveChat(req.TmuxTarget)
-		doc := &tele.Document{
-			File:     tele.FromDisk(req.FilePath),
-			FileName: filepath.Base(req.FilePath),
-			Caption:  req.Caption,
+		ext := strings.ToLower(filepath.Ext(req.FilePath))
+		imageExts := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true}
+		var sendable interface{}
+		if imageExts[ext] {
+			sendable = &tele.Photo{
+				File:    tele.FromDisk(req.FilePath),
+				Caption: req.Caption,
+			}
+		} else {
+			sendable = &tele.Document{
+				File:     tele.FromDisk(req.FilePath),
+				FileName: filepath.Base(req.FilePath),
+				Caption:  req.Caption,
+			}
 		}
 		var sendOpts []interface{}
 		if topicID > 0 {
 			sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
 		}
-		msg, err := retrySend(bot, chat, doc, sendOpts...)
+		msg, err := retrySend(bot, chat, sendable, sendOpts...)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})

@@ -63,6 +63,12 @@ func InjectText(target TmuxTarget, text string) error {
 		return fmt.Errorf("empty text after normalization")
 	}
 	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
+	// Exit copy-mode if active
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_mode}").Output()
+	if err == nil && strings.TrimSpace(string(out)) == "copy-mode" {
+		tmuxCmd(target, "send-keys", "-t", target.PaneID, "q").Run()
+		time.Sleep(200 * time.Millisecond)
+	}
 	// Clear current input
 	if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-u").Run(); err != nil {
 		return fmt.Errorf("clear input failed: %w", err)

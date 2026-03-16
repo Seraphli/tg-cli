@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
@@ -366,7 +368,8 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		// Strip socket suffix so internal stores use bare pane IDs (e.g. %859 not %859@/tmp/...)
 		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 		// Re-register session on any hook event (survives bot restart)
-		if event != "SessionEnd" && p.SessionID != "" && p.TmuxTarget != "" {
+		// Exclude SessionStart (handled inside switch after filter) and SessionEnd
+		if event != "SessionEnd" && event != "SessionStart" && p.SessionID != "" && p.TmuxTarget != "" {
 			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
 		}
 		if p.SessionID != "" {
@@ -387,6 +390,15 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		chat, chatID, hookTopicID := resolveChat(p.TmuxTarget)
 		switch event {
 		case "SessionStart":
+			// Skip temp usage sessions
+			if p.TmuxTarget != "" {
+				if target, err := injector.ParseTarget(p.TmuxTarget); err == nil {
+					sNameBytes, _ := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{session_name}").Output()
+					if strings.HasPrefix(strings.TrimSpace(string(sNameBytes)), "tg-cli-usage-") {
+						break
+					}
+				}
+			}
 			if chat == nil || p.TmuxTarget == "" {
 				w.WriteHeader(200)
 				return
@@ -406,11 +418,35 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			}
 			retrySend(bot, chat, text, sessionStartOpts...)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
+			// Migrate route BEFORE add() — add() removes stale same-pane sessions
+			if p.TmuxTarget != "" && p.SessionID != "" {
+				creds, credErr := config.LoadCredentials()
+				if credErr == nil {
+					allSessions := sessionState.all()
+					for oldSID, oldInfo := range allSessions {
+						if oldInfo.tmuxTarget == p.TmuxTarget && oldSID != p.SessionID {
+							if route, ok := creds.NameRouteMap[oldSID]; ok {
+								creds.NameRouteMap[p.SessionID] = route
+								delete(creds.NameRouteMap, oldSID)
+								config.SaveCredentials(creds)
+								logger.Info(fmt.Sprintf("Route migrated: old=%s new=%s pane=%s", oldSID[:8], p.SessionID[:8], p.TmuxTarget))
+							}
+							break
+						}
+					}
+				}
+			}
 			if p.SessionID != "" && p.TmuxTarget != "" {
 				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
 				logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
 			}
 		case "SessionEnd":
+			// Skip sessions not in sessionState (temp usage sessions filtered at SessionStart were never added)
+			if p.SessionID != "" {
+				if sessionState.findInfoByID(p.SessionID) == nil {
+					break
+				}
+			}
 			if chat != nil {
 				text := notify.BuildNotificationText(notify.NotificationData{
 					Event: "SessionEnd", Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget,
@@ -423,10 +459,6 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				}
 				retrySend(bot, chat, text, sessionEndOpts...)
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
-			}
-			if p.SessionID != "" {
-				sessionState.remove(p.SessionID)
-				logger.Info(fmt.Sprintf("Session untracked: %s", p.SessionID))
 			}
 			pages.cleanupSession(p.SessionID)
 			sessionCounts.cleanup(p.SessionID)

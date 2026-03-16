@@ -218,7 +218,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", replaceLeadingSpaces(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -230,7 +230,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", replaceLeadingSpaces(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -314,7 +314,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 			var buf bytes.Buffer
 			renderTableFallback(&buf, node, source)
 			if buf.Len() > 0 {
-				fmt.Fprintf(w, "<pre>%s</pre>\n\n", replaceLeadingSpaces(EscapeHTML(buf.String())))
+				fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
 			}
 		}
 		return ast.WalkSkipChildren, nil
@@ -360,10 +360,10 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 	return ast.WalkContinue, nil
 }
 
-// replaceLeadingWhitespace replaces leading spaces and tabs with non-breaking spaces
+// ReplaceLeadingSpaces replaces leading spaces and tabs with non-breaking spaces
 // on each line, so Telegram preserves indentation inside <pre> blocks.
 // Tabs are expanded to 4 non-breaking spaces each.
-func replaceLeadingSpaces(s string) string {
+func ReplaceLeadingSpaces(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		j := 0

@@ -177,6 +177,19 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Saved: " + source})
 	})
 
+	// "usage_src" callback: update UsageSource setting and fetch usage
+	bot.Handle(&tele.Btn{Unique: "usage_src"}, func(c tele.Context) error {
+		source := c.Data()
+		cfg, _ := config.LoadAppConfig()
+		cfg.UsageSource = source
+		config.SaveAppConfig(cfg)
+		retryEdit(bot, c.Message(), fmt.Sprintf("📊 Usage source → <b>%s</b>\n⏳ Fetching...", source), tele.ModeHTML)
+		if source == "api" {
+			return handleUsageCommandAPI(c, bot, c.Message())
+		}
+		return handleUsageCommandTmux(c, bot, c.Message())
+	})
+
 	// namesPendingSession is used for tracking session name inputs
 
 	bot.Handle(&tele.InlineButton{Unique: "resume"}, func(c tele.Context) error {
@@ -353,11 +366,12 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
 		}
 		// Toggle: if all selected, clear; otherwise select all
-		if len(cfg.ToolNotifyList) == len(availTools) {
+		allTools := builtinTools
+		if len(cfg.ToolNotifyList) == len(allTools) {
 			cfg.ToolNotifyList = nil
 		} else {
-			cfg.ToolNotifyList = make([]string, len(availTools))
-			copy(cfg.ToolNotifyList, availTools)
+			cfg.ToolNotifyList = make([]string, len(allTools))
+			copy(cfg.ToolNotifyList, allTools)
 		}
 		if err := config.SaveAppConfig(cfg); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})

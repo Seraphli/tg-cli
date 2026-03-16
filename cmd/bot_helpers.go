@@ -1933,6 +1933,10 @@ func shouldNotifyTool(toolName string) bool {
 	if cfg.ToolNotifyEnabled != nil && !*cfg.ToolNotifyEnabled {
 		return false
 	}
+	// Check MCP tools against "MCP" toggle
+	if strings.HasPrefix(toolName, "mcp__") {
+		toolName = "MCP"
+	}
 	for _, t := range cfg.ToolNotifyList {
 		if t == toolName {
 			return true
@@ -1941,77 +1945,186 @@ func shouldNotifyTool(toolName string) bool {
 	return false
 }
 
-// handleUsageCommand launches a temporary CC session, runs /usage, and sends the result to TG.
-func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
-	// Send feedback message
-	msg, err := retrySend(bot, c.Chat(), "⏳ Fetching CC usage...", tele.ModeHTML)
-	if err != nil {
-		return err
-	}
-	// Create temp tmux session
-	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
-	configDir := config.GetConfigDir()
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
-	if err := cmd.Run(); err != nil {
-		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
-		retryEdit(bot, msg, "❌ Failed to create temp session", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
-	// Ensure cleanup
-	defer exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-	target, _ := injector.ParseTarget(sessionName)
-	// Start claude
-	logger.Info(fmt.Sprintf("handleUsageCommand: starting claude session=%s", sessionName))
-	injector.SendKeys(target, "claude", "Enter")
-	// Wait for CC ready (poll for ❯ prompt, 30s for cold start)
-	if !waitForPaneContent(target, "❯", 30*time.Second) {
-		logger.Error("handleUsageCommand: CC failed to initialize (timeout waiting for ❯)")
-		retryEdit(bot, msg, "❌ CC failed to initialize", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: CC ready session=%s", sessionName))
-	// Inject /usage
-	logger.Info("handleUsageCommand: injecting /usage")
-	injector.SendKeys(target, "/usage", "Enter")
-	// Wait for usage output (poll for "used" keyword)
-	if !waitForPaneContent(target, "used", 10*time.Second) {
-		logger.Error("handleUsageCommand: failed to get usage data (timeout waiting for 'used')")
-		retryEdit(bot, msg, "❌ Failed to get usage data", tele.ModeHTML)
-		return nil
-	}
-	logger.Info("handleUsageCommand: usage output detected")
-	// Extra wait for full render
-	time.Sleep(1 * time.Second)
-	// Capture and parse
-	content, err := injector.CapturePane(target)
-	if err != nil {
-		logger.Error(fmt.Sprintf("handleUsageCommand: failed to capture pane err=%v", err))
-		retryEdit(bot, msg, "❌ Failed to capture usage data", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: pane captured len=%d", len(content)))
-	// Parse usage content
-	formatted := parseUsageOutput(content)
-	if formatted == "" {
-		logger.Error("handleUsageCommand: failed to parse usage data (empty result)")
-		retryEdit(bot, msg, "❌ Failed to parse usage data", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
-	// Escape for HTML mode
-	formatted = markdown.EscapeHTML(formatted)
-	// Send formatted result (replace the ⏳ message)
-	chunks := splitBody(formatted, 4000)
-	if len(chunks) <= 1 {
-		retryEdit(bot, msg, formatted, tele.ModeHTML)
+// usageCacheEntry holds cached usage API response.
+type usageCacheEntry struct {
+	data      []byte
+	fetchedAt time.Time
+}
+
+var usageCache *usageCacheEntry
+
+// usageAPIResponse matches the Anthropic OAuth usage API response shape.
+type usageAPIResponse struct {
+	FiveHour       *usagePeriod    `json:"five_hour"`
+	SevenDay       *usagePeriod    `json:"seven_day"`
+	SevenDaySonnet *usagePeriod    `json:"seven_day_sonnet"`
+	ExtraUsage     *usageExtraData `json:"extra_usage"`
+}
+
+type usagePeriod struct {
+	Utilization float64 `json:"utilization"`
+	ResetsAt    string  `json:"resets_at"`
+}
+
+type usageExtraData struct {
+	IsEnabled    bool     `json:"is_enabled"`
+	MonthlyLimit *int     `json:"monthly_limit"`
+	UsedCredits  *int     `json:"used_credits"`
+	Utilization  *float64 `json:"utilization"`
+}
+
+// handleUsageCommandAPI fetches CC usage from the Anthropic OAuth API and sends the result to TG.
+func handleUsageCommandAPI(c tele.Context, bot *tele.Bot, existingMsg *tele.Message) error {
+	var msg *tele.Message
+	if existingMsg != nil {
+		msg = existingMsg
 	} else {
-		kb := buildPageKeyboard(1, len(chunks))
-		retryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
-		pages.store(msg.ID, "", &pageEntry{chunks: chunks, permRows: []tele.Row{}})
+		var err error
+		msg, err = retrySend(bot, c.Chat(), "⏳ Fetching CC usage...", tele.ModeHTML)
+		if err != nil {
+			return err
+		}
 	}
+	formatted, apiErr := fetchUsageFormatted()
+	if apiErr != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: %v", apiErr))
+		retryEdit(bot, msg, fmt.Sprintf("❌ %s", apiErr.Error()), tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: usage fetched len=%d", len(formatted)))
+	retryEdit(bot, msg, formatted, tele.ModeHTML)
 	logger.Info("handleUsageCommand: done")
 	return nil
+}
+
+// fetchUsageFormatted reads the OAuth token, calls the usage API (with 60s cache), and returns formatted HTML.
+func fetchUsageFormatted() (string, error) {
+	// Check cache
+	cacheFile := filepath.Join(os.TempDir(), "tg-cli", "usage.json")
+	if usageCache != nil && time.Since(usageCache.fetchedAt) < 60*time.Second {
+		return formatUsageResponse(usageCache.data)
+	}
+	// Read OAuth token from ~/.claude/.credentials.json
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home dir: %w", err)
+	}
+	credsPath := filepath.Join(home, ".claude", ".credentials.json")
+	credsData, err := os.ReadFile(credsPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read credentials file: %w", err)
+	}
+	var creds map[string]interface{}
+	if err := json.Unmarshal(credsData, &creds); err != nil {
+		return "", fmt.Errorf("cannot parse credentials: %w", err)
+	}
+	token, _ := creds["accessToken"].(string)
+	if token == "" {
+		// Try nested structure: claudeAiOauth.accessToken
+		if oauth, ok := creds["claudeAiOauth"].(map[string]interface{}); ok {
+			token, _ = oauth["accessToken"].(string)
+		}
+	}
+	if token == "" {
+		return "", fmt.Errorf("access token not found in credentials")
+	}
+	// Call usage API
+	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+	}
+	// Cache to file
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0755); err == nil {
+		os.WriteFile(cacheFile, body, 0600)
+	}
+	usageCache = &usageCacheEntry{data: body, fetchedAt: time.Now()}
+	return formatUsageResponse(body)
+}
+
+// formatUsageResponse parses the usage API JSON and returns a TG HTML message.
+func formatUsageResponse(data []byte) (string, error) {
+	var u usageAPIResponse
+	if err := json.Unmarshal(data, &u); err != nil {
+		return "", fmt.Errorf("parse usage response: %w", err)
+	}
+	var sb strings.Builder
+	sb.WriteString("📊 CC Usage\n")
+	if u.FiveHour != nil {
+		pct := int(u.FiveHour.Utilization)
+		resetTime := parseResetTime(u.FiveHour.ResetsAt, true)
+		sb.WriteString(fmt.Sprintf("\nCurrent session: %d%% used\n⏰ Resets %s\n", pct, resetTime))
+	}
+	if u.SevenDay != nil {
+		pct := int(u.SevenDay.Utilization)
+		resetTime := parseResetTime(u.SevenDay.ResetsAt, true)
+		sb.WriteString(fmt.Sprintf("\nCurrent week (all models): %d%% used\n⏰ Resets %s\n", pct, resetTime))
+	}
+	if u.SevenDaySonnet != nil {
+		pct := int(u.SevenDaySonnet.Utilization)
+		resetTime := parseResetTime(u.SevenDaySonnet.ResetsAt, true)
+		sb.WriteString(fmt.Sprintf("\nCurrent week (Sonnet only): %d%% used\n⏰ Resets %s\n", pct, resetTime))
+	}
+	if u.ExtraUsage != nil {
+		sb.WriteString("\nExtra usage\n")
+		if !u.ExtraUsage.IsEnabled {
+			sb.WriteString("Extra usage not enabled • /extra-usage to enable\n")
+		} else if u.ExtraUsage.UsedCredits != nil && u.ExtraUsage.MonthlyLimit != nil {
+			used := float64(*u.ExtraUsage.UsedCredits) / 100.0
+			limit := float64(*u.ExtraUsage.MonthlyLimit) / 100.0
+			sb.WriteString(fmt.Sprintf("$%.2f / $%.2f used\n", used, limit))
+		}
+	}
+	result := strings.TrimRight(sb.String(), "\n")
+	if result == "📊 CC Usage" {
+		return "", fmt.Errorf("no usage data in response")
+	}
+	return result, nil
+}
+
+// parseResetTime formats a reset timestamp for display, always including day and timezone.
+func parseResetTime(ts string, includeDay bool) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		// Try without timezone suffix
+		t, err = time.Parse("2006-01-02T15:04:05Z", ts)
+		if err != nil {
+			return ts
+		}
+	}
+	t = t.Local()
+	tz := getIANATimezone()
+	now := time.Now()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("3pm") + " (" + tz + ")"
+	}
+	return t.Format("Jan 2, 3pm") + " (" + tz + ")"
+}
+
+// getIANATimezone returns the IANA timezone name (e.g., "Asia/Shanghai").
+func getIANATimezone() string {
+	link, err := os.Readlink("/etc/localtime")
+	if err == nil {
+		if idx := strings.Index(link, "zoneinfo/"); idx >= 0 {
+			return link[idx+len("zoneinfo/"):]
+		}
+	}
+	zone, _ := time.Now().Zone()
+	return zone
 }
 
 // waitForPaneContent polls the tmux pane until the needle string appears or timeout is reached.
@@ -2025,6 +2138,73 @@ func waitForPaneContent(target injector.TmuxTarget, needle string, timeout time.
 		time.Sleep(500 * time.Millisecond)
 	}
 	return false
+}
+
+// handleUsageCommandTmux launches a temporary CC session, runs /usage, and sends the result to TG.
+func handleUsageCommandTmux(c tele.Context, bot *tele.Bot, existingMsg *tele.Message) error {
+	var msg *tele.Message
+	if existingMsg != nil {
+		msg = existingMsg
+	} else {
+		var err error
+		msg, err = retrySend(bot, c.Chat(), "⏳ Fetching CC usage...", tele.ModeHTML)
+		if err != nil {
+			return err
+		}
+	}
+	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
+	configDir := config.GetConfigDir()
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
+	if err := cmd.Run(); err != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
+		retryEdit(bot, msg, "❌ Failed to create temp session", tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
+	defer exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	target, _ := injector.ParseTarget(sessionName)
+	logger.Info(fmt.Sprintf("handleUsageCommand: starting claude session=%s", sessionName))
+	injector.SendKeys(target, "claude", "Enter")
+	if !waitForPaneContent(target, "❯", 30*time.Second) {
+		logger.Error("handleUsageCommand: CC failed to initialize (timeout waiting for ❯)")
+		retryEdit(bot, msg, "❌ CC failed to initialize", tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: CC ready session=%s", sessionName))
+	logger.Info("handleUsageCommand: injecting /usage")
+	injector.SendKeys(target, "/usage", "Enter")
+	if !waitForPaneContent(target, "used", 10*time.Second) {
+		logger.Error("handleUsageCommand: failed to get usage data (timeout waiting for 'used')")
+		retryEdit(bot, msg, "❌ Failed to get usage data", tele.ModeHTML)
+		return nil
+	}
+	logger.Info("handleUsageCommand: usage output detected")
+	time.Sleep(1 * time.Second)
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: failed to capture pane err=%v", err))
+		retryEdit(bot, msg, "❌ Failed to capture usage data", tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: pane captured len=%d", len(content)))
+	formatted := parseUsageOutput(content)
+	if formatted == "" {
+		logger.Error("handleUsageCommand: failed to parse usage data (empty result)")
+		retryEdit(bot, msg, "❌ Failed to parse usage data", tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
+	formatted = markdown.EscapeHTML(formatted)
+	chunks := splitBody(formatted, 4000)
+	if len(chunks) <= 1 {
+		retryEdit(bot, msg, formatted, tele.ModeHTML)
+	} else {
+		kb := buildPageKeyboard(1, len(chunks))
+		retryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
+		pages.store(msg.ID, "", &pageEntry{chunks: chunks, permRows: []tele.Row{}})
+	}
+	logger.Info("handleUsageCommand: done")
+	return nil
 }
 
 // parseUsageOutput extracts relevant usage lines from raw CC pane output.
@@ -2064,6 +2244,17 @@ func parseUsageOutput(raw string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+// handleUsageCommand shows the current usage source and inline buttons to switch and fetch.
+func handleUsageCommand(c tele.Context, bot *tele.Bot) error {
+	sel := &tele.ReplyMarkup{}
+	sel.Inline(sel.Row(
+		sel.Data("📟 tmux", "usage_src", "tmux"),
+		sel.Data("🌐 api", "usage_src", "api"),
+	))
+	_, err := retrySend(bot, c.Chat(), "📊 Select usage source:", sel, tele.ModeHTML)
+	return err
 }
 
 func buildVoiceText(cfg config.AppConfig) string {
