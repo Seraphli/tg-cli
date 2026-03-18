@@ -625,7 +625,6 @@ func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string)
 type mergeBuffer struct {
 	items       []string
 	chatID      int64
-	topicID     int
 	tmuxTarget  string
 	notifyMsgID int
 }
@@ -639,16 +638,15 @@ var mergeBuffers = &mergeBufferStore{
 	buffers: make(map[string]*mergeBuffer),
 }
 
-func mergeKey(chatID int64, topicID int) string {
-	return fmt.Sprintf("%d:%d", chatID, topicID)
+func mergeKey(chatID int64) string {
+	return fmt.Sprintf("%d", chatID)
 }
 
-func (ms *mergeBufferStore) start(key string, chatID int64, topicID int, tmuxTarget string, notifyMsgID int) {
+func (ms *mergeBufferStore) start(key string, chatID int64, tmuxTarget string, notifyMsgID int) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	ms.buffers[key] = &mergeBuffer{
 		chatID:      chatID,
-		topicID:     topicID,
 		tmuxTarget:  tmuxTarget,
 		notifyMsgID: notifyMsgID,
 	}

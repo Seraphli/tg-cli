@@ -175,7 +175,7 @@ setup_hooks() {
 MINEOF
   # Install hooks to user-level settings (CLAUDE_CONFIG_DIR/settings.json)
   TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
-  echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" setup --port "$TEST_PORT" --settings "$TEST_SETTINGS"
+  echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install --port "$TEST_PORT" --settings "$TEST_SETTINGS"
   # Add skipDangerousModePermissionPrompt to settings
   python3 -c "import json;f='$TEST_SETTINGS';d=json.load(open(f));d['skipDangerousModePermissionPrompt']=True;json.dump(d,open(f,'w'),indent=2)"
   # Register MCP in isolated config

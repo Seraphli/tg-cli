@@ -17,6 +17,43 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+// buildMergeNotifyText builds the merge notification text with title, status line, and collected items.
+func buildMergeNotifyText(status string, items []string) string {
+	var b strings.Builder
+	b.WriteString("📎 <b>Merge mode</b>\n")
+	b.WriteString(status)
+	if len(items) > 0 {
+		b.WriteString("\n──────\n")
+		for _, item := range items {
+			b.WriteString(markdown.EscapeHTML(item))
+			b.WriteString("\n")
+		}
+		b.WriteString("──────")
+	}
+	return b.String()
+}
+
+// parseMergeItems extracts collected message items from existing merge notification text.
+// Parses content between "──────" delimiters.
+func parseMergeItems(text string) []string {
+	parts := strings.SplitN(text, "──────", 3)
+	if len(parts) < 2 {
+		return nil
+	}
+	content := strings.TrimSpace(parts[1])
+	if content == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	var items []string
+	for _, line := range lines {
+		if line != "" {
+			items = append(items, line)
+		}
+	}
+	return items
+}
+
 func registerCallbackHandlers(bot *tele.Bot) {
 	bot.Handle(&tele.InlineButton{Unique: "p"}, func(c tele.Context) error {
 		pageNum, err := strconv.Atoi(c.Data())
@@ -400,37 +437,47 @@ func registerCallbackHandlers(bot *tele.Bot) {
 
 	bot.Handle(&tele.InlineButton{Unique: "merge_submit"}, func(c tele.Context) error {
 		chatID := c.Message().Chat.ID
-		topicID := c.Message().ThreadID
-		key := mergeKey(chatID, topicID)
+		key := mergeKey(chatID)
 		buf, ok := mergeBuffers.finish(key)
-		if !ok || len(buf.items) == 0 {
-			c.Respond(&tele.CallbackResponse{Text: "⚠️ No messages to submit"})
-			return c.Edit("📎 <b>Merge mode</b>\n❌ No messages collected.", tele.ModeHTML)
+		itemCount := 0
+		if buf != nil {
+			itemCount = len(buf.items)
+		}
+		logger.Info(fmt.Sprintf("Merge submit: key=%s found=%v items=%d", key, ok, itemCount))
+		if !ok {
+			// Buffer expired — parse items from existing message text
+			items := parseMergeItems(c.Message().Text)
+			c.Respond(&tele.CallbackResponse{Text: "⚠️ Buffer expired"})
+			return c.Edit(buildMergeNotifyText("⚠️ Buffer expired", items), tele.ModeHTML)
+		}
+		if len(buf.items) == 0 {
+			c.Respond(&tele.CallbackResponse{Text: "⚠️ No messages collected"})
+			return c.Edit(buildMergeNotifyText("⚠️ No messages collected", nil), tele.ModeHTML)
 		}
 		merged := strings.Join(buf.items, "\n")
 		if err := safeInjectText(bot, buf.tmuxTarget, merged); err != nil {
-			return c.Edit(fmt.Sprintf("📎 <b>Merge mode</b>\n❌ Injection failed: %v", err), tele.ModeHTML)
+			c.Respond(&tele.CallbackResponse{Text: "❌ Injection failed"})
+			return c.Edit(buildMergeNotifyText(fmt.Sprintf("❌ Injection failed: %v", err), buf.items), tele.ModeHTML)
 		}
 		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
 		recordPending(buf.tmuxTarget, chatID, c.Message().ID)
 		c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Submitted %d messages", len(buf.items))})
-		var submitted strings.Builder
-		submitted.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> — ✅ Submitted (%d messages)\n──────\n", len(buf.items)))
-		for _, item := range buf.items {
-			submitted.WriteString(markdown.EscapeHTML(item))
-			submitted.WriteString("\n")
-		}
-		submitted.WriteString("──────")
-		return c.Edit(submitted.String(), tele.ModeHTML)
+		return c.Edit(buildMergeNotifyText(fmt.Sprintf("✅ Submitted (%d messages)", len(buf.items)), buf.items), tele.ModeHTML)
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "merge_cancel"}, func(c tele.Context) error {
 		chatID := c.Message().Chat.ID
-		topicID := c.Message().ThreadID
-		key := mergeKey(chatID, topicID)
-		mergeBuffers.finish(key)
+		key := mergeKey(chatID)
+		logger.Info(fmt.Sprintf("Merge cancel: key=%s", key))
+		buf, ok := mergeBuffers.finish(key)
+		var items []string
+		if ok && buf != nil {
+			items = buf.items
+		} else {
+			items = parseMergeItems(c.Message().Text)
+		}
 		c.Respond(&tele.CallbackResponse{Text: "Cancelled"})
-		return c.Edit("📎 <b>Merge mode</b>\n❌ Cancelled.", tele.ModeHTML)
+		return c.Edit(buildMergeNotifyText("❌ Cancelled", items), tele.ModeHTML)
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "bot_new"}, func(c tele.Context) error {

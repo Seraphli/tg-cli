@@ -12,7 +12,6 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
-	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	"github.com/Seraphli/tg-cli/internal/voice"
@@ -61,6 +60,42 @@ func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget,
 		}
 		if !found {
 			targets = append(targets, tmuxTarget)
+		}
+	}
+	if len(targets) == 0 && topicID != 0 {
+		// Fallback: retry with topicID=0 for reply threads in non-topic supergroups
+		for key, route := range creds.NameRouteMap {
+			if route.ChatID != chatID || route.TopicID != 0 {
+				continue
+			}
+			var tmuxTarget string
+			info := sessionState.findByName(key)
+			if info != nil {
+				tmuxTarget = info.tmuxTarget
+			} else {
+				sessionInfo := sessionState.findInfoByID(key)
+				if sessionInfo != nil {
+					tmuxTarget = sessionInfo.tmuxTarget
+				}
+			}
+			if tmuxTarget == "" {
+				continue
+			}
+			target, err := injector.ParseTarget(tmuxTarget)
+			if err != nil || !injector.SessionExists(target) {
+				continue
+			}
+			normalized := notify.FormatPaneID(tmuxTarget)
+			found := false
+			for _, t := range targets {
+				if notify.FormatPaneID(t) == normalized {
+					found = true
+					break
+				}
+			}
+			if !found {
+				targets = append(targets, tmuxTarget)
+			}
 		}
 	}
 	if len(targets) == 0 {
@@ -174,32 +209,27 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 // voicePrefix is prepended to injected text when isVoice is true.
 func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string) error {
 	// Merge mode: buffer content and return
-	key := mergeKey(c.Chat().ID, c.Message().ThreadID)
+	key := mergeKey(c.Chat().ID)
 	if buf := mergeBuffers.get(key); buf != nil {
 		content := text
 		if isVoice {
 			content = voicePrefix + " " + text
 		}
 		items, notifyMsgID, chatID, _ := mergeBuffers.addAndGetInfo(key, content)
+		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), truncateStr(content, 200)))
 		reactSeen(bot, c.Message().Chat, c.Message())
 		if isVoice {
 			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
 		// Update notification with content preview
 		if notifyMsgID != 0 {
-			var preview strings.Builder
-			preview.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> (%d messages)\n──────\n", len(items)))
-			for _, item := range items {
-				preview.WriteString(markdown.EscapeHTML(item))
-				preview.WriteString("\n")
-			}
-			preview.WriteString("──────")
+			preview := buildMergeNotifyText(fmt.Sprintf("📝 Collecting (%d messages)", len(items)), items)
 			menu := &tele.ReplyMarkup{}
 			btnSubmit := menu.Data("📤 Submit", "merge_submit")
 			btnCancel := menu.Data("❌ Cancel", "merge_cancel")
 			menu.Inline(menu.Row(btnSubmit, btnCancel))
 			editMsg := &tele.Message{ID: notifyMsgID, Chat: &tele.Chat{ID: chatID}}
-			retryEdit(bot, editMsg, preview.String(), menu, tele.ModeHTML)
+			retryEdit(bot, editMsg, preview, menu, tele.ModeHTML)
 		}
 		return nil
 	}
@@ -231,6 +261,22 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
+			// Fallback: try extracting target from ReplyTo when in reply thread
+			if isTopicAnchor {
+				fallbackTarget, fbErr := resolveReplyTarget(c.Message().ReplyTo.Text)
+				if fbErr == nil {
+					fbTmuxStr := injector.FormatTarget(fallbackTarget)
+					if !checkSessionAlive(fbTmuxStr, bot) {
+						return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
+					}
+					sendFeedback(fbTmuxStr)
+					if err := safeInjectText(bot, fbTmuxStr, injectionText); err != nil {
+						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+					}
+					logger.Info(fmt.Sprintf("Group quick reply (fallback): target=%s voice=%v text=%s", fbTmuxStr, isVoice, truncateStr(text, 200)))
+					return nil
+				}
+			}
 			if err.Error() == "no targets bound" {
 				return nil
 			}

@@ -853,12 +853,12 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, "invalid target", 400)
 			return
 		}
-		key := mergeKey(0, 0)
+		key := mergeKey(0)
 		if mergeBuffers.get(key) != nil {
 			http.Error(w, "merge already active", 409)
 			return
 		}
-		mergeBuffers.start(key, 0, 0, target, 0)
+		mergeBuffers.start(key, 0, target, 0)
 		logger.Info(fmt.Sprintf("Merge started via API: target=%s", target))
 		w.Write([]byte(`{"status":"ok"}`))
 	})
@@ -870,7 +870,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, "text required", 400)
 			return
 		}
-		key := mergeKey(0, 0)
+		key := mergeKey(0)
 		if mergeBuffers.get(key) == nil {
 			http.Error(w, "no active merge", 404)
 			return
@@ -880,7 +880,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/merge/submit", func(w http.ResponseWriter, r *http.Request) {
-		key := mergeKey(0, 0)
+		key := mergeKey(0)
 		buf, ok := mergeBuffers.finish(key)
 		if !ok || len(buf.items) == 0 {
 			http.Error(w, "no items to submit", 404)

@@ -56,8 +56,13 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 				if msg.ThreadID != 0 {
 					threadInfo = fmt.Sprintf(" thread_id=%d", msg.ThreadID)
 				}
-				logger.Info(fmt.Sprintf("TG recv %s: chat=%d sender=%d msg_id=%d%s%s text=%s",
-					msgType, c.Chat().ID, c.Sender().ID, msg.ID, replyInfo, threadInfo, preview))
+				chatType := c.Chat().Type
+				topicInfo := ""
+				if msg.TopicMessage {
+					topicInfo = " is_topic=true"
+				}
+				logger.Info(fmt.Sprintf("TG recv %s: chat=%d type=%s sender=%d msg_id=%d%s%s%s text=%s",
+					msgType, c.Chat().ID, chatType, c.Sender().ID, msg.ID, replyInfo, threadInfo, topicInfo, preview))
 			}
 			return next(c)
 		}
@@ -91,30 +96,22 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 	for tgName, ccName := range ccCommandMap {
 		tg, cc := tgName, ccName
 		bot.Handle("/"+tg, func(c tele.Context) error {
-			isTopicAnchor := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-			if c.Message().ReplyTo == nil || isTopicAnchor {
-				if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-					tmuxStr, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
-					if err != nil {
-						if err.Error() == "no targets bound" {
-							return c.Reply("💡 Please reply to a notification message to target a session.")
-						}
-						if err.Error() == "multiple sessions bound" {
-							return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
-						}
-						return c.Reply("❌ tmux session not found.")
-					}
+			// Try reply path first when ReplyTo exists and contains target info
+			if c.Message().ReplyTo != nil {
+				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				if err == nil {
 					text := "/" + cc
 					if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
 						text += " " + payload
 					}
-					// Check for pending AskUserQuestion — resolve with command text instead of injecting
+					tmuxStr := injector.FormatTarget(target)
+					// Check for pending AskUserQuestion
 					if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
 						uuid, uuidOk := pendingFiles.get(msgID)
 						if uuidOk && !handleStalePending(msgID, uuid, bot) {
 							path := filepath.Join(pendingDir(), uuid+".json")
-							pf, err := readPendingFile(path)
-							if err == nil {
+							pf, pfErr := readPendingFile(path)
+							if pfErr == nil {
 								answers := make(map[string]string)
 								if len(entry.questions) > 0 {
 									answers[entry.questions[0].questionText] = text
@@ -124,7 +121,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 									logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
 								} else {
 									toolNotifs.markResolved(msgID)
-									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
 									retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 								}
@@ -136,54 +133,60 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					if err := injector.InjectText(target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 					}
-					logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, truncateStr(text, 200)))
 					recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 					return nil
 				}
-				return c.Reply("💡 Please reply to a notification message to target a session.")
+				// ReplyTo exists but no target found (e.g. topic anchor) — fall through to group path
 			}
-			target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
-			if err != nil {
-				if err.Error() == "no target found" {
-					return c.Reply("❌ No tmux session info found in the original message.")
+			// Group path
+			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+				tmuxStr, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+				if err != nil {
+					if err.Error() == "no targets bound" {
+						return c.Reply("💡 Please reply to a notification message to target a session.")
+					}
+					if err.Error() == "multiple sessions bound" {
+						return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
+					}
+					return c.Reply("❌ tmux session not found.")
 				}
-				return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
-			}
-			text := "/" + cc
-			if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
-				text += " " + payload
-			}
-			tmuxStr := injector.FormatTarget(target)
-			// Check for pending AskUserQuestion — resolve with command text instead of injecting
-			if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-				uuid, uuidOk := pendingFiles.get(msgID)
-				if uuidOk && !handleStalePending(msgID, uuid, bot) {
-					path := filepath.Join(pendingDir(), uuid+".json")
-					pf, err := readPendingFile(path)
-					if err == nil {
-						answers := make(map[string]string)
-						if len(entry.questions) > 0 {
-							answers[entry.questions[0].questionText] = text
-						}
-						ccOutput := buildAskCCOutput(pf.Payload, answers)
-						if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
-							logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
-						} else {
-							toolNotifs.markResolved(msgID)
-							logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-							retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+				text := "/" + cc
+				if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
+					text += " " + payload
+				}
+				// Check for pending AskUserQuestion
+				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
+					uuid, uuidOk := pendingFiles.get(msgID)
+					if uuidOk && !handleStalePending(msgID, uuid, bot) {
+						path := filepath.Join(pendingDir(), uuid+".json")
+						pf, pfErr := readPendingFile(path)
+						if pfErr == nil {
+							answers := make(map[string]string)
+							if len(entry.questions) > 0 {
+								answers[entry.questions[0].questionText] = text
+							}
+							ccOutput := buildAskCCOutput(pf.Payload, answers)
+							if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
+								logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
+							} else {
+								toolNotifs.markResolved(msgID)
+								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+								retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+							}
 						}
 					}
+					recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+					return nil
 				}
+				if err := injector.InjectText(target, text); err != nil {
+					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
+				}
+				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, truncateStr(text, 200)))
 				recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
 				return nil
 			}
-			if err := injector.InjectText(target, text); err != nil {
-				return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
-			}
-			recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
-			return nil
+			return c.Reply("💡 Please reply to a notification message to target a session.")
 		})
 	}
 
@@ -705,7 +708,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return c.Reply("❌ Merge mode is only available in groups.")
 		}
-		key := mergeKey(c.Chat().ID, c.Message().ThreadID)
+		key := mergeKey(c.Chat().ID)
+		// Force cancel: /bot_merge cancel
+		if strings.TrimSpace(c.Message().Payload) == "cancel" {
+			buf, _ := mergeBuffers.finish(key)
+			logger.Info(fmt.Sprintf("Merge force cancelled: chat=%d key=%s", c.Chat().ID, key))
+			if buf != nil && buf.notifyMsgID != 0 {
+				editMsg := &tele.Message{ID: buf.notifyMsgID, Chat: &tele.Chat{ID: buf.chatID}}
+				retryEdit(bot, editMsg, buildMergeNotifyText("❌ Cancelled", buf.items), tele.ModeHTML)
+			}
+			return c.Reply("📎 Merge mode cancelled.")
+		}
 		if mergeBuffers.get(key) != nil {
 			return c.Reply("⚠️ Merge mode already active. Send messages, then click Submit.")
 		}
@@ -720,11 +733,12 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		btnSubmit := menu.Data("📤 Submit", "merge_submit")
 		btnCancel := menu.Data("❌ Cancel", "merge_cancel")
 		menu.Inline(menu.Row(btnSubmit, btnCancel))
-		sent, err := bot.Reply(c.Message(), "📎 <b>Merge mode active</b>\nSend messages (text/file/voice), then click Submit.", menu, tele.ModeHTML)
+		sent, err := bot.Reply(c.Message(), buildMergeNotifyText("📝 Collecting (0 messages)", nil), menu, tele.ModeHTML)
 		if err != nil {
 			return err
 		}
-		mergeBuffers.start(key, c.Chat().ID, c.Message().ThreadID, tmuxStr, sent.ID)
+		mergeBuffers.start(key, c.Chat().ID, tmuxStr, sent.ID)
+		logger.Info(fmt.Sprintf("Merge started: chat=%d target=%s key=%s notify_msg=%d", c.Chat().ID, tmuxStr, key, sent.ID))
 		return nil
 	})
 
