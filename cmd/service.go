@@ -44,7 +44,8 @@ func serviceName() string {
 
 // installBinPath returns the path where the service binary should be installed.
 func installBinPath() string {
-	return filepath.Join(config.GetConfigDir(), "bin", "tg-cli")
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "bin", "tg-cli")
 }
 
 func unitFilePath() string {

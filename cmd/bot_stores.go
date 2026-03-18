@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -687,4 +689,198 @@ func (ms *mergeBufferStore) finish(key string) (*mergeBuffer, bool) {
 		delete(ms.buffers, key)
 	}
 	return buf, ok
+}
+
+type cronJob struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name,omitempty"`
+	Mode        string    `json:"mode"`
+	Schedule    string    `json:"schedule"`
+	Once        bool      `json:"once"`
+	Prompt      string    `json:"prompt"`
+	AgentName   string    `json:"agent_name,omitempty"`
+	TmuxTarget  string    `json:"tmux_target,omitempty"`
+	CWD         string    `json:"cwd,omitempty"`
+	SessionID   string    `json:"session_id,omitempty"`
+	MaxTurns    int       `json:"max_turns,omitempty"`
+	LastRun     time.Time `json:"last_run,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type cronJobStore struct {
+	mu   sync.RWMutex
+	jobs map[string]*cronJob
+}
+
+var cronJobs = &cronJobStore{jobs: make(map[string]*cronJob)}
+
+func (cs *cronJobStore) add(job *cronJob) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if job.Name != "" {
+		for _, j := range cs.jobs {
+			if j.Name == job.Name {
+				return fmt.Errorf("name '%s' already exists", job.Name)
+			}
+		}
+	}
+	cs.jobs[job.ID] = job
+	cs.saveLocked()
+	return nil
+}
+
+func (cs *cronJobStore) remove(idOrName string) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if _, ok := cs.jobs[idOrName]; ok {
+		delete(cs.jobs, idOrName)
+		cs.saveLocked()
+		return true
+	}
+	for id, j := range cs.jobs {
+		if j.Name == idOrName {
+			delete(cs.jobs, id)
+			cs.saveLocked()
+			return true
+		}
+	}
+	return false
+}
+
+func (cs *cronJobStore) findByName(name string) *cronJob {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	for _, j := range cs.jobs {
+		if j.Name == name {
+			cp := *j
+			return &cp
+		}
+	}
+	return nil
+}
+
+func (cs *cronJobStore) findByIDOrName(idOrName string) *cronJob {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if j, ok := cs.jobs[idOrName]; ok {
+		cp := *j
+		return &cp
+	}
+	for _, j := range cs.jobs {
+		if j.Name == idOrName {
+			cp := *j
+			return &cp
+		}
+	}
+	return nil
+}
+
+func (cs *cronJobStore) update(idOrName string, updates map[string]string) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	var job *cronJob
+	if j, ok := cs.jobs[idOrName]; ok {
+		job = j
+	} else {
+		for _, j := range cs.jobs {
+			if j.Name == idOrName {
+				job = j
+				break
+			}
+		}
+	}
+	if job == nil {
+		return false
+	}
+	if v, ok := updates["prompt"]; ok {
+		job.Prompt = v
+	}
+	if v, ok := updates["schedule"]; ok {
+		job.Schedule = v
+	}
+	if v, ok := updates["agent_name"]; ok {
+		job.AgentName = v
+	}
+	if v, ok := updates["name"]; ok {
+		for _, j := range cs.jobs {
+			if j.ID != job.ID && j.Name == v {
+				return false
+			}
+		}
+		job.Name = v
+	}
+	if v, ok := updates["max_turns"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			job.MaxTurns = n
+		}
+	}
+	cs.saveLocked()
+	return true
+}
+
+func (cs *cronJobStore) get(id string) *cronJob {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	j := cs.jobs[id]
+	return j
+}
+
+func (cs *cronJobStore) all() []*cronJob {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	result := make([]*cronJob, 0, len(cs.jobs))
+	for _, j := range cs.jobs {
+		cp := *j
+		result = append(result, &cp)
+	}
+	return result
+}
+
+func (cs *cronJobStore) updateLastRun(id string, t time.Time) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if j, ok := cs.jobs[id]; ok {
+		j.LastRun = t
+		cs.saveLocked()
+	}
+}
+
+func (cs *cronJobStore) updateSessionID(id, sessionID string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if j, ok := cs.jobs[id]; ok {
+		j.SessionID = sessionID
+		cs.saveLocked()
+	}
+}
+
+func (cs *cronJobStore) saveLocked() {
+	jobs := make([]*cronJob, 0, len(cs.jobs))
+	for _, j := range cs.jobs {
+		jobs = append(jobs, j)
+	}
+	data, err := json.MarshalIndent(jobs, "", "  ")
+	if err != nil {
+		return
+	}
+	path := filepath.Join(config.GetConfigDir(), "cron-jobs.json")
+	os.WriteFile(path, data, 0644)
+}
+
+func (cs *cronJobStore) load() {
+	path := filepath.Join(config.GetConfigDir(), "cron-jobs.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var jobs []*cronJob
+	if err := json.Unmarshal(data, &jobs); err != nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for _, j := range jobs {
+		cs.jobs[j.ID] = j
+	}
+	logger.Info(fmt.Sprintf("Loaded %d cron jobs", len(jobs)))
 }

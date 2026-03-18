@@ -407,12 +407,8 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			c.Respond(&tele.CallbackResponse{Text: "⚠️ No messages to submit"})
 			return c.Edit("📎 <b>Merge mode</b>\n❌ No messages collected.", tele.ModeHTML)
 		}
-		target, err := injector.ParseTarget(buf.tmuxTarget)
-		if err != nil || !injector.SessionExists(target) {
-			return c.Edit("📎 <b>Merge mode</b>\n❌ Session not found.", tele.ModeHTML)
-		}
 		merged := strings.Join(buf.items, "\n")
-		if err := injector.InjectText(target, merged); err != nil {
+		if err := safeInjectText(bot, buf.tmuxTarget, merged); err != nil {
 			return c.Edit(fmt.Sprintf("📎 <b>Merge mode</b>\n❌ Injection failed: %v", err), tele.ModeHTML)
 		}
 		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
@@ -421,7 +417,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		var submitted strings.Builder
 		submitted.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> — ✅ Submitted (%d messages)\n──────\n", len(buf.items)))
 		for _, item := range buf.items {
-			submitted.WriteString(markdown.EscapeHTML(truncateStr(item, 100)))
+			submitted.WriteString(markdown.EscapeHTML(item))
 			submitted.WriteString("\n")
 		}
 		submitted.WriteString("──────")
@@ -631,5 +627,64 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			return c.Respond(&tele.CallbackResponse{Text: "✅ Model: " + selected.name})
 		}
 		return c.Respond()
+	})
+	bot.Handle(&tele.Btn{Unique: "cron_delete"}, func(c tele.Context) error {
+		jobID := c.Data()
+		if cronJobs.remove(jobID) {
+			c.Respond(&tele.CallbackResponse{Text: "✅ Job deleted"})
+			logger.Info(fmt.Sprintf("Cron job deleted via TG: id=%s", jobID[:8]))
+			jobs := cronJobs.all()
+			if len(jobs) == 0 {
+				return c.Edit("📋 No cron jobs configured.")
+			}
+			var text strings.Builder
+			text.WriteString("📋 <b>Cron Jobs</b>\n\n")
+			markup := &tele.ReplyMarkup{}
+			var rows []tele.Row
+			for _, j := range jobs {
+				modeIcon := "🖥️"
+				if j.Mode == "inject" {
+					modeIcon = "💉"
+				}
+				onceTag := ""
+				if j.Once {
+					onceTag = " [once]"
+				}
+				agentInfo := ""
+				if j.AgentName != "" {
+					agentInfo = fmt.Sprintf(" → %s", j.AgentName)
+				}
+				lastRunStr := "never"
+				if !j.LastRun.IsZero() {
+					lastRunStr = relativeTime(j.LastRun)
+				}
+				nameStr := ""
+				if j.Name != "" {
+					nameStr = fmt.Sprintf(" <b>%s</b>", j.Name)
+				}
+				text.WriteString(fmt.Sprintf("%s <code>%s</code>%s%s%s\n📅 %s | Last: %s\n📝 %s\n\n",
+					modeIcon, j.ID[:8], nameStr, onceTag, agentInfo, j.Schedule, lastRunStr, j.Prompt))
+				btnLabel := "🗑 " + j.ID[:8]
+				if j.Name != "" {
+					btnLabel = "🗑 " + j.Name
+				}
+				rows = append(rows, markup.Row(markup.Data(btnLabel, "cron_delete", j.ID)))
+			}
+			fullText := text.String()
+			chunks := splitBody(fullText, 3900)
+			if len(chunks) <= 1 {
+				markup.Inline(rows...)
+				return c.Edit(fullText, markup, tele.ModeHTML)
+			}
+			kb := buildPageKeyboardWithExtra(1, len(chunks), rows)
+			sent, err := retrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
+			if err != nil {
+				return err
+			}
+			pages.store(sent.ID, "", &pageEntry{chunks: chunks, permRows: rows, chatID: c.Chat().ID})
+			return nil
+		}
+		c.Respond(&tele.CallbackResponse{Text: "❌ Job not found"})
+		return nil
 	})
 }

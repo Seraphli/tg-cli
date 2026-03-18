@@ -190,15 +190,6 @@ func BuildPermissionText(data PermissionData) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncToolStr truncates a string to maxLen runes, appending ellipsis if truncated.
-func truncToolStr(s string, maxLen int) string {
-	r := []rune(s)
-	if len(r) <= maxLen {
-		return s
-	}
-	return string(r[:maxLen]) + "…"
-}
-
 // BuildToolNotifyText formats a tool call notification message for Telegram.
 // Each tool type gets a human-readable format with relevant emojis.
 func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string) string {
@@ -228,11 +219,23 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		if ra, ok := fields["replace_all"]; ok {
 			fmt.Fprintf(&b, "\n🔄 replace_all: %s", esc(ra))
 		}
+		oldStr := ""
 		if old, ok := fields["old_string"]; ok {
-			fmt.Fprintf(&b, "\n\n<pre>- %s</pre>", markdown.ReplaceLeadingSpaces(esc(old)))
+			oldStr = fmt.Sprintf("%v", old)
 		}
+		newStr := ""
 		if ns, ok := fields["new_string"]; ok {
-			fmt.Fprintf(&b, "\n<pre>+ %s</pre>", markdown.ReplaceLeadingSpaces(esc(ns)))
+			newStr = fmt.Sprintf("%v", ns)
+		}
+		if oldStr != "" {
+			fmt.Fprintf(&b, "\n\nOld:\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(oldStr)))
+		} else {
+			fmt.Fprintf(&b, "\n\nOld: (empty)")
+		}
+		if newStr != "" {
+			fmt.Fprintf(&b, "\n\nNew:\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(newStr)))
+		} else {
+			fmt.Fprintf(&b, "\n\nNew: (empty)")
 		}
 	case "Write":
 		if fp, ok := fields["file_path"]; ok {
@@ -298,13 +301,6 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		}
 	}
 	result := b.String()
-	// Edit and Write tools: skip truncation, let sendEventNotification pagination handle long content
-	if toolName != "Edit" && toolName != "Write" {
-		r := []rune(result)
-		if len(r) > 1000 {
-			result = string(r[:1000]) + "…"
-		}
-	}
 	return result
 }
 

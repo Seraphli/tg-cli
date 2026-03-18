@@ -98,6 +98,10 @@ func writePendingFileHook(path string, pf *PendingFileHook) error {
 }
 
 func runHook(cmd *cobra.Command, args []string) {
+	// Skip all hook processing for cron-spawned Claude sessions
+	if os.Getenv("TG_CLI_CRON") == "1" {
+		os.Exit(0)
+	}
 	hookLog("version=%s", Version)
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {

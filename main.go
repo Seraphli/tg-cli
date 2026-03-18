@@ -29,6 +29,7 @@ func main() {
 	rootCmd.AddCommand(cmd.VoiceCmd)
 	rootCmd.AddCommand(cmd.StatuslineCmd)
 	rootCmd.AddCommand(cmd.McpCmd)
+	rootCmd.AddCommand(cmd.CronCmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -46,9 +46,14 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 				// Check name route map
 				if info.name != "" {
 					if route, ok := creds.NameRouteMap[info.name]; ok {
-						if !sentChats[route.ChatID] {
-							bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing)
-							sentChats[route.ChatID] = true
+						key := route.ChatID*1000 + int64(route.TopicID)
+						if !sentChats[key] {
+							if route.TopicID > 0 {
+								bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing, route.TopicID)
+							} else {
+								bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing)
+							}
+							sentChats[key] = true
 						}
 						continue
 					}
@@ -179,6 +184,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_usage", Description: "Show CC usage limits"},
 		tele.Command{Text: "bot_merge", Description: "Merge multiple messages before sending"},
 		tele.Command{Text: "bot_voice", Description: "Voice transcription settings"},
+		tele.Command{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
@@ -207,6 +213,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	sessionState.loadFromFile()
 	sessionState.validateAlive()
 	cleanStaleRoutes(bot)
+	cronJobs.load()
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	registerHTTPHooks(mux, bot, &creds, port)
@@ -219,6 +226,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	defer typingCancel()
 	go startTypingLoop(typingCtx, bot)
 	go startLivenessLoop(typingCtx, bot)
+	go startCronLoop(typingCtx, bot)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

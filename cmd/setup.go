@@ -23,6 +23,9 @@ var availableTools = []string{
 //go:embed hooks_config.json
 var hooksConfigJSON []byte
 
+//go:embed commands/tg-cli/cron.md
+var cronSkillDoc []byte
+
 type hookEntry struct {
 	Event   string `json:"event"`
 	Matcher string `json:"matcher"`
@@ -37,8 +40,8 @@ type hooksConfig struct {
 }
 
 var SetupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Install hooks into ~/.claude/settings.json",
+	Use:   "install",
+	Short: "Install hooks and skill docs",
 	Run:   runSetup,
 }
 
@@ -72,7 +75,7 @@ func runSetup(cmd *cobra.Command, args []string) {
 		hookBin = filepath.Join(config.ConfigDir, "bin", "tg-cli")
 	} else {
 		// Default instance: use the service binary
-		hookBin = filepath.Join(home, ".tg-cli", "bin", "tg-cli")
+		hookBin = installBinPath()
 	}
 	if _, err := os.Stat(hookBin); err != nil {
 		// Fallback to current executable if service binary not found
@@ -303,6 +306,15 @@ func runSetup(cmd *cobra.Command, args []string) {
 		} else {
 			fmt.Println("MCP server registered.")
 		}
+	}
+	// Install skill docs
+	cmdDir := filepath.Join(home, ".claude", "commands", "tg-cli")
+	os.MkdirAll(cmdDir, 0755)
+	cronDocPath := filepath.Join(cmdDir, "cron.md")
+	if err := os.WriteFile(cronDocPath, cronSkillDoc, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to install skill doc: %v\n", err)
+	} else {
+		fmt.Printf("Skill doc installed: %s\n", cronDocPath)
 	}
 }
 

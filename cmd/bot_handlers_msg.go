@@ -190,8 +190,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			var preview strings.Builder
 			preview.WriteString(fmt.Sprintf("📎 <b>Merge mode</b> (%d messages)\n──────\n", len(items)))
 			for _, item := range items {
-				line := truncateStr(item, 100)
-				preview.WriteString(markdown.EscapeHTML(line))
+				preview.WriteString(markdown.EscapeHTML(item))
 				preview.WriteString("\n")
 			}
 			preview.WriteString("──────")
@@ -203,10 +202,6 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			retryEdit(bot, editMsg, preview.String(), menu, tele.ModeHTML)
 		}
 		return nil
-	}
-	answerLabel := "✅ Text answer"
-	if isVoice {
-		answerLabel = "✅ Voice answer"
 	}
 	text = restoreSpoilers(text, c.Message().Entities)
 	injectionText := text
@@ -234,7 +229,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
-		tmuxStr, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
 			if err.Error() == "no targets bound" {
 				return nil
@@ -244,56 +239,11 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 			return c.Reply("❌ tmux session not found.")
 		}
-		for {
-			msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr)
-			if !ok {
-				break
-			}
-			uuid, uuidOk := pendingFiles.get(msgID)
-			if !uuidOk {
-				toolNotifs.markResolved(msgID)
-				continue
-			}
-			if handleStalePending(msgID, uuid, bot) {
-				continue
-			}
-			path := filepath.Join(pendingDir(), uuid+".json")
-			pf, err := readPendingFile(path)
-			if err != nil {
-				toolNotifs.markResolved(msgID)
-				continue
-			}
-			answers := make(map[string]string)
-			if len(entry.questions) > 0 {
-				answers[entry.questions[0].questionText] = text
-			}
-			ccOutput := buildAskCCOutput(pf.Payload, answers)
-			if err := writePendingAnswer(uuid, ccOutput); err != nil {
-				logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-			} else {
-				toolNotifs.markResolved(msgID)
-				logger.Info(fmt.Sprintf("AskUserQuestion custom text via group direct msg: msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-				editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-				retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel), tele.ModeHTML)
-			}
-			sendFeedback(tmuxStr)
-			return nil
-		}
-		if msgID, ok := pendingPerms.findByTmuxTarget(tmuxStr); ok {
-			doCancelPerm(bot, msgID)
-			go func() {
-				time.Sleep(3 * time.Second)
-				injector.InjectText(target, injectionText)
-			}()
-			logger.Info(fmt.Sprintf("Permission cancelled via group msg, ESC+delayed inject: perm_msg=%d target=%s voice=%v text=%s", msgID, tmuxStr, isVoice, truncateStr(text, 200)))
-			sendFeedback(tmuxStr)
-			return nil
-		}
 		if !checkSessionAlive(tmuxStr, bot) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
 		sendFeedback(tmuxStr)
-		if err := injector.InjectText(target, injectionText); err != nil {
+		if err := safeInjectText(bot, tmuxStr, injectionText); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
 		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, truncateStr(text, 200)))
@@ -330,17 +280,13 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	}
 
 	if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-		doCancelPerm(bot, replyTo.ID)
 		targetPtr, err := extractTmuxTarget(replyTo.Text)
 		if err == nil && targetPtr != nil {
-			target := *targetPtr
-			if injector.SessionExists(target) {
-				go func() {
-					time.Sleep(3 * time.Second)
-					injector.InjectText(target, injectionText)
-				}()
-				logger.Info(fmt.Sprintf("Permission cancelled via reply, text will inject after ESC: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
-				sendFeedback(injector.FormatTarget(target))
+			tmuxStr := injector.FormatTarget(*targetPtr)
+			if injector.SessionExists(*targetPtr) {
+				sendFeedback(tmuxStr)
+				safeInjectText(bot, tmuxStr, injectionText)
+				logger.Info(fmt.Sprintf("Permission cancelled via reply + safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, truncateStr(text, 200)))
 			}
 		}
 		return nil
@@ -353,40 +299,11 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 		switch entry.toolName {
 		case "AskUserQuestion":
-			if entry.resolved {
-				toolNotifs.markResolved(replyTo.ID)
-				injector.InjectText(target, injectionText)
-				return nil
-			}
-			uuid, uuidOk := pendingFiles.get(replyTo.ID)
-			if !uuidOk {
-				// No pending file mapping, treat as stale
-				toolNotifs.markResolved(replyTo.ID)
-				injector.InjectText(target, injectionText)
-				return nil
-			}
-			if handleStalePending(replyTo.ID, uuid, bot) {
-				// Stale: hook dead or file missing, inject text
-				injector.InjectText(target, injectionText)
-				return nil
-			}
-			// Cancel pending file and send ESC, then inject after delay
-			path := filepath.Join(pendingDir(), uuid+".json")
-			pf, err := readPendingFile(path)
-			if err == nil {
-				pf.Status = "cancelled"
-				writePendingFile(path, pf)
-			}
-			toolNotifs.markResolved(replyTo.ID)
-			editMsg := &tele.Message{ID: replyTo.ID, Chat: &tele.Chat{ID: entry.chatID}}
-			retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, answerLabel), tele.ModeHTML)
-			injector.SendKeys(target, "Escape")
-			go func() {
-				time.Sleep(3 * time.Second)
-				injector.InjectText(target, injectionText)
-			}()
-			logger.Info(fmt.Sprintf("AskUserQuestion text reply: ESC+delayed inject: msg_id=%d uuid=%s voice=%v text=%s", replyTo.ID, uuid, isVoice, truncateStr(text, 200)))
 			sendFeedback(entry.tmuxTarget)
+			if err := safeInjectText(bot, entry.tmuxTarget, injectionText); err != nil {
+				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
+			}
+			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
 			return nil
 		}
 		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
@@ -402,15 +319,11 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	if !checkSessionAlive(injector.FormatTarget(target), bot) {
 		return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 	}
-	if err := injector.InjectText(target, injectionText); err != nil {
-		logger.Error(fmt.Sprintf("Injection failed: %v", err))
+	sendFeedback(injector.FormatTarget(target))
+	if err := safeInjectText(bot, injector.FormatTarget(target), injectionText); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
 	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
-	recordPending(injector.FormatTarget(target), c.Message().Chat.ID, c.Message().ID)
-	if isVoice {
-		bot.Reply(c.Message(), voicePrefix+" "+text)
-	}
 	return nil
 }
 

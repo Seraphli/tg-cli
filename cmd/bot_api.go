@@ -900,4 +900,105 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "items": len(buf.items)})
 	})
+	// Cron job management API
+	mux.HandleFunc("/cron/add", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Mode       string `json:"mode"`
+			Schedule   string `json:"schedule"`
+			Once       bool   `json:"once"`
+			Prompt     string `json:"prompt"`
+			AgentName  string `json:"agent_name"`
+			TmuxTarget string `json:"tmux_target"`
+			Name       string `json:"name"`
+			CWD        string `json:"cwd"`
+			MaxTurns   int    `json:"max_turns"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Mode == "" || req.Schedule == "" || req.Prompt == "" {
+			http.Error(w, "mode, schedule, and prompt required", http.StatusBadRequest)
+			return
+		}
+		if req.Mode == "inject" && req.AgentName == "" && req.TmuxTarget == "" {
+			http.Error(w, "agent_name or tmux_target required for inject mode", http.StatusBadRequest)
+			return
+		}
+		job := &cronJob{
+			ID:         generateCronID(),
+			Name:       req.Name,
+			Mode:       req.Mode,
+			Schedule:   req.Schedule,
+			Once:       req.Once,
+			Prompt:     req.Prompt,
+			AgentName:  req.AgentName,
+			TmuxTarget: req.TmuxTarget,
+			CWD:        req.CWD,
+			MaxTurns:   req.MaxTurns,
+			CreatedAt:  time.Now(),
+		}
+		if err := cronJobs.add(job); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		logger.Info(fmt.Sprintf("Cron job added via API: id=%s mode=%s schedule=%s name=%s", job.ID[:8], job.Mode, job.Schedule, job.Name))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "id": job.ID})
+	})
+	mux.HandleFunc("/cron/list", func(w http.ResponseWriter, r *http.Request) {
+		jobs := cronJobs.all()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"jobs": jobs})
+	})
+	mux.HandleFunc("/cron/remove", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		idOrName := req.ID
+		if idOrName == "" {
+			idOrName = req.Name
+		}
+		if !cronJobs.remove(idOrName) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		logger.Info(fmt.Sprintf("Cron job removed via API: id_or_name=%s", idOrName))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	})
+	mux.HandleFunc("/cron/update", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID      string            `json:"id"`
+			Updates map[string]string `json:"updates"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !cronJobs.update(req.ID, req.Updates) {
+			http.Error(w, "job not found or name conflict", http.StatusNotFound)
+			return
+		}
+		logger.Info(fmt.Sprintf("Cron job updated via API: id=%s", req.ID))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	})
 }

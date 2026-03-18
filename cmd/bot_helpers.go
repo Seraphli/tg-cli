@@ -2308,6 +2308,56 @@ func buildVoiceMenu(engine string) *tele.ReplyMarkup {
 	return menu
 }
 
+// safeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
+// If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
+func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return err
+	}
+	// Answer pending AskUserQuestion with the text (same as normal custom reply)
+	for {
+		msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxTarget)
+		if !ok {
+			break
+		}
+		uuid, uuidOk := pendingFiles.get(msgID)
+		if !uuidOk {
+			toolNotifs.markResolved(msgID)
+			continue
+		}
+		if handleStalePending(msgID, uuid, bot) {
+			continue
+		}
+		path := filepath.Join(pendingDir(), uuid+".json")
+		pf, pfErr := readPendingFile(path)
+		if pfErr != nil {
+			toolNotifs.markResolved(msgID)
+			continue
+		}
+		answers := make(map[string]string)
+		if len(entry.questions) > 0 {
+			answers[entry.questions[0].questionText] = text
+		}
+		ccOutput := buildAskCCOutput(pf.Payload, answers)
+		if writeErr := writePendingAnswer(uuid, ccOutput); writeErr != nil {
+			logger.Error(fmt.Sprintf("safeInjectText: failed to write answer: %v", writeErr))
+		}
+		toolNotifs.markResolved(msgID)
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
+		retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Custom reply"), tele.ModeHTML)
+		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
+		return nil
+	}
+	// Cancel pending PermissionRequest
+	if msgID, ok := pendingPerms.findByTmuxTarget(tmuxTarget); ok {
+		doCancelPerm(bot, msgID)
+		injector.SendKeys(target, "Escape")
+		time.Sleep(3 * time.Second)
+	}
+	return injector.InjectText(target, text)
+}
+
 // handleVoiceCommand handles /bot_voice — shows voice config and allows engine/language switch.
 func handleVoiceCommand(c tele.Context) error {
 	cfg, err := config.LoadAppConfig()

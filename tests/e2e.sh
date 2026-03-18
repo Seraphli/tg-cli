@@ -53,20 +53,16 @@ if [ -n "$PHASE_NUM" ]; then
     echo "ERROR: Phase $PHASE_NUM not found"
     exit 1
   fi
-  if [ "$PHASE_NUM" != "1" ]; then
-    echo "Building binary..."
-    go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
-    start_bot
-    export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-    setup_hooks
-    start_claude
-    trap cleanup_sessions EXIT
-  fi
+  echo "Building binary..."
+  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  start_bot
+  export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  setup_hooks
+  start_claude
+  trap cleanup_sessions EXIT
   run_phase "$MATCHED"
 else
   # Run all phases
-  run_phase "$SCRIPT_DIR/phases/phase1_unit.sh"
-
   echo "Building binary..."
   go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
   start_bot
@@ -75,7 +71,7 @@ else
   start_claude
   trap cleanup_sessions EXIT
 
-  for phase in "$SCRIPT_DIR"/phases/phase[2-9]_*.sh "$SCRIPT_DIR"/phases/phase1[0-9]_*.sh; do
+  for phase in $(ls "$SCRIPT_DIR"/phases/phase*.sh | sort -V); do
     [ -f "$phase" ] && run_phase "$phase"
   done
 fi
