@@ -795,6 +795,29 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return nil
 	})
 
+	bot.Handle("/bot_mailbox", func(c tele.Context) error {
+		creds, _ := config.LoadCredentials()
+		chatType := c.Chat().Type
+		if chatType == "group" || chatType == "supergroup" {
+			isBound := creds.MailboxChatID == c.Chat().ID
+			menu := &tele.ReplyMarkup{}
+			if isBound {
+				menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
+			} else {
+				menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
+			}
+			status := "Not bound"
+			if isBound {
+				status = "✅ Bound as mailbox group"
+			}
+			return c.Reply(fmt.Sprintf("📬 Mailbox Group\nStatus: %s\nChat ID: %d", status, c.Chat().ID), menu)
+		}
+		if creds.MailboxChatID != 0 {
+			return c.Reply(fmt.Sprintf("📬 Mailbox bound to chat %d", creds.MailboxChatID))
+		}
+		return c.Reply("📬 No mailbox group bound. Send /bot_mailbox in a group to bind it.")
+	})
+
 	registerMessageHandlers(bot)
 	registerCallbackHandlers(bot)
 }

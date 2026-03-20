@@ -734,4 +734,38 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		c.Respond(&tele.CallbackResponse{Text: "❌ Job not found"})
 		return nil
 	})
+
+	bot.Handle(&tele.InlineButton{Unique: "mailbox_bind"}, func(c tele.Context) error {
+		chatID := c.Message().Chat.ID
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		creds.MailboxChatID = chatID
+		if err := config.SaveCredentials(creds); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		logger.Info(fmt.Sprintf("Mailbox group bound: chat=%d", chatID))
+		c.Respond(&tele.CallbackResponse{Text: "✅ Bound"})
+		menu := &tele.ReplyMarkup{}
+		menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
+		return c.Edit(fmt.Sprintf("📬 Mailbox Group\nStatus: ✅ Bound as mailbox group\nChat ID: %d", chatID), menu)
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "mailbox_unbind"}, func(c tele.Context) error {
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		creds.MailboxChatID = 0
+		if err := config.SaveCredentials(creds); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		logger.Info("Mailbox group unbound")
+		c.Respond(&tele.CallbackResponse{Text: "Unbound"})
+		chatID := c.Message().Chat.ID
+		menu := &tele.ReplyMarkup{}
+		menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
+		return c.Edit(fmt.Sprintf("📬 Mailbox Group\nStatus: Not bound\nChat ID: %d", chatID), menu)
+	})
 }

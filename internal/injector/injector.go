@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// ServerName is the tmux server socket name (-L flag). Empty = default server.
+var ServerName string
+
 var injectMu sync.Map // key: formatted target string, value: *sync.Mutex
 
 func getInjectLock(target TmuxTarget) *sync.Mutex {
@@ -37,11 +40,25 @@ func NormalizeText(text string) string {
 	return text
 }
 
-// tmuxCmd builds a tmux command with optional socket flag.
+// tmuxCmd builds a tmux command with optional server name (-L) and socket (-S) flags.
 func tmuxCmd(target TmuxTarget, args ...string) *exec.Cmd {
+	var prefix []string
+	if ServerName != "" {
+		prefix = append(prefix, "-L", ServerName)
+	}
 	if target.Socket != "" {
-		fullArgs := append([]string{"-S", target.Socket}, args...)
-		return exec.Command("tmux", fullArgs...)
+		prefix = append(prefix, "-S", target.Socket)
+	}
+	if len(prefix) > 0 {
+		return exec.Command("tmux", append(prefix, args...)...)
+	}
+	return exec.Command("tmux", args...)
+}
+
+// globalTmuxCmd builds a tmux command with optional server name (-L) flag only (no target socket).
+func globalTmuxCmd(args ...string) *exec.Cmd {
+	if ServerName != "" {
+		return exec.Command("tmux", append([]string{"-L", ServerName}, args...)...)
 	}
 	return exec.Command("tmux", args...)
 }
@@ -64,7 +81,7 @@ func InjectText(target TmuxTarget, text string) error {
 	}
 	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
 	// Exit copy-mode if active
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_mode}").Output()
+	out, err := tmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_mode}").Output()
 	if err == nil && strings.TrimSpace(string(out)) == "copy-mode" {
 		tmuxCmd(target, "send-keys", "-t", target.PaneID, "q").Run()
 		time.Sleep(200 * time.Millisecond)
@@ -115,7 +132,7 @@ func CreateSession(name, workDir string) error {
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	return exec.Command("tmux", args...).Run()
+	return globalTmuxCmd(args...).Run()
 }
 
 // CreateWindow creates a new window in an existing tmux session.
@@ -125,7 +142,7 @@ func CreateWindow(session, workDir string) (string, error) {
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	out, err := exec.Command("tmux", args...).Output()
+	out, err := globalTmuxCmd(args...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -134,7 +151,7 @@ func CreateWindow(session, workDir string) (string, error) {
 
 // ListPanes returns pane IDs in a session.
 func ListPanes(session string) ([]string, error) {
-	out, err := exec.Command("tmux", "list-panes", "-t", session, "-F", "#{pane_id}").Output()
+	out, err := globalTmuxCmd("list-panes", "-t", session, "-F", "#{pane_id}").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +161,7 @@ func ListPanes(session string) ([]string, error) {
 
 // NamedSessionExists checks if a tmux session with the given name exists.
 func NamedSessionExists(name string) bool {
-	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
+	return globalTmuxCmd("has-session", "-t", name).Run() == nil
 }
 
 // SendKeys sends keys to a tmux pane.

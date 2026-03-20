@@ -1,10 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +31,8 @@ var (
 	cronSelf      bool
 	cronName      string
 	cronMaxTurns  int
+	cronHost      string
+	cronToken     string
 )
 
 var cronAddCmd = &cobra.Command{
@@ -64,6 +66,8 @@ var cronLogCmd = &cobra.Command{
 }
 
 func init() {
+	CronCmd.PersistentFlags().StringVar(&cronHost, "host", "", "Bot API host URL")
+	CronCmd.PersistentFlags().StringVar(&cronToken, "token", "", "API authentication token")
 	cronAddCmd.Flags().StringVar(&cronMode, "mode", "", "Execution mode: print or inject (required)")
 	cronAddCmd.Flags().StringVar(&cronSchedule, "schedule", "", "Schedule: duration (30m, 2h) or cron expression (required)")
 	cronAddCmd.Flags().StringVar(&cronPrompt, "prompt", "", "Prompt text to send/inject (required)")
@@ -149,7 +153,8 @@ func runCronAdd(cmd *cobra.Command, args []string) {
 		MaxTurns   int    `json:"max_turns,omitempty"`
 	}{cronMode, cronSchedule, cronOnce, cronPrompt, cronAgent, tmuxTarget, cronName, cronCWD, cronMaxTurns}
 	data, _ := json.Marshal(reqBody)
-	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/cron/add", port), "application/json", strings.NewReader(string(data)))
+	url := buildAPIURL(cronHost, port, "/cron/add")
+	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)
@@ -170,7 +175,8 @@ func runCronAdd(cmd *cobra.Command, args []string) {
 
 func runCronList(cmd *cobra.Command, args []string) {
 	port := getCronPort()
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/cron/list", port))
+	url := buildAPIURL(cronHost, port, "/cron/list")
+	resp, err := apiRequest("GET", url, nil, cronToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)
@@ -219,7 +225,8 @@ func runCronRemove(cmd *cobra.Command, args []string) {
 	data, _ := json.Marshal(struct {
 		ID string `json:"id"`
 	}{idOrName})
-	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/cron/remove", port), "application/json", strings.NewReader(string(data)))
+	url := buildAPIURL(cronHost, port, "/cron/remove")
+	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)
@@ -243,7 +250,8 @@ func runCronLog(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	port := getCronPort()
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/cron/list", port))
+	url := buildAPIURL(cronHost, port, "/cron/list")
+	resp, err := apiRequest("GET", url, nil, cronToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)
@@ -346,7 +354,8 @@ func runCronUpdate(cmd *cobra.Command, args []string) {
 		Updates map[string]string `json:"updates"`
 	}{cronJobID, updates}
 	data, _ := json.Marshal(reqBody)
-	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/cron/update", port), "application/json", strings.NewReader(string(data)))
+	url := buildAPIURL(cronHost, port, "/cron/update")
+	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)

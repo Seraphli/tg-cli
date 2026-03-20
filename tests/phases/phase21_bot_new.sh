@@ -9,12 +9,12 @@ echo "--- /bot_new session launch test (HTTP API) ---"
 ensure_infrastructure
 
 # Get bot pane ID for pane captures
-BOT_PANE=$(tmux list-panes -t "$BOT_SESSION" -F '#{pane_id}')
+BOT_PANE=$($TMUX_TEST list-panes -t "$BOT_SESSION" -F '#{pane_id}')
 
-# Cleanup: destroy the tmux session created by /bot_new
+# Cleanup: destroy the tmux session created by /bot_new (on test server)
 cleanup_bot_new() {
   echo "  [bot_new] cleanup: killing tg-cli tmux session..."
-  tmux kill-session -t "tg-cli" 2>/dev/null || true
+  $TMUX_TEST kill-session -t "tg-cli" 2>/dev/null || true
 }
 trap cleanup_bot_new EXIT
 
@@ -151,15 +151,15 @@ else
 fi
 pane_log "[bot_new] AFTER step 6: wait for executeLaunch" "$BOT_PANE"
 
-# Step 7: Verify tmux session exists
+# Step 7: Verify tmux session exists (on test server)
 pane_log "[bot_new] BEFORE step 7: verify tmux session" "$BOT_PANE"
-if tmux has-session -t "tg-cli" 2>/dev/null; then
+if $TMUX_TEST has-session -t "tg-cli" 2>/dev/null; then
   pass "tmux session 'tg-cli' exists after /bot_new"
 else
   fail "tmux session 'tg-cli' not found after executeLaunch"
 fi
 pane_log "[bot_new] AFTER step 7: verify tmux session" "$BOT_PANE"
-NEW_PANE=$(tmux list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
+NEW_PANE=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
 if [ -n "$NEW_PANE" ]; then
   pane_log "[bot_new] new CC pane after step 7" "$NEW_PANE"
 fi
@@ -185,7 +185,7 @@ else
   fail "executeLaunch done log with pane ID not found in bot log"
 fi
 pane_log "[bot_new] AFTER step 8: wait for executeLaunch done" "$BOT_PANE"
-NEW_PANE=$(tmux list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
+NEW_PANE=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
 if [ -n "$NEW_PANE" ]; then
   pane_log "[bot_new] new CC pane after step 8" "$NEW_PANE"
 fi

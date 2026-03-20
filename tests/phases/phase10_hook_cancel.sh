@@ -43,7 +43,7 @@ pass "PermissionRequest triggered (hook blocking, pending file created)"
 # Instead of approving via API, approve via TUI: press Enter in Claude pane
 # This simulates user answering in TUI while hook is still blocking
 pane_log "[hook_cancel] BEFORE TUI Enter (approve in TUI)"
-tmux send-keys -t "$CLAUDE_SESSION" Enter
+$TMUX_TEST send-keys -t "$CLAUDE_SESSION" Enter
 pane_log "[hook_cancel] AFTER TUI Enter"
 
 # Wait for CC to continue and reach idle state (Stop hook fired)

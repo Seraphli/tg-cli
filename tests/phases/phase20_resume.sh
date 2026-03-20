@@ -16,9 +16,9 @@ pane_log "[resume] BEFORE CC restart"
 SENTINEL="SHELL_READY_$(date +%s)"
 ELAPSED=0
 while [ $ELAPSED -lt 30 ]; do
-  tmux send-keys -t "$CLAUDE_SESSION" "echo $SENTINEL" Enter
+  $TMUX_TEST send-keys -t "$CLAUDE_SESSION" "echo $SENTINEL" Enter
   sleep 2
-  PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -q "$SENTINEL"; then
     echo "  Shell is ready (sentinel detected)."
     break
@@ -31,24 +31,24 @@ if [ $ELAPSED -ge 30 ]; then
   fail "Shell readiness after CC exit"
   exit 1
 fi
-tmux send-keys -t "$CLAUDE_SESSION" "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
+$TMUX_TEST send-keys -t "$CLAUDE_SESSION" "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
 
 # Wait for CC to show banner or trust dialog
 ELAPSED_CC=0
 CC_STARTED=false
 while [ $ELAPSED_CC -lt 30 ]; do
   sleep 2
-  PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$CLAUDE_PANE" -p 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
-    tmux send-keys -t "$CLAUDE_SESSION" Down
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" Down
     sleep 1
-    tmux send-keys -t "$CLAUDE_SESSION" C-m
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
     echo "  Bypass Permissions dialog detected, accepted."
     CC_STARTED=true
     break
   fi
   if echo "$PANE_CONTENT" | grep -qi "trust"; then
-    tmux send-keys -t "$CLAUDE_SESSION" C-m
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
     echo "  Trust dialog detected, confirmed."
     CC_STARTED=true
     break

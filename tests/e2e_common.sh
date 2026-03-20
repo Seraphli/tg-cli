@@ -3,6 +3,7 @@
 # Shared config (allow override via env)
 BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot}"
 CLAUDE_SESSION="${CLAUDE_SESSION:-tg-cli-e2e-claude}"
+export TMUX_TEST="tmux -L tg-cli-test"
 TEST_CONFIG_DIR="$HOME/.tg-cli-test"
 TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$(mktemp -d /tmp/tg-cli-e2e-claude-XXXXXX)}"
 TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
@@ -128,33 +129,33 @@ ensure_credentials() {
 
 start_bot() {
   > "$LOG_FILE"
-  tmux new-session -d -s "$BOT_SESSION" 2>/dev/null || true
-  tmux send-keys -t "$BOT_SESSION" \
-    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --debug" Enter
+  $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
+  $TMUX_TEST send-keys -t "$BOT_SESSION" \
+    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug" Enter
   echo "Waiting for bot to start..."
   wait_for_bot_ready
 }
 
 start_claude() {
-  tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
-  tmux new-session -d -s "$CLAUDE_SESSION"
-  CLAUDE_PANE=$(tmux list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
+  $TMUX_TEST kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  $TMUX_TEST new-session -d -s "$CLAUDE_SESSION"
+  CLAUDE_PANE=$($TMUX_TEST list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
   export CLAUDE_PANE
-  tmux send-keys -t "$CLAUDE_SESSION" \
+  $TMUX_TEST send-keys -t "$CLAUDE_SESSION" \
     "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
   echo "Waiting for Claude to start..."
   # Check if trust dialog is present before sending Enter
   sleep 5
   pane_log "[start_claude] after 5s sleep, before trust check"
-  PANE_CONTENT=$(tmux capture-pane -t "$CLAUDE_PANE" -p -S - 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$CLAUDE_PANE" -p -S - 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
     # Bypass Permissions dialog: cursor defaults to "No, exit", need Down then Enter
-    tmux send-keys -t "$CLAUDE_SESSION" Down
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" Down
     sleep 1
-    tmux send-keys -t "$CLAUDE_SESSION" C-m
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
     echo "Bypass Permissions dialog detected, accepted."
   elif echo "$PANE_CONTENT" | grep -qi "trust"; then
-    tmux send-keys -t "$CLAUDE_SESSION" C-m
+    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
     echo "Trust dialog detected, confirmed."
   else
     echo "No dialog detected, skipping."
@@ -194,8 +195,10 @@ cleanup_sessions() {
   if [ -n "$TEST_CLAUDE_CONFIG_DIR" ] && [ -d "$TEST_CLAUDE_CONFIG_DIR" ]; then
     rm -rf "$TEST_CLAUDE_CONFIG_DIR"
   fi
-  tmux kill-session -t "$BOT_SESSION" 2>/dev/null || true
-  tmux kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  $TMUX_TEST kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  sleep 2
+  $TMUX_TEST kill-session -t "$BOT_SESSION" 2>/dev/null || true
+  $TMUX_TEST kill-server 2>/dev/null || true
   return $exit_code
 }
 

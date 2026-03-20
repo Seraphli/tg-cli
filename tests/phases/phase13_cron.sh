@@ -124,3 +124,15 @@ curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
   -d "{\"id\":\"$EXEC_JOB_ID\"}" > /dev/null
 
 pane_log "[cron] AFTER cron tests"
+
+# --- Cron CLI layer tests ---
+echo ""
+echo "  --- Cron CLI layer tests ---"
+
+# Test cron list via CLI
+CLI_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" cron list --port "$TEST_PORT" 2>&1) || true
+if echo "$CLI_OUTPUT" | grep -qi "job\|No cron\|id\|mode"; then
+  pass "Cron CLI list: command executed"
+else
+  fail "Cron CLI list: unexpected output: $CLI_OUTPUT"
+fi

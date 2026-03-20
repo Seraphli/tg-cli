@@ -19,6 +19,8 @@ type Credentials struct {
 	PairingAllow PairingAllow         `json:"pairingAllow"`
 	Port         int                  `json:"port"`
 	NameRouteMap map[string]NameRoute `json:"nameRouteMap,omitempty"`
+	APIToken      string `json:"apiToken,omitempty"`
+	MailboxChatID int64  `json:"mailboxChatId,omitempty"`
 }
 
 type PairingAllow struct {

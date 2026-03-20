@@ -218,7 +218,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -230,7 +230,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -314,7 +314,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 			var buf bytes.Buffer
 			renderTableFallback(&buf, node, source)
 			if buf.Len() > 0 {
-				fmt.Fprintf(w, "<pre>%s</pre>\n\n", ReplaceLeadingSpaces(EscapeHTML(buf.String())))
+				fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
 			}
 		}
 		return ast.WalkSkipChildren, nil
@@ -360,24 +360,22 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 	return ast.WalkContinue, nil
 }
 
-// ReplaceLeadingSpaces replaces leading spaces and tabs with non-breaking spaces
-// on each line, so Telegram preserves indentation inside <pre> blocks.
-// Tabs are expanded to 4 non-breaking spaces each.
-func ReplaceLeadingSpaces(s string) string {
+// ExpandTabs expands leading tabs to 2 spaces on each line.
+func ExpandTabs(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		j := 0
-		nbspCount := 0
+		spaceCount := 0
 		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
 			if line[j] == '\t' {
-				nbspCount += 4
+				spaceCount += 2
 			} else {
-				nbspCount++
+				spaceCount++
 			}
 			j++
 		}
 		if j > 0 {
-			lines[i] = strings.Repeat("\u00a0", nbspCount) + line[j:]
+			lines[i] = strings.Repeat(" ", spaceCount) + line[j:]
 		}
 	}
 	return strings.Join(lines, "\n")

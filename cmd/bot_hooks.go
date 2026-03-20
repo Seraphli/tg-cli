@@ -266,6 +266,12 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		}
 		contentSummary := strings.Join(qSummaries, " | ")
 		logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d questions=%d tmux=%s content=%s uuid=%s", sent.ID, len(askInput.Questions), p.TmuxTarget, contentSummary, uuid))
+		notifySessionWatchers(agentName, watchEvent{
+			Event:   "AskUserQuestion",
+			Agent:   agentName,
+			Summary: contentSummary,
+			Detail:  text,
+		})
 		return
 	}
 	logger.Info(fmt.Sprintf("Permission request: tool=%s project=%s uuid=%s", p.ToolName, p.Project, uuid))
@@ -328,6 +334,12 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	}
 	logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d) uuid=%s", p.ToolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks), uuid))
 	logger.Info(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
+	notifySessionWatchers(agentName, watchEvent{
+		Event:   "PermissionRequest",
+		Agent:   agentName,
+		Summary: fmt.Sprintf("Tool: %s", p.ToolName),
+		Detail:  text,
+	})
 	pendingPerms.create(sent.ID, p.TmuxTarget, p.PermSuggestions, text, chatIDInt, uuid)
 	pendingFiles.store(sent.ID, uuid)
 	pf.Status = "sent"
@@ -464,6 +476,15 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			sessionCounts.cleanup(p.SessionID)
 			cleanPendingFilesBySession(p.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
+			// Kill tmux pane if this session was exited via /session/exit API
+			if _, ok := pendingExitKill.LoadAndDelete(p.TmuxTarget); ok {
+				paneID := notify.FormatPaneID(p.TmuxTarget)
+				if err := exec.Command("tmux", "kill-pane", "-t", paneID).Run(); err != nil {
+					logger.Error(fmt.Sprintf("SessionEnd kill-pane failed: target=%s err=%v", paneID, err))
+				} else {
+					logger.Info(fmt.Sprintf("SessionEnd kill-pane: target=%s (exit API)", paneID))
+				}
+			}
 		case "UserPromptSubmit":
 			cancelPendingFilesBySession(p.SessionID, bot)
 			if p.SessionID != "" && p.TranscriptPath != "" {
@@ -491,6 +512,12 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 					lock.Unlock()
 				}
 				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+			notifySessionWatchers(hookAgentName, watchEvent{
+				Event:   "Stop",
+				Agent:   hookAgentName,
+				Summary: "Task completed",
+				Detail:  truncateStr(body, 500),
+			})
 			}
 		case "PreToolUse":
 			cancelPendingFilesBySession(p.SessionID, bot)

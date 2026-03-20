@@ -26,6 +26,7 @@ type LaunchState struct {
 	SessionName string `json:"sessionName"`
 	WorkDir     string `json:"workDir"`
 	Command     string `json:"command"`
+	AgentName   string `json:"agentName,omitempty"` // optional agent name to assign after launch
 	MsgID       int    `json:"msgID"`
 	ChatID      int64  `json:"chatID"`
 	TopicID     int    `json:"topicID,omitempty"`
@@ -273,6 +274,24 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 	retrySend(bot, &tele.Chat{ID: chatID}, msg, launchSendOpts(state)...)
 	logger.Info(fmt.Sprintf("executeLaunch: done session=%s pane=%s workdir=%s cmd=%s", state.SessionName, paneID, state.WorkDir, cmd))
 
+	// If an agent name was requested, wait for SessionStart hook to register the session, then set the name
+	if state.AgentName != "" {
+		agentName := state.AgentName
+		pane := paneID
+		go func() {
+			for i := 0; i < 30; i++ {
+				time.Sleep(1 * time.Second)
+				sid, found := sessionState.findByTarget(pane)
+				if found {
+					sessionState.setName(sid, agentName)
+					logger.Info(fmt.Sprintf("executeLaunch: agent name auto-set: session=%s name=%s", sid, agentName))
+					return
+				}
+			}
+			logger.Error(fmt.Sprintf("executeLaunch: failed to auto-set agent name: pane=%s name=%s (timeout)", pane, agentName))
+		}()
+	}
+
 	state.Step = "done"
 	deleteLaunchState(state.UUID)
 	launchPending.Delete(state.MsgID)
@@ -307,6 +326,15 @@ func scanLaunchDir(bot *tele.Bot) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) > 10*time.Minute {
+			logger.Info(fmt.Sprintf("scanLaunchDir: expired launch state %s (age=%v), deleting", entry.Name(), time.Since(info.ModTime()).Truncate(time.Second)))
+			os.Remove(path)
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue

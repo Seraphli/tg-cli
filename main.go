@@ -30,6 +30,10 @@ func main() {
 	rootCmd.AddCommand(cmd.StatuslineCmd)
 	rootCmd.AddCommand(cmd.McpCmd)
 	rootCmd.AddCommand(cmd.CronCmd)
+	rootCmd.AddCommand(cmd.SessionCmd)
+	rootCmd.AddCommand(cmd.MailboxCmd)
+	rootCmd.AddCommand(cmd.TmuxManageCmd)
+	rootCmd.AddCommand(cmd.TmuxHookCmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

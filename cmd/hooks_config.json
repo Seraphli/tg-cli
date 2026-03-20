@@ -9,6 +9,6 @@
   ],
   "cleanup_hooks": ["SubagentStop"],
   "permissions": {
-    "allow": ["mcp__tg-cli__send_file"]
+    "allow": ["mcp__tg-cli__send_file", "Bash(tg-cli:*)", "Bash(./tg-cli:*)"]
   }
 }

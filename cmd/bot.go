@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -73,27 +74,6 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 	}
 }
 
-func startLivenessLoop(ctx context.Context, bot *tele.Bot) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for _, info := range sessionState.all() {
-				target, err := injector.ParseTarget(info.tmuxTarget)
-				if err != nil {
-					continue
-				}
-				if !injector.SessionExists(target) {
-					cleanDeadSession(info.tmuxTarget, bot)
-				}
-			}
-			cleanStaleRoutes(bot)
-		}
-	}
-}
 
 var BotCmd = &cobra.Command{
 	Use:   "bot",
@@ -104,16 +84,43 @@ var BotCmd = &cobra.Command{
 var Version string
 
 var (
-	debugFlag bool
-	portFlag  int
+	debugFlag      bool
+	portFlag       int
+	tmuxServerFlag string
 )
 
 func init() {
 	BotCmd.Flags().BoolVar(&debugFlag, "debug", false, "Enable debug mode")
 	BotCmd.Flags().IntVar(&portFlag, "port", 0, "HTTP server port (overrides config)")
+	BotCmd.Flags().StringVar(&tmuxServerFlag, "tmux-server", "", "tmux server socket name (-L flag)")
+}
+
+func authMiddleware(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip auth for hook and pending paths (CC hooks don't send auth)
+		if strings.HasPrefix(r.URL.Path, "/hook/") || strings.HasPrefix(r.URL.Path, "/pending/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Skip auth for localhost requests
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if host == "127.0.0.1" || host == "::1" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func runBot(cmd *cobra.Command, args []string) {
+	if tmuxServerFlag != "" {
+		injector.ServerName = tmuxServerFlag
+	}
 	logPath := filepath.Join(config.GetConfigDir(), "bot.log")
 	logger.Init(logPath, debugFlag)
 	creds, err := config.LoadCredentials()
@@ -185,6 +192,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_merge", Description: "Merge multiple messages before sending"},
 		tele.Command{Text: "bot_voice", Description: "Voice transcription settings"},
 		tele.Command{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
+		tele.Command{Text: "bot_mailbox", Description: "Bind/unbind mailbox group"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {
@@ -214,18 +222,23 @@ func runBot(cmd *cobra.Command, args []string) {
 	sessionState.validateAlive()
 	cleanStaleRoutes(bot)
 	cronJobs.load()
+	mailbox.load()
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	registerHTTPHooks(mux, bot, &creds, port)
 	registerHTTPAPI(mux, bot, &creds)
+	registerMailboxAPI(mux, bot, &creds)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	handler := http.Handler(mux)
+	if creds.APIToken != "" {
+		handler = authMiddleware(creds.APIToken, mux)
+	}
+	srv := &http.Server{Addr: addr, Handler: handler}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
 	go startTypingLoop(typingCtx, bot)
-	go startLivenessLoop(typingCtx, bot)
 	go startCronLoop(typingCtx, bot)
 	go func() {
 		<-ctx.Done()

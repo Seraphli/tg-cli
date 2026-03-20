@@ -1099,15 +1099,10 @@ func checkSessionAlive(tmuxTarget string, bot *tele.Bot) bool {
 	return false
 }
 
-// cleanDeadSession cleans up state and notifies the user when a tmux session dies.
+// cleanDeadSession cleans up state for a dead tmux session.
 func cleanDeadSession(tmuxTarget string, bot *tele.Bot) {
-	paneID := tmuxTarget
-	if idx := strings.Index(paneID, "@"); idx != -1 {
-		paneID = paneID[:idx]
-	}
 	if sid, found := sessionState.findByTarget(tmuxTarget); found {
 		sessionState.remove(sid)
-		sessionState.clearPendingName(tmuxTarget)
 		pages.cleanupSession(sid)
 		sessionCounts.cleanup(sid)
 		cleanPendingFilesBySession(sid)
@@ -1900,9 +1895,11 @@ func rebuildInMemoryState(bot *tele.Bot, pf *PendingFile, path string) error {
 	return nil
 }
 
-// cleanStaleRoutes validates active sessions on startup.
-// With NameRouteMap, routes are not auto-unbound since they're tied to names, not tmux targets.
+// cleanStaleRoutes is a no-op. Routes are permanent — never delete NameRouteMap entries automatically.
+// Users manage routes via /bot_bind and /bot_unbind.
 func cleanStaleRoutes(bot *tele.Bot) {
+	// Routes are permanent — never delete NameRouteMap entries automatically.
+	// Users manage routes via /bot_bind and /bot_unbind.
 }
 
 // getPaneLabel returns a human-readable label (session:window.pane) for the given tmux target.

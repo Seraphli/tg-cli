@@ -107,10 +107,10 @@ func BuildNotificationText(data NotificationData) string {
 	switch {
 	case data.Event == "SessionStart":
 		emoji = "🟢"
-		status = "Session Started"
+		status = "CC Session Started"
 	case data.Event == "SessionEnd":
 		emoji = "🔴"
-		status = "Session Ended"
+		status = "CC Session Ended"
 	case data.Event == "PreToolUse":
 		emoji = "💬"
 		status = "Update"
@@ -212,6 +212,9 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		if timeout, ok := fields["timeout"]; ok {
 			fmt.Fprintf(&b, "\n⏱️ timeout: %s", esc(timeout))
 		}
+		if bg, ok := fields["run_in_background"]; ok {
+			fmt.Fprintf(&b, "\n🔄 background: %s", esc(bg))
+		}
 	case "Edit":
 		if fp, ok := fields["file_path"]; ok {
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
@@ -228,12 +231,12 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 			newStr = fmt.Sprintf("%v", ns)
 		}
 		if oldStr != "" {
-			fmt.Fprintf(&b, "\n\nOld:\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(oldStr)))
+			fmt.Fprintf(&b, "\n\nOld:\n<pre>%s</pre>", markdown.ExpandTabs(esc(oldStr)))
 		} else {
 			fmt.Fprintf(&b, "\n\nOld: (empty)")
 		}
 		if newStr != "" {
-			fmt.Fprintf(&b, "\n\nNew:\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(newStr)))
+			fmt.Fprintf(&b, "\n\nNew:\n<pre>%s</pre>", markdown.ExpandTabs(esc(newStr)))
 		} else {
 			fmt.Fprintf(&b, "\n\nNew: (empty)")
 		}
@@ -242,7 +245,7 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if content, ok := fields["content"]; ok {
-			fmt.Fprintf(&b, "\n\n<pre>%s</pre>", markdown.ReplaceLeadingSpaces(esc(content)))
+			fmt.Fprintf(&b, "\n\n<pre>%s</pre>", markdown.ExpandTabs(esc(content)))
 		}
 	case "Read":
 		if fp, ok := fields["file_path"]; ok {
@@ -282,6 +285,12 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		}
 		if model, ok := fields["model"]; ok {
 			fmt.Fprintf(&b, "\n🏷️ model: %s", esc(model))
+		}
+		if bg, ok := fields["run_in_background"]; ok {
+			fmt.Fprintf(&b, "\n🔄 background: %s", esc(bg))
+		}
+		if iso, ok := fields["isolation"]; ok {
+			fmt.Fprintf(&b, "\n📦 isolation: %s", esc(iso))
 		}
 	case "WebFetch":
 		if url, ok := fields["url"]; ok {
