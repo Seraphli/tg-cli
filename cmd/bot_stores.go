@@ -701,6 +701,7 @@ type cronJob struct {
 	CWD         string    `json:"cwd,omitempty"`
 	SessionID   string    `json:"session_id,omitempty"`
 	MaxTurns    int       `json:"max_turns,omitempty"`
+	NoHeader    bool      `json:"no_header,omitempty"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }

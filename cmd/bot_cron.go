@@ -153,7 +153,15 @@ func executeInjectJob(job *cronJob, bot *tele.Bot) {
 		sendCronNotification(bot, fmt.Sprintf("%s\n\n⚠️ Agent <b>%s</b> is not online.\nPrompt: %s", cronNotifyHeader(job), agentLabel, job.Prompt), job.TmuxTarget)
 		return
 	}
-	if err := safeInjectText(bot, info.tmuxTarget, job.Prompt); err != nil {
+	injectText := job.Prompt
+	if !job.NoHeader {
+		headerName := job.Name
+		if headerName == "" {
+			headerName = job.ID[:8]
+		}
+		injectText = fmt.Sprintf("---\n⏰ Cron: %s\n---\n%s", headerName, job.Prompt)
+	}
+	if err := safeInjectText(bot, info.tmuxTarget, injectText); err != nil {
 		logger.Error(fmt.Sprintf("Cron inject job: inject failed: %v", err))
 		sendCronNotification(bot, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.tmuxTarget)
 		return

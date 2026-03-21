@@ -34,6 +34,7 @@ var (
 	sessionHost        string
 	sessionToken       string
 	sessionNewName     string
+	sessionNoHeader    bool
 )
 
 var sessionListCmd = &cobra.Command{
@@ -87,6 +88,7 @@ func init() {
 	sessionSendCmd.Flags().StringVar(&sessionText, "text", "", "Text to send (required)")
 	sessionSendCmd.Flags().StringVar(&sessionSendFrom, "from", "", "Sender agent name (for signature)")
 	sessionSendCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	sessionSendCmd.Flags().BoolVar(&sessionNoHeader, "no-header", false, "Skip header prefix (for slash commands)")
 	sessionNewCmd.Flags().StringVar(&sessionSession, "session", "", "Tmux session name")
 	sessionNewCmd.Flags().StringVar(&sessionWorkDir, "workdir", "", "Working directory")
 	sessionNewCmd.Flags().StringVar(&sessionCommand, "command", "", "Command to run")
@@ -353,12 +355,15 @@ func runSessionSend(cmd *cobra.Command, args []string) {
 	if from == "" && os.Getenv("TMUX_PANE") != "" {
 		from = tryResolveSessionSelf(port)
 	}
-	body := map[string]string{
+	body := map[string]interface{}{
 		"name": name,
 		"text": sessionText,
 	}
 	if from != "" {
 		body["from"] = from
+	}
+	if sessionNoHeader {
+		body["noHeader"] = true
 	}
 	data, _ := json.Marshal(body)
 	url := buildAPIURL(sessionHost, port, "/session/send")

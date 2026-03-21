@@ -56,6 +56,9 @@ func init() {
 	SetupCmd.Flags().IntVar(&setupPortFlag, "port", 0, "HTTP server port (overrides config)")
 	SetupCmd.Flags().BoolVar(&setupUninstallFlag, "uninstall", false, "Remove hooks for this instance")
 	SetupCmd.Flags().StringVar(&setupSettingsFlag, "settings", "", "Target settings file path (default: ~/.claude/settings.json)")
+	SetupCmd.Flags().Bool("skip-tmux", false, "Skip tmux hook registration")
+	SetupCmd.Flags().String("tmux-server", "", "Tmux server socket name (for -L flag)")
+	SetupCmd.Flags().String("tmux-conf", "", "Custom tmux.conf path (default: ~/.tmux.conf)")
 }
 
 func runSetup(cmd *cobra.Command, args []string) {
@@ -325,34 +328,48 @@ func runSetup(cmd *cobra.Command, args []string) {
 	} else {
 		fmt.Printf("Skill doc installed: %s\n", agentDocPath)
 	}
-	// Register tmux hooks for session lifecycle events
-	hookBinForTmux := installBinPath()
-	tmuxConf := filepath.Join(home, ".tmux.conf")
-	confContent, _ := os.ReadFile(tmuxConf)
-	// Remove ALL old tg-cli hook lines from tmux.conf before adding new ones
-	var cleanedLines []string
-	for _, line := range strings.Split(string(confContent), "\n") {
-		if !strings.Contains(line, "tg-cli") {
-			cleanedLines = append(cleanedLines, line)
+	skipTmux, _ := cmd.Flags().GetBool("skip-tmux")
+	if !skipTmux {
+		// Register tmux hooks for session lifecycle events
+		hookBinForTmux := installBinPath()
+		tmuxServer, _ := cmd.Flags().GetString("tmux-server")
+		tmuxConfFlag, _ := cmd.Flags().GetString("tmux-conf")
+		tmuxConf := filepath.Join(home, ".tmux.conf")
+		if tmuxConfFlag != "" {
+			tmuxConf = tmuxConfFlag
 		}
-	}
-	cleanedConf := strings.TrimRight(strings.Join(cleanedLines, "\n"), "\n")
-	os.WriteFile(tmuxConf, []byte(cleanedConf+"\n"), 0644)
-	confContent = []byte(cleanedConf)
-	for _, event := range []string{"session-created", "session-closed"} {
-		hookCmd := fmt.Sprintf("%s tmux-hook --event %s --session '#{hook_session_name}' --port %d", hookBinForTmux, event, port)
-		hookShell := fmt.Sprintf("run-shell \"%s\"", hookCmd)
-		confLine := fmt.Sprintf("set-hook -g %s '%s'", event, hookShell)
-		// Always register runtime hook (overwrite any existing)
-		exec.Command("tmux", "set-hook", "-g", event, hookShell).Run()
-		fmt.Printf("tmux hook registered (%s).\n", event)
-		// Always append to tmux.conf (old entries already cleaned above)
-		f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			f.WriteString("\n# tg-cli tmux lifecycle hook\n" + confLine + "\n")
-			f.Close()
-			fmt.Printf("tmux hook persisted to %s (%s)\n", tmuxConf, event)
+		confContent, _ := os.ReadFile(tmuxConf)
+		// Remove ALL old tg-cli hook lines from tmux.conf before adding new ones
+		var cleanedLines []string
+		for _, line := range strings.Split(string(confContent), "\n") {
+			if !strings.Contains(line, "tg-cli") {
+				cleanedLines = append(cleanedLines, line)
+			}
 		}
+		cleanedConf := strings.TrimRight(strings.Join(cleanedLines, "\n"), "\n")
+		os.WriteFile(tmuxConf, []byte(cleanedConf+"\n"), 0644)
+		confContent = []byte(cleanedConf)
+		for _, event := range []string{"session-created", "session-closed"} {
+			hookCmd := fmt.Sprintf("%s tmux-hook --event %s --session '#{hook_session_name}' --port %d", hookBinForTmux, event, port)
+			hookShell := fmt.Sprintf("run-shell \"%s\"", hookCmd)
+			confLine := fmt.Sprintf("set-hook -g %s '%s'", event, hookShell)
+			// Always register runtime hook (overwrite any existing), optionally targeting a specific server
+			var tmuxArgs []string
+			if tmuxServer != "" {
+				tmuxArgs = append(tmuxArgs, "-L", tmuxServer)
+			}
+			tmuxArgs = append(tmuxArgs, "set-hook", "-g", event, hookShell)
+			exec.Command("tmux", tmuxArgs...).Run()
+			fmt.Printf("tmux hook registered (%s).\n", event)
+			// Always append to tmux.conf (old entries already cleaned above)
+			f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				f.WriteString("\n# tg-cli tmux lifecycle hook\n" + confLine + "\n")
+				f.Close()
+				fmt.Printf("tmux hook persisted to %s (%s)\n", tmuxConf, event)
+			}
+		}
+		_ = confContent
 	}
 }
 

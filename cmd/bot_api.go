@@ -1593,9 +1593,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		var req struct {
-			Name string `json:"name"`
-			Text string `json:"text"`
-			From string `json:"from"`
+			Name     string `json:"name"`
+			Text     string `json:"text"`
+			From     string `json:"from"`
+			NoHeader bool   `json:"noHeader"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1607,7 +1608,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		injectText := req.Text
-		if req.From != "" {
+		if req.From != "" && !req.NoHeader {
 			injectText = fmt.Sprintf("---\n💬 Message from agent [%s]\n---\n%s", req.From, req.Text)
 		}
 		if err := safeInjectText(bot, info.tmuxTarget, injectText); err != nil {
@@ -1615,25 +1616,27 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s text=%s", req.Name, info.tmuxTarget, req.From, truncateStr(req.Text, 200)))
-		// Send TG notification to the target session's chat
-		chat, _, topicID := resolveChat(info.tmuxTarget)
-		if chat != nil {
-			fromLine := ""
-			if req.From != "" {
-				fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
+		if !req.NoHeader {
+			// Send TG notification to the target session's chat
+			chat, _, topicID := resolveChat(info.tmuxTarget)
+			if chat != nil {
+				fromLine := ""
+				if req.From != "" {
+					fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
+				}
+				notifyText := fmt.Sprintf("💬 CLI Send\n%s━━━━━━━━━━\n%s", fromLine, req.Text)
+				var sendOpts []interface{}
+				if topicID > 0 {
+					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+				}
+				chunks := splitBody(notifyText, 4000)
+				if len(chunks) <= 1 {
+					retrySend(bot, chat, notifyText, sendOpts...)
+				} else {
+					retrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
+				}
+				logger.Info(fmt.Sprintf("Session send notification: target=%s text=%s", req.Name, truncateStr(req.Text, 200)))
 			}
-			notifyText := fmt.Sprintf("💬 CLI Send\n%s━━━━━━━━━━\n%s", fromLine, req.Text)
-			var sendOpts []interface{}
-			if topicID > 0 {
-				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-			}
-			chunks := splitBody(notifyText, 4000)
-			if len(chunks) <= 1 {
-				retrySend(bot, chat, notifyText, sendOpts...)
-			} else {
-				retrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
-			}
-			logger.Info(fmt.Sprintf("Session send notification: target=%s text=%s", req.Name, truncateStr(req.Text, 200)))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
