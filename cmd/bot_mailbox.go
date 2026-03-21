@@ -361,7 +361,11 @@ func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
 		msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, readTime)
 	editMsg := &tele.Message{ID: msg.TGMsgID, Chat: &tele.Chat{ID: chatID}}
 	if msg.FileName != "" {
-		bot.Edit(editMsg, newText, &tele.SendOptions{})
+		// Document messages use caption, not text. Caption limit is 1024 bytes.
+		if len(newText) > 1024 {
+			newText = newText[:1024]
+		}
+		bot.EditCaption(editMsg, newText)
 	} else {
 		bot.Edit(editMsg, newText)
 	}

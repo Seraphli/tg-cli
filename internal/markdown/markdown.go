@@ -240,7 +240,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -252,7 +252,7 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
+			fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
 		}
 		return ast.WalkSkipChildren, nil
 
