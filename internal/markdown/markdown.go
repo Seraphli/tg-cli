@@ -171,6 +171,21 @@ func isBlockElement(n ast.Node) bool {
 	return false
 }
 
+// listDepth returns the nesting depth of a ListItem node (0 for top-level).
+func listDepth(n ast.Node) int {
+	depth := 0
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if _, ok := p.(*ast.List); ok {
+			depth++
+		}
+	}
+	// Subtract 1 because the immediate parent List counts as depth 0
+	if depth > 0 {
+		depth--
+	}
+	return depth
+}
+
 // Render walks the AST and writes Telegram HTML to w.
 func (r *tgRenderer) Render(w io.Writer, source []byte, node ast.Node) error {
 	r.ordinal = make(map[ast.Node]int)
@@ -194,7 +209,14 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 
 	case *ast.Paragraph:
 		if !entering {
-			if _, ok := n.Parent().(*ast.Blockquote); ok {
+			if _, ok := n.Parent().(*ast.ListItem); ok {
+				// Inside list item — only add newline between sibling content blocks
+				if next := n.NextSibling(); next != nil {
+					if _, isList := next.(*ast.List); !isList {
+						fmt.Fprintf(w, "\n")
+					}
+				}
+			} else if _, ok := n.Parent().(*ast.Blockquote); ok {
 				fmt.Fprintf(w, "\n")
 			} else if next := n.NextSibling(); isBlockElement(next) {
 				fmt.Fprintf(w, "\n\n")
@@ -292,20 +314,36 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 		return ast.WalkSkipChildren, nil
 
 	case *ast.List:
-		if !entering {
-			fmt.Fprintf(w, "\n")
+		if entering {
+			// Add newline before nested list (after parent item text)
+			if _, ok := n.Parent().(*ast.ListItem); ok {
+				fmt.Fprintf(w, "\n")
+			}
+		} else {
+			// Only add spacing after top-level lists, not nested ones
+			if _, ok := n.Parent().(*ast.ListItem); !ok {
+				fmt.Fprintf(w, "\n")
+			}
 		}
 
 	case *ast.ListItem:
 		if entering {
+			depth := listDepth(node)
+			indent := strings.Repeat("  ", depth)
 			parent, ok := node.Parent().(*ast.List)
 			if ok && parent.IsOrdered() {
 				r.ordinal[parent]++
-				fmt.Fprintf(w, "%d. ", r.ordinal[parent])
+				fmt.Fprintf(w, "%s%d. ", indent, r.ordinal[parent])
 			} else {
-				fmt.Fprintf(w, "• ")
+				fmt.Fprintf(w, "%s• ", indent)
 			}
 		} else {
+			// Don't add newline if last child is a nested list (already ends with newline)
+			if lastChild := node.LastChild(); lastChild != nil {
+				if _, isList := lastChild.(*ast.List); isList {
+					return ast.WalkContinue, nil
+				}
+			}
 			fmt.Fprintf(w, "\n")
 		}
 
@@ -478,5 +516,10 @@ func RenderTelegramHTML(md string) string {
 		// Fallback: escape raw text
 		return EscapeHTML(md)
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	result := buf.String()
+	// Collapse 3+ consecutive newlines to 2 (one blank line max)
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+	return strings.TrimRight(result, "\n")
 }
