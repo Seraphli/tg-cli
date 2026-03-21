@@ -1463,9 +1463,6 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 					// Try string content
 					var contentStr string
 					if json.Unmarshal(msg.Content, &contentStr) == nil {
-						if noTools {
-							continue // string content in user likely means tool result context
-						}
 						fileEntries = append(fileEntries, logEntry{Type: "user", Timestamp: raw.Timestamp, Text: contentStr})
 						continue
 					}
@@ -1485,6 +1482,15 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 						}
 					}
 					if noTools && hasToolResult {
+						var parts []string
+						for _, c := range contentArr {
+							if c.Type == "text" && c.Text != "" {
+								parts = append(parts, c.Text)
+							}
+						}
+						if len(parts) > 0 {
+							fileEntries = append(fileEntries, logEntry{Type: "user", Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
+						}
 						continue
 					}
 					var parts []string

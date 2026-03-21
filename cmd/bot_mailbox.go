@@ -353,14 +353,18 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 
 // editTGReadReceipt edits a TG message to mark it as read.
 func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
-	if msg.TGMsgID == 0 || msg.FileName != "" {
+	if msg.TGMsgID == 0 {
 		return
 	}
 	readTime := time.Now().Format("2006-01-02 15:04")
 	newText := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📭 Read — %s",
 		msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, readTime)
 	editMsg := &tele.Message{ID: msg.TGMsgID, Chat: &tele.Chat{ID: chatID}}
-	bot.Edit(editMsg, newText)
+	if msg.FileName != "" {
+		bot.Edit(editMsg, newText, &tele.SendOptions{})
+	} else {
+		bot.Edit(editMsg, newText)
+	}
 }
 
 // registerMailboxAPI registers mailbox HTTP endpoints on the given mux.

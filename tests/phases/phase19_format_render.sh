@@ -138,3 +138,54 @@ rm -f "$TG_HTML_FILE" "$TG_PLAIN_FILE"
 
 wait_for_cc_idle
 pane_log "[format_render] AFTER CC idle"
+
+# === Tab expansion test (separate prompt to avoid breaking format tests above) ===
+LOG_BEFORE_TAB=$(wc -l < "$LOG_FILE")
+pane_log "[format_render] BEFORE tab prompt"
+
+inject_prompt 'Without using any tools, output EXACTLY this text with no modifications:
+
+```go
+func main() {
+'"$(printf '\t')"'fmt.Println("hello")
+'"$(printf '\t')"'if true {
+'"$(printf '\t\t')"'fmt.Println("nested")
+'"$(printf '\t')"'}
+}
+```'
+
+pane_log "[format_render] AFTER tab prompt"
+
+ELAPSED=0
+TAB_STOP_FOUND=false
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  if tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+    TAB_STOP_FOUND=true
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+  echo "  Waiting for tab test Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
+done
+
+if [ "$TAB_STOP_FOUND" = true ]; then
+  TAB_NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE")
+  TAB_HTML_FILE="/tmp/tg-cli-e2e-tab-html.txt"
+  echo "$TAB_NEW_LOGS" | awk '/TG message sent \[Stop\] full_text:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{exit} found{print}' > "$TAB_HTML_FILE"
+  if grep -q "<pre>" "$TAB_HTML_FILE" 2>/dev/null; then
+    PRE_CONTENT=$(awk '/<pre>/{found=1} found{print} /<\/pre>/{found=0}' "$TAB_HTML_FILE")
+    if echo "$PRE_CONTENT" | grep -qP '\t'; then
+      fail "TG code block still contains literal tab characters"
+    else
+      pass "TG code block tabs expanded to spaces"
+    fi
+  else
+    fail "TG tab test: no <pre> block found"
+  fi
+  rm -f "$TAB_HTML_FILE"
+else
+  fail "Tab test Stop notification not received within ${TIMEOUT}s"
+fi
+
+wait_for_cc_idle
+pane_log "[format_render] AFTER tab test CC idle"

@@ -71,6 +71,12 @@ if echo "$NOTOOLS_OUTPUT" | grep -q "\[assistant\]"; then
 else
   fail "session log --no-tools: no assistant entries found"
 fi
+# Should contain [user] text entries (user messages must not be filtered)
+if echo "$NOTOOLS_OUTPUT" | grep -q "\[user\]"; then
+  pass "session log --no-tools: contains user text entries"
+else
+  fail "session log --no-tools: no user entries found (user messages incorrectly filtered)"
+fi
 
 # Test --format json
 JSON_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 3 --format json 2>&1) || true
