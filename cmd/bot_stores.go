@@ -629,10 +629,10 @@ func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string)
 }
 
 type mergeBuffer struct {
-	items       []string
-	chatID      int64
-	tmuxTarget  string
-	notifyMsgID int
+	Items       []string `json:"items"`
+	ChatID      int64    `json:"chat_id"`
+	TmuxTarget  string   `json:"tmux_target"`
+	NotifyMsgID int      `json:"notify_msg_id"`
 }
 
 type mergeBufferStore struct {
@@ -650,12 +650,13 @@ func mergeKey(chatID int64) string {
 
 func (ms *mergeBufferStore) start(key string, chatID int64, tmuxTarget string, notifyMsgID int) {
 	ms.mu.Lock()
-	defer ms.mu.Unlock()
 	ms.buffers[key] = &mergeBuffer{
-		chatID:      chatID,
-		tmuxTarget:  tmuxTarget,
-		notifyMsgID: notifyMsgID,
+		ChatID:      chatID,
+		TmuxTarget:  tmuxTarget,
+		NotifyMsgID: notifyMsgID,
 	}
+	ms.saveLocked()
+	ms.mu.Unlock()
 }
 
 func (ms *mergeBufferStore) get(key string) *mergeBuffer {
@@ -666,33 +667,65 @@ func (ms *mergeBufferStore) get(key string) *mergeBuffer {
 
 func (ms *mergeBufferStore) add(key, content string) {
 	ms.mu.Lock()
-	defer ms.mu.Unlock()
 	if buf, ok := ms.buffers[key]; ok {
-		buf.items = append(buf.items, content)
+		buf.Items = append(buf.Items, content)
 	}
+	ms.saveLocked()
+	ms.mu.Unlock()
 }
 
 func (ms *mergeBufferStore) addAndGetInfo(key, content string) ([]string, int, int64, bool) {
 	ms.mu.Lock()
-	defer ms.mu.Unlock()
 	buf, ok := ms.buffers[key]
 	if !ok {
+		ms.mu.Unlock()
 		return nil, 0, 0, false
 	}
-	buf.items = append(buf.items, content)
-	itemsCopy := make([]string, len(buf.items))
-	copy(itemsCopy, buf.items)
-	return itemsCopy, buf.notifyMsgID, buf.chatID, true
+	buf.Items = append(buf.Items, content)
+	itemsCopy := make([]string, len(buf.Items))
+	copy(itemsCopy, buf.Items)
+	notifyMsgID := buf.NotifyMsgID
+	chatID := buf.ChatID
+	ms.saveLocked()
+	ms.mu.Unlock()
+	return itemsCopy, notifyMsgID, chatID, true
 }
 
 func (ms *mergeBufferStore) finish(key string) (*mergeBuffer, bool) {
 	ms.mu.Lock()
-	defer ms.mu.Unlock()
 	buf, ok := ms.buffers[key]
 	if ok {
 		delete(ms.buffers, key)
 	}
+	ms.saveLocked()
+	ms.mu.Unlock()
 	return buf, ok
+}
+
+func (ms *mergeBufferStore) saveLocked() {
+	type persistData struct {
+		Buffers map[string]*mergeBuffer `json:"buffers"`
+	}
+	data, _ := json.MarshalIndent(persistData{Buffers: ms.buffers}, "", "  ")
+	path := filepath.Join(config.GetConfigDir(), "merge-buffers.json")
+	os.WriteFile(path, data, 0644)
+}
+
+func (ms *mergeBufferStore) load() {
+	path := filepath.Join(config.GetConfigDir(), "merge-buffers.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var persist struct {
+		Buffers map[string]*mergeBuffer `json:"buffers"`
+	}
+	if json.Unmarshal(data, &persist) == nil && persist.Buffers != nil {
+		ms.mu.Lock()
+		ms.buffers = persist.Buffers
+		ms.mu.Unlock()
+		logger.Info(fmt.Sprintf("Merge buffers loaded: %d active", len(persist.Buffers)))
+	}
 }
 
 // injectItem represents a queued text to inject when CC becomes idle.

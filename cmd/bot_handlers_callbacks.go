@@ -441,7 +441,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		buf, ok := mergeBuffers.finish(key)
 		itemCount := 0
 		if buf != nil {
-			itemCount = len(buf.items)
+			itemCount = len(buf.Items)
 		}
 		logger.Info(fmt.Sprintf("Merge submit: key=%s found=%v items=%d", key, ok, itemCount))
 		if !ok {
@@ -450,19 +450,19 @@ func registerCallbackHandlers(bot *tele.Bot) {
 			c.Respond(&tele.CallbackResponse{Text: "⚠️ Buffer expired"})
 			return c.Edit(buildMergeNotifyText("⚠️ Buffer expired", items), tele.ModeHTML)
 		}
-		if len(buf.items) == 0 {
+		if len(buf.Items) == 0 {
 			c.Respond(&tele.CallbackResponse{Text: "⚠️ No messages collected"})
 			return c.Edit(buildMergeNotifyText("⚠️ No messages collected", nil), tele.ModeHTML)
 		}
-		merged := strings.Join(buf.items, "\n")
-		if err := safeInjectText(bot, buf.tmuxTarget, merged); err != nil {
+		merged := strings.Join(buf.Items, "\n")
+		if err := safeInjectText(bot, buf.TmuxTarget, merged); err != nil {
 			c.Respond(&tele.CallbackResponse{Text: "❌ Injection failed"})
-			return c.Edit(buildMergeNotifyText(fmt.Sprintf("❌ Injection failed: %v", err), buf.items), tele.ModeHTML)
+			return c.Edit(buildMergeNotifyText(fmt.Sprintf("❌ Injection failed: %v", err), buf.Items), tele.ModeHTML)
 		}
-		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
-		recordPending(buf.tmuxTarget, chatID, c.Message().ID)
-		c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Submitted %d messages", len(buf.items))})
-		return c.Edit(buildMergeNotifyText(fmt.Sprintf("✅ Submitted (%d messages)", len(buf.items)), buf.items), tele.ModeHTML)
+		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), truncateStr(merged, 200)))
+		recordPending(buf.TmuxTarget, chatID, c.Message().ID)
+		c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Submitted %d messages", len(buf.Items))})
+		return c.Edit(buildMergeNotifyText(fmt.Sprintf("✅ Submitted (%d messages)", len(buf.Items)), buf.Items), tele.ModeHTML)
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "merge_cancel"}, func(c tele.Context) error {
@@ -472,7 +472,7 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		buf, ok := mergeBuffers.finish(key)
 		var items []string
 		if ok && buf != nil {
-			items = buf.items
+			items = buf.Items
 		} else {
 			items = parseMergeItems(c.Message().Text)
 		}

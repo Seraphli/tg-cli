@@ -225,6 +225,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	cronJobs.load()
 	mailbox.load()
 	injectQueue.load()
+	mergeBuffers.load()
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	registerHTTPHooks(mux, bot, &creds, port)

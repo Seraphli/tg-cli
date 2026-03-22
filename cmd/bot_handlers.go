@@ -713,9 +713,9 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if strings.TrimSpace(c.Message().Payload) == "cancel" {
 			buf, _ := mergeBuffers.finish(key)
 			logger.Info(fmt.Sprintf("Merge force cancelled: chat=%d key=%s", c.Chat().ID, key))
-			if buf != nil && buf.notifyMsgID != 0 {
-				editMsg := &tele.Message{ID: buf.notifyMsgID, Chat: &tele.Chat{ID: buf.chatID}}
-				retryEdit(bot, editMsg, buildMergeNotifyText("❌ Cancelled", buf.items), tele.ModeHTML)
+			if buf != nil && buf.NotifyMsgID != 0 {
+				editMsg := &tele.Message{ID: buf.NotifyMsgID, Chat: &tele.Chat{ID: buf.ChatID}}
+				retryEdit(bot, editMsg, buildMergeNotifyText("❌ Cancelled", buf.Items), tele.ModeHTML)
 			}
 			return c.Reply("📎 Merge mode cancelled.")
 		}

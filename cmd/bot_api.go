@@ -946,23 +946,23 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	mux.HandleFunc("/merge/submit", func(w http.ResponseWriter, r *http.Request) {
 		key := mergeKey(0)
 		buf, ok := mergeBuffers.finish(key)
-		if !ok || len(buf.items) == 0 {
+		if !ok || len(buf.Items) == 0 {
 			http.Error(w, "no items to submit", 404)
 			return
 		}
-		target, err := injector.ParseTarget(buf.tmuxTarget)
+		target, err := injector.ParseTarget(buf.TmuxTarget)
 		if err != nil || !injector.SessionExists(target) {
 			http.Error(w, "session not found", 404)
 			return
 		}
-		merged := strings.Join(buf.items, "\n")
+		merged := strings.Join(buf.Items, "\n")
 		if err := injector.InjectText(target, merged); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		logger.Info(fmt.Sprintf("Merge submitted via API: target=%s items=%d text=%s", buf.tmuxTarget, len(buf.items), truncateStr(merged, 200)))
+		logger.Info(fmt.Sprintf("Merge submitted via API: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), truncateStr(merged, 200)))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "items": len(buf.items)})
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "items": len(buf.Items)})
 	})
 	// Cron job management API
 	mux.HandleFunc("/cron/add", func(w http.ResponseWriter, r *http.Request) {
