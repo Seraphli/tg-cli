@@ -95,6 +95,12 @@ var sessionCaptureCmd = &cobra.Command{
 	Run:   runSessionCapture,
 }
 
+var sessionStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Send Escape to interrupt a CC session",
+	Run:   runSessionStop,
+}
+
 func init() {
 	SessionCmd.PersistentFlags().StringVar(&sessionHost, "host", "", "Bot API host URL (e.g., https://tg-cli.example.com)")
 	SessionCmd.PersistentFlags().StringVar(&sessionToken, "token", "", "API authentication token")
@@ -133,6 +139,9 @@ func init() {
 	sessionCaptureCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
 	sessionCaptureCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
 	sessionCaptureCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	sessionStopCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
+	sessionStopCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
+	sessionStopCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	SessionCmd.AddCommand(sessionListCmd)
 	SessionCmd.AddCommand(sessionLogCmd)
 	SessionCmd.AddCommand(sessionSendCmd)
@@ -142,6 +151,7 @@ func init() {
 	SessionCmd.AddCommand(sessionPermCmd)
 	SessionCmd.AddCommand(sessionNameCmd)
 	SessionCmd.AddCommand(sessionCaptureCmd)
+	SessionCmd.AddCommand(sessionStopCmd)
 }
 
 // buildAPIURL constructs the full API URL from host or port
@@ -698,4 +708,54 @@ func runSessionName(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Session %s named '%s'\n", sessionID[:8], sessionSetName)
+}
+
+func runSessionStop(cmd *cobra.Command, args []string) {
+	port := getSessionPort()
+	name := sessionName
+	if sessionSelf {
+		name = resolveSessionSelf(port)
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Error: --name or --self is required")
+		os.Exit(1)
+	}
+	listURL := buildAPIURL(sessionHost, port, "/session/list")
+	listResp, err := apiRequest("GET", listURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
+		os.Exit(1)
+	}
+	defer listResp.Body.Close()
+	var listResult struct {
+		Sessions []struct {
+			Name   string `json:"name"`
+			Target string `json:"target"`
+		} `json:"sessions"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listResult)
+	var target string
+	for _, s := range listResult.Sessions {
+		if s.Name == name {
+			target = s.Target
+			break
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "Error: session %q not found\n", name)
+		os.Exit(1)
+	}
+	escapeURL := buildAPIURL(sessionHost, port, "/escape") + "?target=" + url.QueryEscape(target)
+	resp, err := apiRequest("GET", escapeURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("Escape sent to %s.\n", name)
 }
