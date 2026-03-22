@@ -42,6 +42,10 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 			sentChats := make(map[int64]bool)
 			for _, info := range sessionState.all() {
 				if !isSessionRunning(info.tmuxTarget) {
+					// Flush inject queue when session transitions to idle
+					if injectQueue.hasItems(info.tmuxTarget) {
+						go flushInjectQueue(bot, info.tmuxTarget)
+					}
 					continue
 				}
 				// Check name route map
