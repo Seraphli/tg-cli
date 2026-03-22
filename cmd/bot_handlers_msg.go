@@ -388,7 +388,8 @@ func registerMessageHandlers(bot *tele.Bot) {
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
 				isCmd := strings.HasPrefix(c.Message().Text, "/bot_perm_") ||
 					c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
-					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@")
+					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
+					c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@")
 				if isCmd {
 					_, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 					if err != nil {
@@ -421,7 +422,8 @@ func registerMessageHandlers(bot *tele.Bot) {
 				}
 				return handleCaptureCommand(c, target)
 			}
-			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") {
+			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
+			c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") {
 				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")

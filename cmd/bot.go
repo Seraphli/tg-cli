@@ -178,6 +178,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
 		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
 		tele.Command{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
+		tele.Command{Text: "stop", Description: "Send Escape to interrupt Claude"},
 		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
 		tele.Command{Text: "bot_bind", Description: "Bind agent name to this chat/topic"},
 		tele.Command{Text: "bot_unbind", Description: "Unbind an agent name route"},
