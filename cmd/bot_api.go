@@ -18,6 +18,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
+	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -592,9 +593,10 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 	})
 	mux.HandleFunc("/mcp/send-file", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			FilePath    string `json:"file_path"`
-			Caption     string `json:"caption"`
-			TmuxTarget  string `json:"tmux_target"`
+			FilePath   string `json:"file_path"`
+			Caption    string `json:"caption"`
+			TmuxTarget string `json:"tmux_target"`
+			CWD        string `json:"cwd"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -618,6 +620,16 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		chat, _, topicID := resolveChat(req.TmuxTarget)
+		// CWD fallback: if tmuxTarget route not found, try finding session by CWD
+		if req.CWD != "" && (chat == nil || pairing.GetDefaultChatID() == strconv.FormatInt(chat.ID, 10)) {
+			if cwdInfo := sessionState.findByCWD(req.CWD); cwdInfo != nil {
+				if c, _, t := resolveChat(cwdInfo.tmuxTarget); c != nil && pairing.GetDefaultChatID() != strconv.FormatInt(c.ID, 10) {
+					chat = c
+					topicID = t
+					logger.Info(fmt.Sprintf("[MCP] Route resolved via CWD fallback: cwd=%s → chat=%d topic=%d", req.CWD, c.ID, t))
+				}
+			}
+		}
 		ext := strings.ToLower(filepath.Ext(req.FilePath))
 		imageExts := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true}
 		var sendable interface{}

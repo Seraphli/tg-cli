@@ -77,10 +77,12 @@ func runMcp(cmd *cobra.Command, args []string) error {
 		}
 
 		// POST to bot
+		cwd, _ := os.Getwd()
 		body, _ := json.Marshal(map[string]string{
 			"file_path":   filePath,
 			"caption":     caption,
 			"tmux_target": tmuxTarget,
+			"cwd":         cwd,
 		})
 		resp, err := http.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/mcp/send-file", port),
