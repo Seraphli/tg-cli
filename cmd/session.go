@@ -89,6 +89,12 @@ var sessionNameCmd = &cobra.Command{
 	Run:   runSessionName,
 }
 
+var sessionCaptureCmd = &cobra.Command{
+	Use:   "capture",
+	Short: "Capture tmux pane content for a session",
+	Run:   runSessionCapture,
+}
+
 func init() {
 	SessionCmd.PersistentFlags().StringVar(&sessionHost, "host", "", "Bot API host URL (e.g., https://tg-cli.example.com)")
 	SessionCmd.PersistentFlags().StringVar(&sessionToken, "token", "", "API authentication token")
@@ -124,6 +130,9 @@ func init() {
 	sessionNameCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
 	sessionNameCmd.Flags().StringVar(&sessionSetName, "set", "", "New agent name to assign")
 	sessionNameCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	sessionCaptureCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
+	sessionCaptureCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
+	sessionCaptureCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	SessionCmd.AddCommand(sessionListCmd)
 	SessionCmd.AddCommand(sessionLogCmd)
 	SessionCmd.AddCommand(sessionSendCmd)
@@ -132,6 +141,7 @@ func init() {
 	SessionCmd.AddCommand(sessionWatchCmd)
 	SessionCmd.AddCommand(sessionPermCmd)
 	SessionCmd.AddCommand(sessionNameCmd)
+	SessionCmd.AddCommand(sessionCaptureCmd)
 }
 
 // buildAPIURL constructs the full API URL from host or port
@@ -553,6 +563,60 @@ func runSessionExit(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("Session exit initiated.")
+}
+
+func runSessionCapture(cmd *cobra.Command, args []string) {
+	port := getSessionPort()
+	name := sessionName
+	if sessionSelf {
+		name = resolveSessionSelf(port)
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Error: --name or --self is required")
+		os.Exit(1)
+	}
+	listURL := buildAPIURL(sessionHost, port, "/session/list")
+	listResp, err := apiRequest("GET", listURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
+		os.Exit(1)
+	}
+	defer listResp.Body.Close()
+	var listResult struct {
+		Sessions []struct {
+			Name   string `json:"name"`
+			Target string `json:"target"`
+		} `json:"sessions"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listResult)
+	var target string
+	for _, s := range listResult.Sessions {
+		if s.Name == name {
+			target = s.Target
+			break
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "Error: session %q not found\n", name)
+		os.Exit(1)
+	}
+	captureURL := buildAPIURL(sessionHost, port, "/capture") + "?target=" + url.QueryEscape(target)
+	resp, err := apiRequest("GET", captureURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+		os.Exit(1)
+	}
+	var result struct {
+		Content string `json:"content"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	fmt.Print(result.Content)
 }
 
 func runSessionName(cmd *cobra.Command, args []string) {
