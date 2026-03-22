@@ -539,6 +539,12 @@ func (s *sessionStateStore) setName(sessionID, name string) (bool, string) {
 	if name != "" {
 		for sid, other := range s.sessions {
 			if sid != sessionID && other.name == name {
+				target, parseErr := injector.ParseTarget(other.tmuxTarget)
+				if parseErr != nil || !injector.SessionExists(target) {
+					logger.Info(fmt.Sprintf("setName: auto-cleaned dead session %s (target=%s) holding name '%s'", sid[:8], other.tmuxTarget, name))
+					delete(s.sessions, sid)
+					continue
+				}
 				s.mu.Unlock()
 				return false, fmt.Sprintf("name '%s' already used by session %s", name, sid[:8])
 			}

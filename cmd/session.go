@@ -38,6 +38,7 @@ var (
 	sessionPermMode    string
 	sessionPermStatus  bool
 	sessionNoHeader    bool
+	sessionSetName     string
 )
 
 var sessionListCmd = &cobra.Command{
@@ -82,6 +83,12 @@ var sessionPermCmd = &cobra.Command{
 	Run:   runSessionPerm,
 }
 
+var sessionNameCmd = &cobra.Command{
+	Use:   "name",
+	Short: "Set or show agent name for a session",
+	Run:   runSessionName,
+}
+
 func init() {
 	SessionCmd.PersistentFlags().StringVar(&sessionHost, "host", "", "Bot API host URL (e.g., https://tg-cli.example.com)")
 	SessionCmd.PersistentFlags().StringVar(&sessionToken, "token", "", "API authentication token")
@@ -113,6 +120,10 @@ func init() {
 	sessionPermCmd.Flags().StringVar(&sessionPermMode, "mode", "", "Target mode: bypass/auto/plan/default")
 	sessionPermCmd.Flags().BoolVar(&sessionPermStatus, "status", false, "Show current permission mode")
 	sessionPermCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	sessionNameCmd.Flags().StringVar(&sessionName, "name", "", "Agent name to query (resolve session by current name)")
+	sessionNameCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
+	sessionNameCmd.Flags().StringVar(&sessionSetName, "set", "", "New agent name to assign")
+	sessionNameCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	SessionCmd.AddCommand(sessionListCmd)
 	SessionCmd.AddCommand(sessionLogCmd)
 	SessionCmd.AddCommand(sessionSendCmd)
@@ -120,6 +131,7 @@ func init() {
 	SessionCmd.AddCommand(sessionExitCmd)
 	SessionCmd.AddCommand(sessionWatchCmd)
 	SessionCmd.AddCommand(sessionPermCmd)
+	SessionCmd.AddCommand(sessionNameCmd)
 }
 
 // buildAPIURL constructs the full API URL from host or port
@@ -541,4 +553,85 @@ func runSessionExit(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("Session exit initiated.")
+}
+
+func runSessionName(cmd *cobra.Command, args []string) {
+	port := getSessionPort()
+	listURL := buildAPIURL(sessionHost, port, "/session/list")
+	listResp, err := apiRequest("GET", listURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
+		os.Exit(1)
+	}
+	defer listResp.Body.Close()
+	listBody, _ := io.ReadAll(listResp.Body)
+	var listResult struct {
+		Sessions []struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Target string `json:"target"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(listBody, &listResult); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to parse session list: %v\n", err)
+		os.Exit(1)
+	}
+	var sessionID, currentName string
+	if sessionSelf {
+		pane := os.Getenv("TMUX_PANE")
+		if pane == "" {
+			fmt.Fprintln(os.Stderr, "Error: --self requires TMUX_PANE environment variable")
+			os.Exit(1)
+		}
+		normalizedPane := strings.TrimPrefix(pane, "%")
+		for _, s := range listResult.Sessions {
+			target := strings.TrimPrefix(s.Target, "%")
+			if target == normalizedPane || s.Target == pane {
+				sessionID = s.ID
+				currentName = s.Name
+				break
+			}
+		}
+		if sessionID == "" {
+			fmt.Fprintf(os.Stderr, "Error: no session found for pane %s\n", pane)
+			os.Exit(1)
+		}
+	} else if sessionName != "" {
+		for _, s := range listResult.Sessions {
+			if s.Name == sessionName {
+				sessionID = s.ID
+				currentName = s.Name
+				break
+			}
+		}
+		if sessionID == "" {
+			fmt.Fprintf(os.Stderr, "Error: session %q not found\n", sessionName)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Error: --name or --self is required")
+		os.Exit(1)
+	}
+	if sessionSetName == "" {
+		if currentName != "" {
+			fmt.Printf("Session %s name: %s\n", sessionID[:8], currentName)
+		} else {
+			fmt.Printf("Session %s has no name\n", sessionID[:8])
+		}
+		return
+	}
+	nameURL := buildAPIURL(sessionHost, port, fmt.Sprintf("/session/name?session_id=%s&name=%s",
+		url.QueryEscape(sessionID), url.QueryEscape(sessionSetName)))
+	resp, err := apiRequest("GET", nameURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("Session %s named '%s'\n", sessionID[:8], sessionSetName)
 }
