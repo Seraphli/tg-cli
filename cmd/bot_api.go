@@ -980,6 +980,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			Name       string `json:"name"`
 			CWD        string `json:"cwd"`
 			MaxTurns   int    `json:"max_turns"`
+			NoHeader   bool   `json:"no_header"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1004,6 +1005,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			TmuxTarget: req.TmuxTarget,
 			CWD:        req.CWD,
 			MaxTurns:   req.MaxTurns,
+			NoHeader:   req.NoHeader,
 			CreatedAt:  time.Now(),
 		}
 		if err := cronJobs.add(job); err != nil {
