@@ -45,16 +45,29 @@ func scanCustomCommands() map[string]customCmd {
 		// Build TG command name: replace : and - with _
 		tgName := strings.ReplaceAll(ccName, ":", "_")
 		tgName = strings.ReplaceAll(tgName, "-", "_")
-		// Read first line for description
+		// Read description: parse YAML frontmatter if present, else use first line
 		desc := "Custom command: /" + ccName
 		f, err := os.Open(path)
 		if err == nil {
 			scanner := bufio.NewScanner(f)
 			if scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
-				line = strings.TrimLeft(line, "# ")
-				if len(line) > 0 {
-					desc = truncateStr(line, 200)
+				if line == "---" {
+					// YAML frontmatter: scan until closing --- and extract description
+					for scanner.Scan() {
+						fmLine := strings.TrimSpace(scanner.Text())
+						if fmLine == "---" {
+							break
+						}
+						if strings.HasPrefix(fmLine, "description:") {
+							desc = truncateStr(strings.TrimSpace(strings.TrimPrefix(fmLine, "description:")), 200)
+						}
+					}
+				} else {
+					line = strings.TrimLeft(line, "# ")
+					if len(line) > 0 {
+						desc = truncateStr(line, 200)
+					}
 				}
 			}
 			f.Close()
