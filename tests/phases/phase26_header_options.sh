@@ -22,7 +22,7 @@ else
   fail "session send: TG notification missing (with header)"
 fi
 
-# 1b: Send WITHOUT header (--no-header) — should NOT have TG notification
+# 1b: Send WITHOUT header (--no-header) — TG notification should still be sent
 LOG_BEFORE_NH=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
 sleep 2
@@ -32,9 +32,9 @@ else
   fail "session send --no-header: API log not found"
 fi
 if tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send notification:"; then
-  fail "session send --no-header: TG notification should NOT be sent"
+  pass "session send --no-header: TG notification still sent"
 else
-  pass "session send --no-header: TG notification correctly skipped"
+  fail "session send --no-header: TG notification missing"
 fi
 
 wait_for_cc_idle

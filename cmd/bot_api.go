@@ -1624,27 +1624,25 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			return
 		}
 		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s text=%s", req.Name, info.tmuxTarget, req.From, truncateStr(req.Text, 200)))
-		if !req.NoHeader {
-			// Send TG notification to the target session's chat
-			chat, _, topicID := resolveChat(info.tmuxTarget)
-			if chat != nil {
-				fromLine := ""
-				if req.From != "" {
-					fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
-				}
-				notifyText := fmt.Sprintf("💬 CLI Send\n%s━━━━━━━━━━\n%s", fromLine, req.Text)
-				var sendOpts []interface{}
-				if topicID > 0 {
-					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-				}
-				chunks := splitBody(notifyText, 4000)
-				if len(chunks) <= 1 {
-					retrySend(bot, chat, notifyText, sendOpts...)
-				} else {
-					retrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
-				}
-				logger.Info(fmt.Sprintf("Session send notification: target=%s text=%s", req.Name, truncateStr(req.Text, 200)))
+		// Send TG notification to the target session's chat
+		chat, _, topicID := resolveChat(info.tmuxTarget)
+		if chat != nil {
+			fromLine := ""
+			if req.From != "" {
+				fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
 			}
+			notifyText := fmt.Sprintf("💬 CLI Send\n%s━━━━━━━━━━\n%s", fromLine, req.Text)
+			var sendOpts []interface{}
+			if topicID > 0 {
+				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+			}
+			chunks := splitBody(notifyText, 4000)
+			if len(chunks) <= 1 {
+				retrySend(bot, chat, notifyText, sendOpts...)
+			} else {
+				retrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
+			}
+			logger.Info(fmt.Sprintf("Session send notification: target=%s text=%s", req.Name, truncateStr(req.Text, 200)))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
