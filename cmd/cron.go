@@ -66,6 +66,18 @@ var cronLogCmd = &cobra.Command{
 	Run:   runCronLog,
 }
 
+var cronPauseCmd = &cobra.Command{
+	Use:   "pause",
+	Short: "Pause a cron job",
+	Run:   runCronPause,
+}
+
+var cronResumeCmd = &cobra.Command{
+	Use:   "resume",
+	Short: "Resume a paused cron job",
+	Run:   runCronResume,
+}
+
 func init() {
 	CronCmd.PersistentFlags().StringVar(&cronHost, "host", "", "Bot API host URL")
 	CronCmd.PersistentFlags().StringVar(&cronToken, "token", "", "API authentication token")
@@ -93,11 +105,19 @@ func init() {
 	cronLogCmd.Flags().StringVar(&cronJobID, "id", "", "Job ID or name")
 	cronLogCmd.Flags().StringVar(&cronName, "name", "", "Job name")
 	cronLogCmd.Flags().IntVar(&cronPort, "port", 0, "Bot HTTP port")
+	cronPauseCmd.Flags().StringVar(&cronJobID, "id", "", "Job ID or name to pause")
+	cronPauseCmd.Flags().StringVar(&cronName, "name", "", "Job name to pause")
+	cronPauseCmd.Flags().IntVar(&cronPort, "port", 0, "Bot HTTP port")
+	cronResumeCmd.Flags().StringVar(&cronJobID, "id", "", "Job ID or name to resume")
+	cronResumeCmd.Flags().StringVar(&cronName, "name", "", "Job name to resume")
+	cronResumeCmd.Flags().IntVar(&cronPort, "port", 0, "Bot HTTP port")
 	CronCmd.AddCommand(cronAddCmd)
 	CronCmd.AddCommand(cronListCmd)
 	CronCmd.AddCommand(cronRemoveCmd)
 	CronCmd.AddCommand(cronUpdateCmd)
 	CronCmd.AddCommand(cronLogCmd)
+	CronCmd.AddCommand(cronPauseCmd)
+	CronCmd.AddCommand(cronResumeCmd)
 }
 
 func getCronPort() int {
@@ -199,6 +219,10 @@ func runCronList(cmd *cobra.Command, args []string) {
 		if j.Once {
 			onceTag = " [once]"
 		}
+		pausedTag := ""
+		if j.Paused {
+			pausedTag = " [paused]"
+		}
 		sessionInfo := ""
 		if j.SessionID != "" {
 			sid := j.SessionID
@@ -211,7 +235,7 @@ func runCronList(cmd *cobra.Command, args []string) {
 		if j.Name != "" {
 			nameInfo = fmt.Sprintf(" name=%s", j.Name)
 		}
-		fmt.Printf("[%s] mode=%s schedule=%s%s%s%s prompt=%s\n", j.ID[:8], j.Mode, j.Schedule, onceTag, nameInfo, sessionInfo, j.Prompt)
+		fmt.Printf("[%s] mode=%s schedule=%s%s%s%s%s prompt=%s\n", j.ID[:8], j.Mode, j.Schedule, onceTag, pausedTag, nameInfo, sessionInfo, j.Prompt)
 	}
 }
 
@@ -327,6 +351,66 @@ func runCronLog(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
+}
+
+func runCronPause(cmd *cobra.Command, args []string) {
+	id := cronJobID
+	if id == "" {
+		id = cronName
+	}
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: --id or --name is required")
+		os.Exit(1)
+	}
+	port := getCronPort()
+	reqBody := struct {
+		ID      string            `json:"id"`
+		Updates map[string]string `json:"updates"`
+	}{id, map[string]string{"paused": "true"}}
+	data, _ := json.Marshal(reqBody)
+	url := buildAPIURL(cronHost, port, "/cron/update")
+	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("Job %s paused.\n", id)
+}
+
+func runCronResume(cmd *cobra.Command, args []string) {
+	id := cronJobID
+	if id == "" {
+		id = cronName
+	}
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "Error: --id or --name is required")
+		os.Exit(1)
+	}
+	port := getCronPort()
+	reqBody := struct {
+		ID      string            `json:"id"`
+		Updates map[string]string `json:"updates"`
+	}{id, map[string]string{"paused": "false"}}
+	data, _ := json.Marshal(reqBody)
+	url := buildAPIURL(cronHost, port, "/cron/update")
+	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("Job %s resumed.\n", id)
 }
 
 func runCronUpdate(cmd *cobra.Command, args []string) {

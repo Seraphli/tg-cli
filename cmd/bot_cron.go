@@ -40,6 +40,9 @@ func checkAndRunCronJobs(bot *tele.Bot) {
 }
 
 func shouldRunCronJob(job *cronJob, now time.Time) bool {
+	if job.Paused {
+		return false
+	}
 	if dur, err := time.ParseDuration(job.Schedule); err == nil {
 		if job.LastRun.IsZero() {
 			return now.Sub(job.CreatedAt) >= dur

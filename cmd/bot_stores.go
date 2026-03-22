@@ -928,6 +928,7 @@ type cronJob struct {
 	SessionID   string    `json:"session_id,omitempty"`
 	MaxTurns    int       `json:"max_turns,omitempty"`
 	NoHeader    bool      `json:"no_header,omitempty"`
+	Paused      bool      `json:"paused,omitempty"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
@@ -1037,6 +1038,11 @@ func (cs *cronJobStore) update(idOrName string, updates map[string]string) bool 
 	if v, ok := updates["max_turns"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			job.MaxTurns = n
+		}
+	}
+	if v, ok := updates["paused"]; ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			job.Paused = b
 		}
 	}
 	cs.saveLocked()
