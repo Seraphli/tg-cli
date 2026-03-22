@@ -1631,7 +1631,11 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			if req.From != "" {
 				fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
 			}
-			notifyText := fmt.Sprintf("💬 CLI Send\n%s━━━━━━━━━━\n%s", fromLine, req.Text)
+			header := "💬 CLI Send"
+			if req.NoHeader {
+				header = "📨 CLI Send (silent)"
+			}
+			notifyText := fmt.Sprintf("%s\n%s━━━━━━━━━━\n%s", header, fromLine, req.Text)
 			var sendOpts []interface{}
 			if topicID > 0 {
 				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
