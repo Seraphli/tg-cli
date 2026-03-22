@@ -39,6 +39,7 @@ var (
 	sessionPermStatus  bool
 	sessionNoHeader    bool
 	sessionSetName     string
+	sessionSendWatch   bool
 )
 
 var sessionListCmd = &cobra.Command{
@@ -117,6 +118,7 @@ func init() {
 	sessionSendCmd.Flags().StringVar(&sessionSendFrom, "from", "", "Sender agent name (for signature)")
 	sessionSendCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	sessionSendCmd.Flags().BoolVar(&sessionNoHeader, "no-header", false, "Skip header prefix (for slash commands)")
+	sessionSendCmd.Flags().BoolVar(&sessionSendWatch, "watch", false, "Watch session after sending (block until Stop/AskUserQuestion)")
 	sessionNewCmd.Flags().StringVar(&sessionSession, "session", "", "Tmux session name")
 	sessionNewCmd.Flags().StringVar(&sessionWorkDir, "workdir", "", "Working directory")
 	sessionNewCmd.Flags().StringVar(&sessionCommand, "command", "", "Command to run")
@@ -426,6 +428,17 @@ func runSessionSend(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Message sent to %s.\n", name)
+	if sessionSendWatch {
+		watchURL := buildAPIURL(sessionHost, port, fmt.Sprintf("/session/watch?name=%s", name))
+		watchResp, err := apiRequest("GET", watchURL, nil, sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error watching: %v\n", err)
+			os.Exit(1)
+		}
+		defer watchResp.Body.Close()
+		watchBody, _ := io.ReadAll(watchResp.Body)
+		fmt.Println(string(watchBody))
+	}
 }
 
 func runSessionNew(cmd *cobra.Command, args []string) {
