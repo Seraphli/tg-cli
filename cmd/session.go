@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -34,6 +35,8 @@ var (
 	sessionHost        string
 	sessionToken       string
 	sessionNewName     string
+	sessionPermMode    string
+	sessionPermStatus  bool
 	sessionNoHeader    bool
 )
 
@@ -73,6 +76,12 @@ var sessionWatchCmd = &cobra.Command{
 	Run:   runSessionWatch,
 }
 
+var sessionPermCmd = &cobra.Command{
+	Use:   "perm",
+	Short: "Check or switch session permission mode",
+	Run:   runSessionPerm,
+}
+
 func init() {
 	SessionCmd.PersistentFlags().StringVar(&sessionHost, "host", "", "Bot API host URL (e.g., https://tg-cli.example.com)")
 	SessionCmd.PersistentFlags().StringVar(&sessionToken, "token", "", "API authentication token")
@@ -99,12 +108,18 @@ func init() {
 	sessionExitCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	sessionWatchCmd.Flags().StringVar(&sessionName, "name", "", "Agent name to watch")
 	sessionWatchCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port")
+	sessionPermCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
+	sessionPermCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
+	sessionPermCmd.Flags().StringVar(&sessionPermMode, "mode", "", "Target mode: bypass/auto/plan/default")
+	sessionPermCmd.Flags().BoolVar(&sessionPermStatus, "status", false, "Show current permission mode")
+	sessionPermCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	SessionCmd.AddCommand(sessionListCmd)
 	SessionCmd.AddCommand(sessionLogCmd)
 	SessionCmd.AddCommand(sessionSendCmd)
 	SessionCmd.AddCommand(sessionNewCmd)
 	SessionCmd.AddCommand(sessionExitCmd)
 	SessionCmd.AddCommand(sessionWatchCmd)
+	SessionCmd.AddCommand(sessionPermCmd)
 }
 
 // buildAPIURL constructs the full API URL from host or port
@@ -424,6 +439,79 @@ func runSessionWatch(cmd *cobra.Command, args []string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(body))
+}
+
+func runSessionPerm(cmd *cobra.Command, args []string) {
+	port := getSessionPort()
+	name := sessionName
+	if sessionSelf {
+		name = resolveSessionSelf(port)
+	}
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Error: --name or --self is required")
+		os.Exit(1)
+	}
+	if !sessionPermStatus && sessionPermMode == "" {
+		fmt.Fprintln(os.Stderr, "Error: --mode or --status is required")
+		os.Exit(1)
+	}
+	// Resolve name to tmux target via /session/list
+	listURL := buildAPIURL(sessionHost, port, "/session/list")
+	listResp, err := apiRequest("GET", listURL, nil, sessionToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
+		os.Exit(1)
+	}
+	defer listResp.Body.Close()
+	var listResult struct {
+		Sessions []struct {
+			Name   string `json:"name"`
+			Target string `json:"target"`
+		} `json:"sessions"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listResult)
+	var target string
+	for _, s := range listResult.Sessions {
+		if s.Name == name {
+			target = s.Target
+			break
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "Error: session %q not found\n", name)
+		os.Exit(1)
+	}
+	if sessionPermStatus {
+		statusURL := buildAPIURL(sessionHost, port, "/perm/status") + "?target=" + url.QueryEscape(target)
+		resp, err := apiRequest("GET", statusURL, nil, sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		var result map[string]string
+		json.NewDecoder(resp.Body).Decode(&result)
+		if result["status"] == "error" {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", result["message"])
+			os.Exit(1)
+		}
+		fmt.Printf("Permission mode: %s\n", result["mode"])
+	} else {
+		switchURL := buildAPIURL(sessionHost, port, "/perm/switch") + "?target=" + url.QueryEscape(target) + "&mode=" + url.QueryEscape(sessionPermMode)
+		resp, err := apiRequest("GET", switchURL, nil, sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		var result map[string]string
+		json.NewDecoder(resp.Body).Decode(&result)
+		if result["status"] == "error" {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", result["message"])
+			os.Exit(1)
+		}
+		fmt.Printf("Switched to: %s\n", result["mode"])
+	}
 }
 
 func runSessionExit(cmd *cobra.Command, args []string) {

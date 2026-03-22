@@ -689,6 +689,193 @@ func (ms *mergeBufferStore) finish(key string) (*mergeBuffer, bool) {
 	return buf, ok
 }
 
+// injectItem represents a queued text to inject when CC becomes idle.
+type injectItem struct {
+	Text       string    `json:"text"`
+	ChatID     int64     `json:"chat_id"`
+	TopicID    int       `json:"topic_id"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
+}
+
+// injectQueueStore manages per-target inject queues for when CC is busy.
+type injectQueueStore struct {
+	mu         sync.Mutex
+	queues     map[string][]injectItem
+	notifyMsgs map[string]int
+	injectIDs  map[string]string
+}
+
+var injectQueue = &injectQueueStore{
+	queues:     make(map[string][]injectItem),
+	notifyMsgs: make(map[string]int),
+	injectIDs:  make(map[string]string),
+}
+
+func (iq *injectQueueStore) enqueue(tmuxTarget string, item injectItem) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	item.EnqueuedAt = time.Now()
+	iq.queues[tmuxTarget] = append(iq.queues[tmuxTarget], item)
+	// Generate inject ID on first enqueue for this target
+	if _, ok := iq.injectIDs[tmuxTarget]; !ok {
+		iq.injectIDs[tmuxTarget] = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
+	}
+	iq.saveLocked()
+}
+
+func (iq *injectQueueStore) getInjectID(tmuxTarget string) string {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	return iq.injectIDs[tmuxTarget]
+}
+
+func (iq *injectQueueStore) flush(tmuxTarget string) []injectItem {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	items := iq.queues[tmuxTarget]
+	delete(iq.queues, tmuxTarget)
+	delete(iq.notifyMsgs, tmuxTarget)
+	delete(iq.injectIDs, tmuxTarget)
+	iq.saveLocked()
+	return items
+}
+
+func (iq *injectQueueStore) hasItems(tmuxTarget string) bool {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	return len(iq.queues[tmuxTarget]) > 0
+}
+
+func (iq *injectQueueStore) setNotifyMsg(tmuxTarget string, msgID int) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.notifyMsgs[tmuxTarget] = msgID
+}
+
+func (iq *injectQueueStore) getNotifyMsg(tmuxTarget string) (int, bool) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	id, ok := iq.notifyMsgs[tmuxTarget]
+	return id, ok
+}
+
+func (iq *injectQueueStore) itemCount(tmuxTarget string) int {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	return len(iq.queues[tmuxTarget])
+}
+
+func (iq *injectQueueStore) getTexts(tmuxTarget string) []string {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	items := iq.queues[tmuxTarget]
+	texts := make([]string, len(items))
+	for i, item := range items {
+		texts[i] = item.Text
+	}
+	return texts
+}
+
+func (iq *injectQueueStore) saveLocked() {
+	type persistData struct {
+		Queues map[string][]injectItem `json:"queues"`
+	}
+	data, _ := json.MarshalIndent(persistData{Queues: iq.queues}, "", "  ")
+	path := filepath.Join(config.GetConfigDir(), "inject-queue.json")
+	os.WriteFile(path, data, 0644)
+}
+
+func (iq *injectQueueStore) load() {
+	path := filepath.Join(config.GetConfigDir(), "inject-queue.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var persist struct {
+		Queues map[string][]injectItem `json:"queues"`
+	}
+	if json.Unmarshal(data, &persist) == nil && persist.Queues != nil {
+		iq.mu.Lock()
+		iq.queues = persist.Queues
+		iq.mu.Unlock()
+		logger.Info(fmt.Sprintf("Inject queue loaded: %d targets", len(persist.Queues)))
+	}
+}
+
+// hookRunningStateStore tracks whether CC is running based on hook events (PreToolUse → running, Stop → idle).
+// This is more reliable than pane title checks during Bash tool execution.
+type hookRunningStateStore struct {
+	mu    sync.RWMutex
+	state map[string]bool // tmuxTarget → true=running, false=idle
+}
+
+var hookRunningState = &hookRunningStateStore{
+	state: make(map[string]bool),
+}
+
+func (h *hookRunningStateStore) setRunning(tmuxTarget string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state[tmuxTarget] = true
+}
+
+func (h *hookRunningStateStore) setIdle(tmuxTarget string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state[tmuxTarget] = false
+}
+
+// isRunning returns (running bool, known bool). If !known, caller should fall back to pane title check.
+func (h *hookRunningStateStore) isRunning(tmuxTarget string) (bool, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	running, known := h.state[tmuxTarget]
+	return running, known
+}
+
+// injectConfirmStore manages per-target channels for post-inject UserPromptSubmit confirmation.
+type injectConfirmStore struct {
+	mu       sync.Mutex
+	channels map[string]chan struct{}
+}
+
+var injectConfirm = &injectConfirmStore{
+	channels: make(map[string]chan struct{}),
+}
+
+// register creates a confirmation channel for the target and returns it.
+// The caller should select on this channel with a timeout.
+func (ic *injectConfirmStore) register(tmuxTarget string) chan struct{} {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+	ch := make(chan struct{}, 1)
+	ic.channels[tmuxTarget] = ch
+	return ch
+}
+
+// confirm signals the confirmation channel for the target (if registered).
+func (ic *injectConfirmStore) confirm(tmuxTarget string) {
+	ic.mu.Lock()
+	ch, ok := ic.channels[tmuxTarget]
+	if ok {
+		delete(ic.channels, tmuxTarget)
+	}
+	ic.mu.Unlock()
+	if ok {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// cancel removes the confirmation channel without signaling.
+func (ic *injectConfirmStore) cancel(tmuxTarget string) {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+	delete(ic.channels, tmuxTarget)
+}
+
 type cronJob struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name,omitempty"`

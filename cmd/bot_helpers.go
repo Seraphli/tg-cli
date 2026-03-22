@@ -1029,6 +1029,15 @@ func isSessionRunning(tmuxTarget string) bool {
 	return !strings.HasPrefix(title, "✳")
 }
 
+// isSessionBusy checks if CC is busy using hook-based state (PreToolUse→running, Stop→idle)
+// with fallback to pane title. More reliable than isSessionRunning during Bash tool execution.
+func isSessionBusy(tmuxTarget string) bool {
+	if running, known := hookRunningState.isRunning(tmuxTarget); known {
+		return running
+	}
+	return isSessionRunning(tmuxTarget)
+}
+
 // hookPayload represents the CC payload enriched by hook.go
 type hookPayload struct {
 	HookEventName   string          `json:"hook_event_name"`
@@ -2305,12 +2314,116 @@ func buildVoiceMenu(engine string) *tele.ReplyMarkup {
 	return menu
 }
 
+
+// flushInjectQueue merges all queued items for a target and injects as one combined message.
+// Handles three states: idle → inject, AskQ → answer, PermReq → skip (keep queue).
+func flushInjectQueue(bot *tele.Bot, tmuxTarget string) {
+	if !injectQueue.hasItems(tmuxTarget) {
+		return
+	}
+	// Check PermissionRequest — if pending, do NOT flush (keep queue for later)
+	if _, ok := pendingPerms.findByTmuxTarget(tmuxTarget); ok {
+		logger.Info(fmt.Sprintf("flushInjectQueue: PermissionRequest pending, keeping queue for target=%s", tmuxTarget))
+		return
+	}
+	// Capture notify message ID and inject ID before flush clears them
+	notifyMsgID, hasNotify := injectQueue.getNotifyMsg(tmuxTarget)
+	injectID := injectQueue.getInjectID(tmuxTarget)
+	items := injectQueue.flush(tmuxTarget)
+	if len(items) == 0 {
+		return
+	}
+	// Merge all items into one text
+	var texts []string
+	for _, item := range items {
+		texts = append(texts, item.Text)
+	}
+	merged := strings.Join(texts, "\n")
+	logger.Info(fmt.Sprintf("flushInjectQueue: merging %d items for target=%s merged_len=%d", len(items), tmuxTarget, len(merged)))
+	// Resolve chat for TG notification updates
+	chat, _, topicID := resolveChat(tmuxTarget)
+	if injectID == "" {
+		injectID = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
+	}
+	logger.Info(fmt.Sprintf("flushInjectQueue: [%s] starting flush for target=%s items=%d", injectID, tmuxTarget, len(items)))
+	// Build message list for notifications (with delimiters)
+	msgContent := "──────\n" + strings.Join(texts, "\n") + "\n──────"
+	// Inject the merged text in a goroutine to avoid blocking the hook handler
+	go func(target, text, id, msgList string, itemCount int, notifyID int, hasNotifyMsg bool, chat *tele.Chat, topicID int) {
+		time.Sleep(3 * time.Second)
+		// Ensure hook state is idle before injecting (Stop already set it, but be explicit)
+		hookRunningState.setIdle(target)
+		// Register confirmation channel BEFORE inject to avoid race with UserPromptSubmit
+		ch := injectConfirm.register(target)
+		if err := safeInjectText(bot, target, text); err != nil {
+			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] inject failed: target=%s err=%v", id, target, err))
+			injectConfirm.cancel(target)
+			if hasNotifyMsg && chat != nil {
+				editMsg := &tele.Message{ID: notifyID, Chat: chat}
+				retryEdit(bot, editMsg, fmt.Sprintf("❌ Inject failed [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
+			}
+			return
+		}
+		// Wait for UserPromptSubmit confirmation
+		select {
+		case <-ch:
+			logger.Info(fmt.Sprintf("flushInjectQueue: [%s] inject confirmed: target=%s", id, target))
+			// Update TG notification to show success
+			if hasNotifyMsg && chat != nil {
+				editMsg := &tele.Message{ID: notifyID, Chat: chat}
+				retryEdit(bot, editMsg, fmt.Sprintf("✅ Injected [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
+			}
+		case <-time.After(30 * time.Second):
+			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] inject verification timeout: target=%s", id, target))
+			injectConfirm.cancel(target)
+			// Still mark as injected (text was sent), but warn about no confirmation
+			if hasNotifyMsg && chat != nil {
+				editMsg := &tele.Message{ID: notifyID, Chat: chat}
+				retryEdit(bot, editMsg, fmt.Sprintf("⚠️ Injected [%s] (%d) — no confirmation\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
+			}
+		}
+	}(tmuxTarget, merged, injectID, msgContent, len(items), notifyMsgID, hasNotify, chat, topicID)
+}
+
 // safeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
 // If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
 func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
 		return err
+	}
+	// PRE-INJECT: check if CC is busy (hook-based + pane title fallback). If busy, queue and return.
+	if isSessionBusy(tmuxTarget) {
+		// Check if there's a pending AskUserQuestion — if so, answer it directly (don't queue)
+		if _, _, ok := toolNotifs.findByTmuxTarget(tmuxTarget); ok {
+			// Fall through to AskUserQuestion handling below
+		} else {
+			chat, chatIDStr, topicID := resolveChat(tmuxTarget)
+			chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
+			injectQueue.enqueue(tmuxTarget, injectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+			count := injectQueue.itemCount(tmuxTarget)
+			logger.Info(fmt.Sprintf("safeInjectText: CC busy, queued for target=%s count=%d text=%s", tmuxTarget, count, truncateStr(text, 200)))
+			if chat != nil {
+				// Show all queued messages with inject ID and delimiters
+				allTexts := injectQueue.getTexts(tmuxTarget)
+				queueID := injectQueue.getInjectID(tmuxTarget)
+				notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, notify.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
+				var sendOpts []interface{}
+				if topicID > 0 {
+					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+				}
+				if existingMsgID, ok := injectQueue.getNotifyMsg(tmuxTarget); ok {
+					editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
+					retryEdit(bot, editMsg, notifyText)
+				} else {
+					sent, _ := retrySend(bot, chat, notifyText, sendOpts...)
+					if sent != nil {
+						injectQueue.setNotifyMsg(tmuxTarget, sent.ID)
+					}
+				}
+			}
+			return nil
+		}
 	}
 	// Answer pending AskUserQuestion with the text (same as normal custom reply)
 	for {
@@ -2350,7 +2463,13 @@ func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 	if msgID, ok := pendingPerms.findByTmuxTarget(tmuxTarget); ok {
 		doCancelPerm(bot, msgID)
 		injector.SendKeys(target, "Escape")
-		time.Sleep(3 * time.Second)
+		// Wait for CC to return to idle after canceling PermissionRequest
+		for i := 0; i < 20; i++ {
+			time.Sleep(500 * time.Millisecond)
+			if !isSessionBusy(tmuxTarget) {
+				break
+			}
+		}
 	}
 	return injector.InjectText(target, text)
 }

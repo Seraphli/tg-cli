@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -498,11 +499,37 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			if p.TmuxTarget != "" {
 				reactionTracker.promotePending(bot, p.TmuxTarget)
 				logger.Debug(fmt.Sprintf("Promoted pending reactions for tmux target: %s", p.TmuxTarget))
+				injectConfirm.confirm(p.TmuxTarget)
 			}
 		case "Stop":
+			if p.TmuxTarget != "" {
+				hookRunningState.setIdle(p.TmuxTarget)
+			}
 			cancelPendingFilesBySession(p.SessionID, bot)
 			if chat != nil {
 				body := p.LastAssistantMessage
+				// Auto-handle rate-limit popup
+				bodyLower := strings.ToLower(body)
+				if strings.Contains(bodyLower, "stop and wait") && strings.Contains(bodyLower, "usage") {
+					logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s", p.SessionID, p.TmuxTarget))
+					if p.TmuxTarget != "" {
+						t, parseErr := injector.ParseTarget(p.TmuxTarget)
+						if parseErr == nil {
+							time.Sleep(2 * time.Second)
+							injector.SendKeys(t, "Enter")
+							logger.Info(fmt.Sprintf("Rate-limit auto-handled: sent Enter to %s", p.TmuxTarget))
+						}
+					}
+					if chat != nil {
+						notifyText := fmt.Sprintf("⚠️ Rate limit detected\n📟 %s\n\nAuto-selected \"Stop and wait\"", notify.FormatPaneID(p.TmuxTarget))
+						var sendOpts []interface{}
+						if hookTopicID > 0 {
+							sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: hookTopicID})
+						}
+						retrySend(bot, chat, notifyText, sendOpts...)
+					}
+					break
+				}
 				// Update session count for consistency with PreToolUse
 				if p.SessionID != "" && p.TranscriptPath != "" {
 					lock := sessionCounts.getLock(p.SessionID)
@@ -518,8 +545,15 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				Summary: "Task completed",
 				Detail:  truncateStr(body, 500),
 			})
+			// Flush queued inject items (messages queued while CC was busy)
+			if p.TmuxTarget != "" {
+				flushInjectQueue(bot, p.TmuxTarget)
+			}
 			}
 		case "PreToolUse":
+			if p.TmuxTarget != "" {
+				hookRunningState.setRunning(p.TmuxTarget)
+			}
 			cancelPendingFilesBySession(p.SessionID, bot)
 			// Skip TG notifications for subagent tool calls
 			if p.AgentID != "" {

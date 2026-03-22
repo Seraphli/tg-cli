@@ -531,6 +531,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 		type sessionIdleEntry struct {
 			Target string `json:"target"`
 			Idle   bool   `json:"idle"`
+			Busy   bool   `json:"busy"`
 		}
 		result := make(map[string]sessionIdleEntry)
 		allIdle := len(sessions) > 0 // empty sessions = not idle
@@ -540,10 +541,11 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 				continue
 			}
 			running := isSessionRunning(info.tmuxTarget)
+			busy := isSessionBusy(info.tmuxTarget)
 			if running {
 				allIdle = false
 			}
-			result[sid] = sessionIdleEntry{Target: info.tmuxTarget, Idle: !running}
+			result[sid] = sessionIdleEntry{Target: info.tmuxTarget, Idle: !running, Busy: busy}
 		}
 
 		// If target filter specified but no match found, not idle
