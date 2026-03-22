@@ -171,7 +171,13 @@ func executeInjectJob(job *cronJob, bot *tele.Bot) {
 }
 
 func cronNotifyHeader(job *cronJob) string {
-	header := fmt.Sprintf("🔔 <b>Cron</b> <code>%s</code>", job.ID[:8])
+	icon := "🔔"
+	label := "Cron"
+	if job.NoHeader {
+		icon = "📨"
+		label = "Cron (silent)"
+	}
+	header := fmt.Sprintf("%s <b>%s</b> <code>%s</code>", icon, label, job.ID[:8])
 	if job.Name != "" {
 		header += fmt.Sprintf(" (<b>%s</b>)", job.Name)
 	}
