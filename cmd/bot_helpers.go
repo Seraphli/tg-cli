@@ -1029,12 +1029,9 @@ func isSessionRunning(tmuxTarget string) bool {
 	return !strings.HasPrefix(title, "✳")
 }
 
-// isSessionBusy checks if CC is busy using hook-based state (PreToolUse→running, Stop→idle)
-// with fallback to pane title. More reliable than isSessionRunning during Bash tool execution.
+// isSessionBusy checks if CC is busy by reading tmux pane title.
+// CC shows ✳ prefix when idle, any other prefix when running.
 func isSessionBusy(tmuxTarget string) bool {
-	if running, known := hookRunningState.isRunning(tmuxTarget); known {
-		return running
-	}
 	return isSessionRunning(tmuxTarget)
 }
 
