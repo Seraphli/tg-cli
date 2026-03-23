@@ -504,6 +504,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		case "Stop":
 			if p.TmuxTarget != "" {
 				hookRunningState.setIdle(p.TmuxTarget)
+				stopCooldown.record(p.TmuxTarget)
 			}
 			cancelPendingFilesBySession(p.SessionID, bot)
 			if chat != nil {

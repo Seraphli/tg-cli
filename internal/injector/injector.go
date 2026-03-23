@@ -104,6 +104,12 @@ func InjectText(target TmuxTarget, text string) error {
 	if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
 		return fmt.Errorf("submit failed: %w", err)
 	}
+	// Verify submission — if CC still idle after C-m, retry once
+	time.Sleep(500 * time.Millisecond)
+	title, titleErr := GetPaneTitle(target)
+	if titleErr == nil && strings.HasPrefix(title, "✳") {
+		tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run()
+	}
 	return nil
 }
 

@@ -1703,11 +1703,13 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			http.Error(w, "invalid target: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Store pendingExitKill BEFORE inject to avoid race with SessionEnd hook
+		pendingExitKill.Store(target, true)
 		if err := injector.InjectText(t, "/exit"); err != nil {
+			pendingExitKill.Delete(target)
 			http.Error(w, "inject failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		pendingExitKill.Store(target, true)
 		logger.Info(fmt.Sprintf("Session exit via API: name=%s target=%s", req.Name, target))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))

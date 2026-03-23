@@ -2489,6 +2489,8 @@ func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 		}
 		return nil
 	}
+	// Wait for Stop event cooldown before injecting
+	stopCooldown.waitIfNeeded(tmuxTarget, 3*time.Second)
 	return injector.InjectText(target, text)
 }
 

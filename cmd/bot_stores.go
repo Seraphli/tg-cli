@@ -872,6 +872,38 @@ func (h *hookRunningStateStore) isRunning(tmuxTarget string) (bool, bool) {
 	return running, known
 }
 
+// stopCooldownStore records the last Stop event time per target to prevent
+// injection during CC's TUI transition state after Stop.
+type stopCooldownStore struct {
+	mu    sync.RWMutex
+	times map[string]time.Time
+}
+
+var stopCooldown = &stopCooldownStore{
+	times: make(map[string]time.Time),
+}
+
+func (s *stopCooldownStore) record(tmuxTarget string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.times[tmuxTarget] = time.Now()
+}
+
+func (s *stopCooldownStore) waitIfNeeded(tmuxTarget string, cooldown time.Duration) {
+	s.mu.RLock()
+	lastStop, ok := s.times[tmuxTarget]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	elapsed := time.Since(lastStop)
+	if elapsed < cooldown {
+		wait := cooldown - elapsed
+		logger.Debug(fmt.Sprintf("stopCooldown: waiting %v for target=%s", wait, tmuxTarget))
+		time.Sleep(wait)
+	}
+}
+
 // injectConfirmStore manages per-target channels for post-inject UserPromptSubmit confirmation.
 type injectConfirmStore struct {
 	mu       sync.Mutex
