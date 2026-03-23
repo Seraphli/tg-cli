@@ -2462,17 +2462,32 @@ func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
 		return nil
 	}
-	// Cancel pending PermissionRequest
-	if msgID, ok := pendingPerms.findByTmuxTarget(tmuxTarget); ok {
-		doCancelPerm(bot, msgID)
-		injector.SendKeys(target, "Escape")
-		// Wait for CC to return to idle after canceling PermissionRequest
-		for i := 0; i < 20; i++ {
-			time.Sleep(500 * time.Millisecond)
-			if !isSessionBusy(tmuxTarget) {
-				break
+	// PermissionRequest pending — queue instead of injecting
+	if _, ok := pendingPerms.findByTmuxTarget(tmuxTarget); ok {
+		chat, chatIDStr, topicID := resolveChat(tmuxTarget)
+		chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
+		injectQueue.enqueue(tmuxTarget, injectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+		count := injectQueue.itemCount(tmuxTarget)
+		logger.Info(fmt.Sprintf("safeInjectText: PermissionRequest pending, queued for target=%s count=%d text=%s", tmuxTarget, count, truncateStr(text, 200)))
+		if chat != nil {
+			allTexts := injectQueue.getTexts(tmuxTarget)
+			queueID := injectQueue.getInjectID(tmuxTarget)
+			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, notify.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
+			var sendOpts []interface{}
+			if topicID > 0 {
+				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+			}
+			if existingMsgID, ok := injectQueue.getNotifyMsg(tmuxTarget); ok {
+				editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
+				retryEdit(bot, editMsg, notifyText)
+			} else {
+				sent, _ := retrySend(bot, chat, notifyText, sendOpts...)
+				if sent != nil {
+					injectQueue.setNotifyMsg(tmuxTarget, sent.ID)
+				}
 			}
 		}
+		return nil
 	}
 	return injector.InjectText(target, text)
 }

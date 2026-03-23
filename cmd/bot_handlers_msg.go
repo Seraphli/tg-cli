@@ -328,9 +328,20 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		if err == nil && targetPtr != nil {
 			tmuxStr := injector.FormatTarget(*targetPtr)
 			if injector.SessionExists(*targetPtr) {
+				// Cancel PermissionRequest explicitly, then inject
+				if permMsgID, found := pendingPerms.findByTmuxTarget(tmuxStr); found {
+					doCancelPerm(bot, permMsgID)
+					injector.SendKeys(*targetPtr, "Escape")
+					for i := 0; i < 20; i++ {
+						time.Sleep(500 * time.Millisecond)
+						if !isSessionBusy(tmuxStr) {
+							break
+						}
+					}
+				}
 				sendFeedback(tmuxStr)
-				safeInjectText(bot, tmuxStr, injectionText)
-				logger.Info(fmt.Sprintf("Permission cancelled via reply + safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, truncateStr(text, 200)))
+				injector.InjectText(*targetPtr, injectionText)
+				logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, truncateStr(text, 200)))
 			}
 		}
 		return nil
