@@ -375,6 +375,18 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 	}
 	sendFeedback(injector.FormatTarget(target))
+	// Prepend quoted original message for context
+	if replyTo.Text != "" {
+		quoted := replyTo.Text
+		if len(quoted) > 500 {
+			quoted = quoted[:500] + "..."
+		}
+		var lines []string
+		for _, line := range strings.Split(quoted, "\n") {
+			lines = append(lines, "> "+line)
+		}
+		injectionText = strings.Join(lines, "\n") + "\n\n" + injectionText
+	}
 	if err := safeInjectText(bot, injector.FormatTarget(target), injectionText); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
