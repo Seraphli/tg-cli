@@ -377,12 +377,8 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	sendFeedback(injector.FormatTarget(target))
 	// Prepend quoted original message for context
 	if replyTo.Text != "" {
-		quoted := replyTo.Text
-		if len(quoted) > 500 {
-			quoted = quoted[:500] + "..."
-		}
 		var lines []string
-		for _, line := range strings.Split(quoted, "\n") {
+		for _, line := range strings.Split(replyTo.Text, "\n") {
 			lines = append(lines, "> "+line)
 		}
 		injectionText = strings.Join(lines, "\n") + "\n\n" + injectionText

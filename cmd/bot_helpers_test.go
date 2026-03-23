@@ -102,7 +102,7 @@ func TestQuoteOriginalMessage(t *testing.T) {
 		{"single line", "hello world", "> hello world"},
 		{"multi line", "line1\nline2\nline3", "> line1\n> line2\n> line3"},
 		{"empty text", "", ""},
-		{"long text truncated", strings.Repeat("a", 600), "> " + strings.Repeat("a", 500) + "..."},
+		{"long text no truncation", strings.Repeat("a", 600), "> " + strings.Repeat("a", 600)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,9 +114,6 @@ func TestQuoteOriginalMessage(t *testing.T) {
 				return
 			}
 			quoted := tt.text
-			if len(quoted) > 500 {
-				quoted = quoted[:500] + "..."
-			}
 			var lines []string
 			for _, line := range strings.Split(quoted, "\n") {
 				lines = append(lines, "> "+line)
