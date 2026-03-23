@@ -217,7 +217,6 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 		items, notifyMsgID, chatID, _ := mergeBuffers.addAndGetInfo(key, content)
 		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), truncateStr(content, 200)))
-		reactSeen(bot, c.Message().Chat, c.Message())
 		if isVoice {
 			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
@@ -238,7 +237,6 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	if isVoice {
 		injectionText = voicePrefix + " " + text
 	}
-	reactSeen(bot, c.Message().Chat, c.Message())
 	// Skip forwarded messages globally (not just in group path)
 	if c.Message().OriginalUnixtime != 0 {
 		return nil

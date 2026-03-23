@@ -605,7 +605,7 @@ func (rt *reactionTrackerStore) recordPending(tmuxTarget string, chatID int64, m
 	logger.Debug(fmt.Sprintf("Reaction pending recorded: target=%s msg_id=%d", tmuxTarget, msgID))
 }
 
-// promotePending appends pending entries to active with ✍ reaction (replacing 👀).
+// promotePending appends pending entries to active with ✍ reaction on confirmed input.
 func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string) {
 	rt.mu.Lock()
 	newEntries := rt.pending[tmuxTarget]
@@ -615,7 +615,7 @@ func (rt *reactionTrackerStore) promotePending(bot *tele.Bot, tmuxTarget string)
 	}
 	rt.mu.Unlock()
 
-	// Set ✍ on newly promoted entries (replacing 👀)
+	// Set ✍ on newly promoted entries (confirmed by UserPromptSubmit)
 	for _, e := range newEntries {
 		bot.Raw("setMessageReaction", map[string]interface{}{
 			"chat_id":    e.chatID,

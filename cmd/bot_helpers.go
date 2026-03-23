@@ -796,13 +796,6 @@ func parseSuggestionLabel(suggestionsRaw json.RawMessage) (btnLabel string, desc
 	return "Always Allow", strings.Join(descs, "; ")
 }
 
-// reactSeen adds an eyes emoji reaction to indicate the message was received.
-func reactSeen(bot *tele.Bot, chat *tele.Chat, msg *tele.Message) {
-	bot.React(chat, msg, tele.ReactionOptions{
-		Reactions: []tele.Reaction{{Type: "emoji", Emoji: "👀"}},
-	})
-}
-
 // recordPending records a message for later ✍ reaction when UserPromptSubmit fires.
 func recordPending(tmuxTarget string, chatID int64, msgID int) {
 	reactionTracker.recordPending(tmuxTarget, chatID, msgID)
