@@ -96,3 +96,10 @@ if [ "$STOP_FOUND" = true ]; then
 else
   fail "Stop notification not received within ${TIMEOUT}s"
 fi
+
+# Check TG message label changed to "⌨️ Answered on desktop"
+if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Permission TUI answer.*Answered on desktop" > /dev/null 2>&1; then
+  pass "TG message label updated to '⌨️ Answered on desktop'"
+else
+  fail "TG message label '⌨️ Answered on desktop' not found in log"
+fi

@@ -63,9 +63,10 @@ func cancelPendingFilesBySession(sessionID string, bot *tele.Bot) {
 				permChatID := pendingPerms.getChatID(pf.TgMsgID)
 				permMsgText := pendingPerms.getMsgText(pf.TgMsgID)
 				sugLabel, _ := parseSuggestionLabel(pendingPerms.getSuggestions(pf.TgMsgID))
-				pendingPerms.resolve(pf.TgMsgID, permDecision{Behavior: "deny", Message: "Cancelled by session event"})
+				pendingPerms.resolve(pf.TgMsgID, permDecision{Behavior: "allow", Message: "Answered on desktop"})
 				editMsg := &tele.Message{ID: pf.TgMsgID, Chat: &tele.Chat{ID: permChatID}}
-				retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("❌ Cancelled", sugLabel), tele.ModeHTML)
+				retryEdit(bot, editMsg, permMsgText, buildFrozenPermMarkup("⌨️ Answered on desktop", sugLabel), tele.ModeHTML)
+				logger.Info(fmt.Sprintf("Permission TUI answer: msg_id=%d label=⌨️ Answered on desktop", pf.TgMsgID))
 			}
 			if !isHookAlive(pf.HookPID) {
 				os.Remove(path)
