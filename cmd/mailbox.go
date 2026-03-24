@@ -210,9 +210,11 @@ func runMailboxReceive(cmd *cobra.Command, args []string) {
 		OK       bool   `json:"ok"`
 		Error    string `json:"error"`
 		Messages []struct {
+			ID        string    `json:"id"`
 			From      string    `json:"from"`
 			Subject   string    `json:"subject"`
 			Text      string    `json:"text"`
+			FileName  string    `json:"file_name"`
 			Timestamp time.Time `json:"timestamp"`
 		} `json:"messages"`
 	}
@@ -235,6 +237,9 @@ func runMailboxReceive(cmd *cobra.Command, args []string) {
 			fmt.Printf("Subject: %s\n", m.Subject)
 		}
 		fmt.Printf("%s\n", m.Text)
+		if m.FileName != "" {
+			fmt.Printf("📎 %s (download: tg-cli mailbox download --id %s)\n", m.FileName, m.ID)
+		}
 	}
 }
 
@@ -258,8 +263,11 @@ func runMailboxInbox(cmd *cobra.Command, args []string) {
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
 		Messages []struct {
+			ID        string    `json:"id"`
 			From      string    `json:"from"`
+			Subject   string    `json:"subject"`
 			Text      string    `json:"text"`
+			FileName  string    `json:"file_name"`
 			Timestamp time.Time `json:"timestamp"`
 			Read      bool      `json:"read"`
 		} `json:"messages"`
@@ -277,7 +285,11 @@ func runMailboxInbox(cmd *cobra.Command, args []string) {
 		if !m.Read {
 			prefix = "*"
 		}
-		fmt.Printf("%s[%s] %s %s\n", prefix, m.From, m.Timestamp.Format(time.RFC3339), m.Text)
+		attach := ""
+		if m.FileName != "" {
+			attach = " 📎" + m.FileName
+		}
+		fmt.Printf("%s[%s] %s %s%s\n", prefix, m.From, m.Timestamp.Format(time.RFC3339), m.Text, attach)
 	}
 }
 
