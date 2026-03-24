@@ -961,6 +961,7 @@ type cronJob struct {
 	MaxTurns    int       `json:"max_turns,omitempty"`
 	NoHeader    bool      `json:"no_header,omitempty"`
 	Paused      bool      `json:"paused,omitempty"`
+	Fresh       bool      `json:"fresh,omitempty"`
 	LastRun     time.Time `json:"last_run,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }

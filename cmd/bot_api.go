@@ -993,6 +993,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			CWD        string `json:"cwd"`
 			MaxTurns   int    `json:"max_turns"`
 			NoHeader   bool   `json:"no_header"`
+			Fresh      bool   `json:"fresh"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1018,6 +1019,7 @@ func registerHTTPAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credential
 			CWD:        req.CWD,
 			MaxTurns:   req.MaxTurns,
 			NoHeader:   req.NoHeader,
+			Fresh:      req.Fresh,
 			CreatedAt:  time.Now(),
 		}
 		if err := cronJobs.add(job); err != nil {

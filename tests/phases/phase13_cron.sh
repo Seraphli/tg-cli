@@ -136,3 +136,19 @@ if echo "$CLI_OUTPUT" | grep -qi "job\|No cron\|id\|mode"; then
 else
   fail "Cron CLI list: unexpected output: $CLI_OUTPUT"
 fi
+
+# Test: cron add --fresh flag
+FRESH_ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"print","schedule":"1h","prompt":"fresh test","cwd":"/tmp","fresh":true}')
+FRESH_JOB_ID=$(echo "$FRESH_ADD_RESP" | jq -r '.id // ""')
+FRESH_LIST=$(curl -s "http://127.0.0.1:$TEST_PORT/cron/list")
+FRESH_VALUE=$(echo "$FRESH_LIST" | jq -r ".jobs[] | select(.id==\"$FRESH_JOB_ID\") | .fresh")
+if [ "$FRESH_VALUE" = "true" ]; then
+  pass "Cron fresh flag: job stored with fresh=true"
+else
+  fail "Cron fresh flag: expected fresh=true, got $FRESH_VALUE"
+fi
+curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"$FRESH_JOB_ID\"}" > /dev/null

@@ -34,6 +34,7 @@ var (
 	cronHost      string
 	cronToken     string
 	cronNoHeader  bool
+	cronFresh     bool
 )
 
 var cronAddCmd = &cobra.Command{
@@ -92,6 +93,7 @@ func init() {
 	cronAddCmd.Flags().StringVar(&cronName, "name", "", "Human-friendly name for this job (unique)")
 	cronAddCmd.Flags().IntVar(&cronMaxTurns, "max-turns", 0, "Max agentic turns for print mode (0 = no limit)")
 	cronAddCmd.Flags().BoolVar(&cronNoHeader, "no-header", false, "Skip cron header prefix in inject mode")
+	cronAddCmd.Flags().BoolVar(&cronFresh, "fresh", false, "Create new session each run (print mode, no resume)")
 	cronRemoveCmd.Flags().StringVar(&cronJobID, "id", "", "Job ID or name to remove")
 	cronRemoveCmd.Flags().StringVar(&cronName, "name", "", "Job name to remove")
 	cronRemoveCmd.Flags().IntVar(&cronPort, "port", 0, "Bot HTTP port")
@@ -174,7 +176,8 @@ func runCronAdd(cmd *cobra.Command, args []string) {
 		CWD        string `json:"cwd"`
 		MaxTurns   int    `json:"max_turns,omitempty"`
 		NoHeader   bool   `json:"no_header,omitempty"`
-	}{cronMode, cronSchedule, cronOnce, cronPrompt, cronAgent, tmuxTarget, cronName, cronCWD, cronMaxTurns, cronNoHeader}
+		Fresh      bool   `json:"fresh,omitempty"`
+	}{cronMode, cronSchedule, cronOnce, cronPrompt, cronAgent, tmuxTarget, cronName, cronCWD, cronMaxTurns, cronNoHeader, cronFresh}
 	data, _ := json.Marshal(reqBody)
 	url := buildAPIURL(cronHost, port, "/cron/add")
 	resp, err := apiRequest("POST", url, bytes.NewReader(data), cronToken)

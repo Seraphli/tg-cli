@@ -75,6 +75,11 @@ func executePrintJob(job *cronJob, bot *tele.Bot) {
 	if job.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(job.MaxTurns))
 	}
+	if job.Fresh && job.SessionID != "" {
+		cronJobs.updateSessionID(job.ID, "")
+		job.SessionID = ""
+		logger.Info(fmt.Sprintf("Cron fresh mode: cleared session_id for id=%s", job.ID[:8]))
+	}
 	if job.SessionID != "" {
 		args = append(args, "--resume", job.SessionID, "--output-format", "text")
 	} else {
