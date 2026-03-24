@@ -513,11 +513,13 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				// Auto-handle rate-limit popup
 				bodyLower := strings.ToLower(body)
 				if strings.Contains(bodyLower, "stop and wait") && strings.Contains(bodyLower, "usage") {
-					logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s", p.SessionID, p.TmuxTarget))
+					logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s body=%s", p.SessionID, p.TmuxTarget, truncateStr(body, 200)))
 					if p.TmuxTarget != "" {
 						t, parseErr := injector.ParseTarget(p.TmuxTarget)
 						if parseErr == nil {
 							time.Sleep(2 * time.Second)
+							injector.SendKeys(t, "1")
+							time.Sleep(500 * time.Millisecond)
 							injector.SendKeys(t, "Enter")
 							logger.Info(fmt.Sprintf("Rate-limit auto-handled: sent Enter to %s", p.TmuxTarget))
 						}
