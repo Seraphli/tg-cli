@@ -154,3 +154,18 @@ fi
 
 wait_for_cc_idle 90
 pane_log "[phase28-C] AFTER CC idle"
+
+# =============================================
+# Test D: tg-cli usage CLI command
+# =============================================
+
+echo ""
+echo "  --- Sub-test D: tg-cli usage CLI command ---"
+
+USAGE_OUTPUT=$(./tg-cli usage 2>&1) || true
+
+if echo "$USAGE_OUTPUT" | grep -q "CC Usage"; then
+  pass "usage CLI: output contains CC Usage header"
+else
+  fail "usage CLI: output missing CC Usage header - got: $USAGE_OUTPUT"
+fi

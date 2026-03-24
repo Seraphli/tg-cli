@@ -34,6 +34,7 @@ func main() {
 	rootCmd.AddCommand(cmd.MailboxCmd)
 	rootCmd.AddCommand(cmd.TmuxManageCmd)
 	rootCmd.AddCommand(cmd.TmuxHookCmd)
+	rootCmd.AddCommand(cmd.UsageCmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
