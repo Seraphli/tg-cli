@@ -338,7 +338,7 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 			if len(tables) > 0 {
 				body = markdown.RemoveTables(body)
 				for _, t := range tables {
-					img, err := markdown.RenderTableImageChrome(t.Headers, t.Rows)
+					img, err := markdown.RenderTableImageChromeFormatted(t.Headers, t.Rows, t.HeadersHTML, t.RowsHTML)
 					if err != nil {
 						logger.Info(fmt.Sprintf("Chrome table render failed (falling back to code): %v", err))
 						img, err = markdown.RenderTableImage(t.Headers, t.Rows)

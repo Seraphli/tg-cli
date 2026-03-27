@@ -143,7 +143,12 @@ func RenderTableImage(headers []string, rows [][]string) ([]byte, error) {
 
 // RenderTableImageChrome renders a table as a PNG using headless Chrome (supports color emoji).
 func RenderTableImageChrome(headers []string, rows [][]string) ([]byte, error) {
-	html := buildTableHTML(headers, rows)
+	return RenderTableImageChromeFormatted(headers, rows, nil, nil)
+}
+
+// RenderTableImageChromeFormatted renders a table with HTML-formatted cells (bold/italic support).
+func RenderTableImageChromeFormatted(headers []string, rows [][]string, headersHTML []string, rowsHTML [][]string) ([]byte, error) {
+	html := buildTableHTMLWithFormat(headers, rows, headersHTML, rowsHTML)
 	tmpFile, err := os.CreateTemp("", "tg-cli-table-*.html")
 	if err != nil {
 		return nil, fmt.Errorf("create temp file: %w", err)
@@ -206,6 +211,10 @@ func RenderTableImageChrome(headers []string, rows [][]string) ([]byte, error) {
 }
 
 func buildTableHTML(headers []string, rows [][]string) string {
+	return buildTableHTMLWithFormat(headers, rows, nil, nil)
+}
+
+func buildTableHTMLWithFormat(headers []string, rows [][]string, headersHTML []string, rowsHTML [][]string) string {
 	var sb strings.Builder
 	sb.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 body { margin: 0; padding: 0; background: white; }
@@ -214,17 +223,25 @@ th, td { border: 1px solid #ccc; padding: 8px 16px; text-align: left; }
 th { background: #E8E8E8; font-weight: bold; }
 </style></head><body><table>`)
 	sb.WriteString("<thead><tr>")
-	for _, h := range headers {
+	for i, h := range headers {
 		sb.WriteString("<th>")
-		sb.WriteString(template.HTMLEscapeString(h))
+		if headersHTML != nil && i < len(headersHTML) {
+			sb.WriteString(headersHTML[i])
+		} else {
+			sb.WriteString(template.HTMLEscapeString(h))
+		}
 		sb.WriteString("</th>")
 	}
 	sb.WriteString("</tr></thead><tbody>")
-	for _, row := range rows {
+	for ri, row := range rows {
 		sb.WriteString("<tr>")
-		for _, cell := range row {
+		for ci, cell := range row {
 			sb.WriteString("<td>")
-			sb.WriteString(template.HTMLEscapeString(cell))
+			if rowsHTML != nil && ri < len(rowsHTML) && ci < len(rowsHTML[ri]) {
+				sb.WriteString(rowsHTML[ri][ci])
+			} else {
+				sb.WriteString(template.HTMLEscapeString(cell))
+			}
 			sb.WriteString("</td>")
 		}
 		sb.WriteString("</tr>")

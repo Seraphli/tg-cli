@@ -31,8 +31,10 @@ func EscapeHTML(s string) string {
 
 // TableData represents a parsed markdown table.
 type TableData struct {
-	Headers []string
-	Rows    [][]string
+	Headers     []string
+	Rows        [][]string
+	HeadersHTML []string
+	RowsHTML    [][]string
 }
 
 // ContainsTables returns true if md contains GFM tables.
@@ -74,13 +76,17 @@ func ExtractTableData(md string) []TableData {
 		var td TableData
 		for row := table.FirstChild(); row != nil; row = row.NextSibling() {
 			var cells []string
+			var cellsHTML []string
 			for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
 				cells = append(cells, collectCellText(cell, source))
+				cellsHTML = append(cellsHTML, collectCellHTML(cell, source))
 			}
 			if _, isHeader := row.(*extast.TableHeader); isHeader {
 				td.Headers = cells
+				td.HeadersHTML = cellsHTML
 			} else {
 				td.Rows = append(td.Rows, cells)
+				td.RowsHTML = append(td.RowsHTML, cellsHTML)
 			}
 		}
 		tables = append(tables, td)
@@ -90,65 +96,38 @@ func ExtractTableData(md string) []TableData {
 }
 
 // RemoveTables removes all GFM table blocks from markdown source, returning the remaining text.
+// Uses line-based matching for robustness — any consecutive block of lines starting with |
+// (outside code blocks) is replaced with a 📊 [Table] placeholder.
 func RemoveTables(md string) string {
 	md = normalizeTableBold(md)
-	source := []byte(md)
-	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
-	reader := text.NewReader(source)
-	doc := gm.Parser().Parse(reader)
-	// Collect byte ranges of table nodes
-	type byteRange struct{ start, end int }
-	var ranges []byteRange
-	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
-		if !entering {
-			return ast.WalkContinue, nil
-		}
-		if _, ok := n.(*extast.Table); ok {
-			// Find start and end byte positions from table's line segments
-			start := -1
-			end := -1
-			for row := n.FirstChild(); row != nil; row = row.NextSibling() {
-				for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-					for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
-						if t, ok := child.(*ast.Text); ok {
-							seg := t.Segment
-							if start == -1 || seg.Start < start {
-								start = seg.Start
-							}
-							if seg.Stop > end {
-								end = seg.Stop
-							}
-						}
-					}
-				}
-			}
-			if start >= 0 && end > start {
-				// Extend to line boundaries
-				for start > 0 && source[start-1] != '\n' {
-					start--
-				}
-				for end < len(source) && source[end-1] != '\n' {
-					end++
-				}
-				ranges = append(ranges, byteRange{start, end})
-			}
-			return ast.WalkSkipChildren, nil
-		}
-		return ast.WalkContinue, nil
-	})
-	if len(ranges) == 0 {
+	if !ContainsTables(md) {
 		return md
 	}
-	// Build result excluding table ranges
-	var buf bytes.Buffer
-	pos := 0
-	for _, r := range ranges {
-		buf.Write(source[pos:r.start])
-		buf.WriteString("📊 [Table]\n")
-		pos = r.end
+	lines := strings.Split(md, "\n")
+	var result []string
+	inTable := false
+	inCodeBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeBlock = !inCodeBlock
+		}
+		if inCodeBlock {
+			result = append(result, line)
+			continue
+		}
+		isTableLine := strings.HasPrefix(trimmed, "|") && strings.Count(trimmed, "|") >= 2
+		if isTableLine {
+			if !inTable {
+				inTable = true
+				result = append(result, "📊 [Table]")
+			}
+		} else {
+			inTable = false
+			result = append(result, line)
+		}
 	}
-	buf.Write(source[pos:])
-	return strings.TrimSpace(buf.String())
+	return strings.TrimSpace(strings.Join(result, "\n"))
 }
 
 // normalizeTableBold adds a space between ** and | in table rows so goldmark
@@ -517,6 +496,50 @@ func collectCellText(n ast.Node, source []byte) string {
 		})
 	}
 	return strings.TrimSpace(buf.String())
+}
+
+// collectCellHTML extracts cell content as HTML, preserving bold/italic formatting.
+func collectCellHTML(n ast.Node, source []byte) string {
+	var buf bytes.Buffer
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		ast.Walk(child, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+			switch v := c.(type) {
+			case *ast.Text:
+				if entering {
+					buf.WriteString(htmlEscape(string(v.Segment.Value(source))))
+				}
+			case *ast.String:
+				if entering {
+					buf.WriteString(htmlEscape(string(v.Value)))
+				}
+			case *ast.Emphasis:
+				if v.Level == 2 {
+					if entering {
+						buf.WriteString("<strong>")
+					} else {
+						buf.WriteString("</strong>")
+					}
+				} else {
+					if entering {
+						buf.WriteString("<em>")
+					} else {
+						buf.WriteString("</em>")
+					}
+				}
+			}
+			return ast.WalkContinue, nil
+		})
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+// htmlEscape escapes HTML special chars for table cell content.
+func htmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	return s
 }
 
 // RenderTelegramHTML converts Markdown text to Telegram-compatible HTML.
