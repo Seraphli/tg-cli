@@ -226,6 +226,10 @@ func runCronList(cmd *cobra.Command, args []string) {
 		if j.Paused {
 			pausedTag = " [paused]"
 		}
+		freshTag := ""
+		if j.Fresh {
+			freshTag = " [fresh]"
+		}
 		sessionInfo := ""
 		if j.SessionID != "" {
 			sid := j.SessionID
@@ -238,7 +242,7 @@ func runCronList(cmd *cobra.Command, args []string) {
 		if j.Name != "" {
 			nameInfo = fmt.Sprintf(" name=%s", j.Name)
 		}
-		fmt.Printf("[%s] mode=%s schedule=%s%s%s%s%s prompt=%s\n", j.ID[:8], j.Mode, j.Schedule, onceTag, pausedTag, nameInfo, sessionInfo, j.Prompt)
+		fmt.Printf("[%s] mode=%s schedule=%s%s%s%s%s%s prompt=%s\n", j.ID[:8], j.Mode, j.Schedule, onceTag, pausedTag, freshTag, nameInfo, sessionInfo, j.Prompt)
 	}
 }
 
