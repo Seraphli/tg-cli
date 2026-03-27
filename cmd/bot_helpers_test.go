@@ -125,30 +125,3 @@ func TestQuoteOriginalMessage(t *testing.T) {
 		})
 	}
 }
-
-// TestRateLimitDetection tests the rate-limit pattern matching logic from the Stop handler.
-func TestRateLimitDetection(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     string
-		expected bool
-	}{
-		{"typical rate limit message", "You've reached your usage limit. Please stop and wait for your quota to reset.", true},
-		{"mixed case", "Stop And Wait until your Usage resets", true},
-		{"stop and wait only", "Please stop and wait for a moment", false},
-		{"usage only", "Check your usage at the dashboard", false},
-		{"empty body", "", false},
-		{"normal stop body", "I've completed the task successfully.", false},
-		{"both keywords present", "Your usage has exceeded the limit. You should stop and wait.", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Replicate the detection logic from bot_hooks.go Stop handler
-			bodyLower := strings.ToLower(tt.body)
-			detected := strings.Contains(bodyLower, "stop and wait") && strings.Contains(bodyLower, "usage")
-			if detected != tt.expected {
-				t.Errorf("body=%q: got detected=%v, want %v", tt.body, detected, tt.expected)
-			}
-		})
-	}
-}
