@@ -37,6 +37,7 @@ type TableData struct {
 
 // ContainsTables returns true if md contains GFM tables.
 func ContainsTables(md string) bool {
+	md = normalizeTableBold(md)
 	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	reader := text.NewReader([]byte(md))
 	doc := gm.Parser().Parse(reader)
@@ -56,6 +57,7 @@ func ContainsTables(md string) bool {
 
 // ExtractTableData parses md and returns all tables as structured data.
 func ExtractTableData(md string) []TableData {
+	md = normalizeTableBold(md)
 	source := []byte(md)
 	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	reader := text.NewReader(source)
@@ -89,6 +91,7 @@ func ExtractTableData(md string) []TableData {
 
 // RemoveTables removes all GFM table blocks from markdown source, returning the remaining text.
 func RemoveTables(md string) string {
+	md = normalizeTableBold(md)
 	source := []byte(md)
 	gm := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	reader := text.NewReader(source)
@@ -146,6 +149,19 @@ func RemoveTables(md string) string {
 	}
 	buf.Write(source[pos:])
 	return strings.TrimSpace(buf.String())
+}
+
+// normalizeTableBold adds a space between ** and | in table rows so goldmark
+// doesn't misparse **| as bold-end followed by non-separator pipe.
+func normalizeTableBold(md string) string {
+	lines := strings.Split(md, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "|") {
+			lines[i] = strings.ReplaceAll(line, "**|", "** |")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // tgRenderer is a custom goldmark renderer that outputs Telegram-compatible HTML.
@@ -505,6 +521,7 @@ func collectCellText(n ast.Node, source []byte) string {
 
 // RenderTelegramHTML converts Markdown text to Telegram-compatible HTML.
 func RenderTelegramHTML(md string) string {
+	md = normalizeTableBold(md)
 	gm := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 	)

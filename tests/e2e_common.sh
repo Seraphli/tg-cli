@@ -142,7 +142,7 @@ start_claude() {
   CLAUDE_PANE=$($TMUX_TEST list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
   export CLAUDE_PANE
   $TMUX_TEST send-keys -t "$CLAUDE_SESSION" \
-    "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions" Enter
+    "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions" Enter
   echo "Waiting for Claude to start..."
   # Check if trust dialog is present before sending Enter
   sleep 5
