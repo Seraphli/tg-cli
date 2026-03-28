@@ -10,6 +10,14 @@ ensure_infrastructure
 
 pane_log "[cron] BEFORE cron tests"
 
+# Cleanup any leftover jobs from previous runs
+EXISTING_JOBS=$(curl -s "http://127.0.0.1:$TEST_PORT/cron/list" | jq -r '.jobs[].id // empty' 2>/dev/null)
+for jid in $EXISTING_JOBS; do
+  curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
+    -H "Content-Type: application/json" \
+    -d "{\"id\":\"$jid\"}" > /dev/null 2>&1
+done
+
 # Test 1: Add a print mode cron job via API
 LOG_BEFORE=$(wc -l < "$LOG_FILE")
 ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
@@ -65,12 +73,23 @@ else
   fail "Cron remove not logged in bot log"
 fi
 
-# Test 4: Verify list is now empty
-LIST_AFTER=$(curl -s "http://127.0.0.1:$TEST_PORT/cron/list")
-JOB_COUNT_AFTER=$(echo "$LIST_AFTER" | jq '.jobs | length')
-if [ "$JOB_COUNT_AFTER" -eq 0 ]; then
+# Test 4: Verify list is now empty (poll for up to 5s)
+ELAPSED=0
+CRON_EMPTY=false
+while [ $ELAPSED -lt 5 ]; do
+  LIST_AFTER=$(curl -s "http://127.0.0.1:$TEST_PORT/cron/list")
+  JOB_COUNT_AFTER=$(echo "$LIST_AFTER" | jq '.jobs | length')
+  if [ "$JOB_COUNT_AFTER" -eq 0 ]; then
+    CRON_EMPTY=true
+    break
+  fi
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
+if [ "$CRON_EMPTY" = true ]; then
   pass "Cron list empty after remove"
 else
+  echo "  DEBUG: cron list after remove: $LIST_AFTER"
   fail "Cron list still has $JOB_COUNT_AFTER jobs after remove"
 fi
 

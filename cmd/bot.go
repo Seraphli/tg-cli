@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 	"golang.org/x/term"
 	tele "gopkg.in/telebot.v3"
 )
+
+var versionNotified sync.Map // tmuxTarget → "current→latest"
 
 func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 	ticker := time.NewTicker(3 * time.Second)
@@ -198,6 +201,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "bot_voice", Description: "Voice transcription settings"},
 		tele.Command{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
 		tele.Command{Text: "bot_mailbox", Description: "Bind/unbind mailbox group"},
+		tele.Command{Text: "cu", Description: "Check for CC version updates"},
+		tele.Command{Text: "check_update", Description: "Check for CC version updates"},
 	)
 	// CC built-in commands
 	for name, desc := range ccBuiltinCommands {

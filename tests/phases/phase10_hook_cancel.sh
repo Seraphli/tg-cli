@@ -70,9 +70,20 @@ else
 fi
 
 # Check that pending files were cleaned up (removed by hook.go after status=cancelled)
+# Poll for cleanup — hook process needs time to detect cancelled status and exit
 TEST_PENDING_DIR="/tmp/.tg-cli-test/pending"
-PENDING_COUNT=$(find "$TEST_PENDING_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
-if [ "$PENDING_COUNT" -eq 0 ]; then
+ELAPSED=0
+PENDING_CLEANED=false
+while [ $ELAPSED -lt 15 ]; do
+  PENDING_COUNT=$(find "$TEST_PENDING_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
+  if [ "$PENDING_COUNT" -eq 0 ]; then
+    PENDING_CLEANED=true
+    break
+  fi
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
+if [ "$PENDING_CLEANED" = true ]; then
   pass "Pending files cleaned up from $TEST_PENDING_DIR"
 else
   fail "Pending files still exist after cancel: $PENDING_COUNT file(s) in $TEST_PENDING_DIR"

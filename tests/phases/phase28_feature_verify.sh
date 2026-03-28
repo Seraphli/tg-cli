@@ -15,8 +15,8 @@ ensure_infrastructure
 TEST_FILE="/tmp/tg-cli-e2e-phase28-test.txt"
 echo "phase28 feature verify test - $(date)" > "$TEST_FILE"
 
-LOG_BEFORE_A=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[phase28-A] BEFORE MCP send-file"
+LOG_BEFORE_A=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
 # POST to /mcp/send-file with empty tmux_target and cwd set to project root
 # This exercises the CWD fallback code path regardless of whether the fallback
@@ -40,7 +40,7 @@ fi
 ELAPSED=0
 MCP_SENT=false
 while [ $ELAPSED -lt 15 ]; do
-  if tail -n +"$((LOG_BEFORE_A + 1))" "$LOG_FILE" | grep -q "\[MCP\] File sent"; then
+  if tail -n +"$((LOG_BEFORE_A + 1))" "$LOG_FILE" | grep -q "\[MCP\] File sent.*phase28"; then
     MCP_SENT=true
     break
   fi

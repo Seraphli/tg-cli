@@ -768,4 +768,22 @@ func registerCallbackHandlers(bot *tele.Bot) {
 		menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
 		return c.Edit(fmt.Sprintf("📬 Mailbox Group\nStatus: Not bound\nChat ID: %d", chatID), menu)
 	})
+
+	bot.Handle(&tele.Btn{Unique: "upgrade"}, func(c tele.Context) error {
+		tmuxTarget := c.Data()
+		logger.Info(fmt.Sprintf("Upgrade callback: target=%s", tmuxTarget))
+		if isSessionRunning(tmuxTarget) {
+			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session is busy. Wait for idle before upgrading."})
+		}
+		retryEdit(bot, c.Message(), fmt.Sprintf("🔄 Upgrading CC...\n📟 %s", notify.FormatPaneID(tmuxTarget)), tele.ModeHTML)
+		go func() {
+			if err := doUpgradeSession(bot, tmuxTarget); err != nil {
+				logger.Error(fmt.Sprintf("doUpgradeSession failed: %v", err))
+				retryEdit(bot, c.Message(), fmt.Sprintf("❌ Upgrade failed: %s\n📟 %s", err.Error(), notify.FormatPaneID(tmuxTarget)), tele.ModeHTML)
+				return
+			}
+			retryEdit(bot, c.Message(), fmt.Sprintf("✅ CC restarted\n📟 %s", notify.FormatPaneID(tmuxTarget)), tele.ModeHTML)
+		}()
+		return c.Respond()
+	})
 }

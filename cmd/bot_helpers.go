@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -2508,4 +2509,217 @@ func handleVoiceCommand(c tele.Context) error {
 	menu := buildVoiceMenu(engine)
 	_, err = retrySend(c.Bot(), c.Chat(), text, menu, tele.ModeHTML)
 	return err
+}
+
+// checkAllSessionVersions checks each active CC session for version updates.
+var versionRe = regexp.MustCompile(`current:\s*([\d.]+)\s*·\s*latest:\s*([\d.]+)`)
+
+// checkSessionVersion checks a single session for CC version updates.
+func checkSessionVersion(bot *tele.Bot, tmuxTarget string) {
+	// Wait a moment for pane to settle after Stop
+	time.Sleep(2 * time.Second)
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil || !injector.SessionExists(target) {
+		return
+	}
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(content, "\n")
+	checkLines := lines
+	if len(lines) > 3 {
+		checkLines = lines[len(lines)-3:]
+	}
+	for _, line := range checkLines {
+		matches := versionRe.FindStringSubmatch(line)
+		if len(matches) == 3 {
+			current := matches[1]
+			latest := matches[2]
+			if current == latest {
+				return
+			}
+			notifyKey := current + "→" + latest
+			if prev, ok := versionNotified.Load(tmuxTarget); ok && prev.(string) == notifyKey {
+				return
+			}
+			versionNotified.Store(tmuxTarget, notifyKey)
+			logger.Info(fmt.Sprintf("CC version update detected: target=%s current=%s latest=%s", tmuxTarget, current, latest))
+			sendVersionNotification(bot, tmuxTarget, current, latest)
+			return
+		}
+	}
+}
+
+// checkAllSessionVersions checks all active sessions for version updates (used by /cu command).
+func checkAllSessionVersions(bot *tele.Bot) int {
+	found := 0
+	for _, info := range sessionState.all() {
+		target, err := injector.ParseTarget(info.tmuxTarget)
+		if err != nil || !injector.SessionExists(target) {
+			continue
+		}
+		content, err := injector.CapturePane(target)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(content, "\n")
+		checkLines := lines
+		if len(lines) > 3 {
+			checkLines = lines[len(lines)-3:]
+		}
+		for _, line := range checkLines {
+			matches := versionRe.FindStringSubmatch(line)
+			if len(matches) == 3 {
+				current := matches[1]
+				latest := matches[2]
+				if current != latest {
+					// Force notify (clear previous notification state)
+					versionNotified.Store(info.tmuxTarget, current+"→"+latest)
+					sendVersionNotification(bot, info.tmuxTarget, current, latest)
+					found++
+				}
+				break
+			}
+		}
+	}
+	return found
+}
+
+// checkSessionVersionByTarget checks a specific target and force-sends notification if update available.
+func checkSessionVersionByTarget(bot *tele.Bot, tmuxTarget string) bool {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil || !injector.SessionExists(target) {
+		return false
+	}
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(content, "\n")
+	checkLines := lines
+	if len(lines) > 3 {
+		checkLines = lines[len(lines)-3:]
+	}
+	for _, line := range checkLines {
+		matches := versionRe.FindStringSubmatch(line)
+		if len(matches) == 3 {
+			current := matches[1]
+			latest := matches[2]
+			if current != latest {
+				versionNotified.Store(tmuxTarget, current+"→"+latest)
+				sendVersionNotification(bot, tmuxTarget, current, latest)
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+func sendVersionNotification(bot *tele.Bot, tmuxTarget, current, latest string) {
+	chat, _, topicID := resolveChat(tmuxTarget)
+	if chat == nil {
+		return
+	}
+	sel := &tele.ReplyMarkup{}
+	sel.Inline(sel.Row(
+		sel.Data("🔄 Upgrade", "upgrade", tmuxTarget),
+	))
+	paneLabel := notify.FormatPaneID(tmuxTarget)
+	if info := sessionState.findInfoByTarget(tmuxTarget); info != nil && info.name != "" {
+		paneLabel += " (" + info.name + ")"
+	}
+	text := fmt.Sprintf("🆕 CC update available\n📟 %s\n\n<b>%s</b> → <b>%s</b>", paneLabel, current, latest)
+	var sendOpts []interface{}
+	sendOpts = append(sendOpts, sel, tele.ModeHTML)
+	if topicID > 0 {
+		sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+	}
+	retrySend(bot, chat, text, sendOpts...)
+}
+
+// doUpgradeSession exits CC and restarts it in the same tmux pane.
+// upgradeMutexes provides per-CWD locking for sequential upgrades.
+var upgradeMutexes sync.Map        // cwd → *sync.Mutex
+var pendingUpgradeRestart sync.Map // tmuxTarget → chan struct{}
+
+func getUpgradeMutex(cwd string) *sync.Mutex {
+	v, _ := upgradeMutexes.LoadOrStore(cwd, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+func doUpgradeSession(bot *tele.Bot, tmuxTarget string) error {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return fmt.Errorf("parse target: %w", err)
+	}
+	// Lock per CWD to serialize upgrades in the same directory
+	info := sessionState.findInfoByTarget(tmuxTarget)
+	cwd := ""
+	if info != nil {
+		cwd = info.cwd
+	}
+	if cwd != "" {
+		mu := getUpgradeMutex(cwd)
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	// Query the claude command via tmux pane PID + ps
+	pidOut, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
+	if err != nil {
+		return fmt.Errorf("get pane pid: %w", err)
+	}
+	shellPID := strings.TrimSpace(string(pidOut))
+	cmdOut, err := exec.Command("ps", "--ppid", shellPID, "-o", "cmd", "--no-headers").Output()
+	if err != nil {
+		return fmt.Errorf("get child process cmd: %w", err)
+	}
+	claudeCmd := strings.TrimSpace(string(cmdOut))
+	if claudeCmd == "" {
+		return fmt.Errorf("no child process found for shell pid %s", shellPID)
+	}
+	// Detect current permission mode before exit
+	permMode, _, _ := detectPermMode(target)
+	permFlag := ""
+	switch permMode {
+	case "bypass":
+		permFlag = " --permission-mode bypassPermissions"
+	case "plan":
+		permFlag = " --permission-mode plan"
+	case "auto":
+		permFlag = " --permission-mode acceptEdits"
+	}
+	// Add --continue for session resume (unless already present)
+	if !strings.Contains(claudeCmd, "--continue") && !strings.Contains(claudeCmd, "--resume") {
+		claudeCmd += " --continue"
+	}
+	// Add permission mode (unless already specified)
+	if permFlag != "" && !strings.Contains(claudeCmd, "--permission-mode") {
+		claudeCmd += permFlag
+	}
+	logger.Info(fmt.Sprintf("doUpgradeSession: detected command=%s permMode=%s target=%s", claudeCmd, permMode, tmuxTarget))
+	// Register channel to wait for SessionEnd event
+	ch := make(chan struct{}, 1)
+	pendingUpgradeRestart.Store(tmuxTarget, ch)
+	// Inject /exit to quit CC
+	injector.SendKeys(target, "/exit", "Enter")
+	logger.Info(fmt.Sprintf("doUpgradeSession: sent /exit to %s", tmuxTarget))
+	// Wait for SessionEnd hook (max 30s)
+	select {
+	case <-ch:
+		logger.Info(fmt.Sprintf("doUpgradeSession: SessionEnd received for %s", tmuxTarget))
+	case <-time.After(30 * time.Second):
+		logger.Info(fmt.Sprintf("doUpgradeSession: SessionEnd timeout for %s, proceeding anyway", tmuxTarget))
+	}
+	pendingUpgradeRestart.Delete(tmuxTarget)
+	time.Sleep(3 * time.Second)
+	// Restart CC with the same command + --continue
+	logger.Info(fmt.Sprintf("doUpgradeSession: restarting CC with command=%s target=%s", claudeCmd, tmuxTarget))
+	if err := injector.InjectText(target, claudeCmd); err != nil {
+		return fmt.Errorf("inject restart command: %w", err)
+	}
+	// Clear version notification state for this target
+	versionNotified.Delete(tmuxTarget)
+	return nil
 }

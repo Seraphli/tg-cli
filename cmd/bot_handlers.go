@@ -690,6 +690,40 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return handleUsageCommand(c, bot)
 	})
 
+	checkUpdateHandler := func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired.")
+		}
+		if c.Chat().Type != tele.ChatPrivate {
+			chatIDInt := c.Chat().ID
+			found := false
+			for _, info := range sessionState.all() {
+				if info.name == "" {
+					continue
+				}
+				creds, _ := config.LoadCredentials()
+				if route, ok := creds.NameRouteMap[info.name]; ok && route.ChatID == chatIDInt {
+					if checkSessionVersionByTarget(bot, info.tmuxTarget) {
+						found = true
+					}
+				}
+			}
+			if !found {
+				return c.Reply("✅ All sessions in this group are up to date.")
+			}
+			return nil
+		}
+		count := checkAllSessionVersions(bot)
+		if count == 0 {
+			return c.Reply("✅ All sessions are up to date.")
+		}
+		return nil
+	}
+	bot.Handle("/cu", checkUpdateHandler)
+	bot.Handle("/check_update", checkUpdateHandler)
+
 	bot.Handle("/bot_voice", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)

@@ -478,6 +478,13 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			sessionCounts.cleanup(p.SessionID)
 			cleanPendingFilesBySession(p.SessionID)
 			logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
+			// Signal pending upgrade restart
+			if ch, ok := pendingUpgradeRestart.Load(p.TmuxTarget); ok {
+				select {
+				case ch.(chan struct{}) <- struct{}{}:
+				default:
+				}
+			}
 			// Kill tmux pane if this session was exited via /session/exit API
 			if _, ok := pendingExitKill.LoadAndDelete(p.TmuxTarget); ok {
 				paneID := notify.FormatPaneID(p.TmuxTarget)
@@ -551,6 +558,10 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			// Flush queued inject items (messages queued while CC was busy)
 			if p.TmuxTarget != "" {
 				flushInjectQueue(bot, p.TmuxTarget)
+			}
+			// Check for CC version update after session becomes idle
+			if p.TmuxTarget != "" {
+				go checkSessionVersion(bot, p.TmuxTarget)
 			}
 			}
 		case "PreToolUse":

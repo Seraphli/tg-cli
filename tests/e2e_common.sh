@@ -129,6 +129,8 @@ ensure_credentials() {
 
 start_bot() {
   > "$LOG_FILE"
+  # Clean stale pending files from previous runs
+  rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
   $TMUX_TEST send-keys -t "$BOT_SESSION" \
     "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug" Enter
