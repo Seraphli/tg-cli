@@ -10,6 +10,7 @@ ensure_infrastructure
 
 # Record log position
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
+TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[permission] BEFORE permission prompt"
@@ -38,6 +39,9 @@ pane_log "[permission] AFTER permission detected (idle)"
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
+
+  # Typing continuity: inject → PreToolUse (text generation before tool call)
+  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase3"
 
   # Verify Update notification sent BEFORE PermissionRequest
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")

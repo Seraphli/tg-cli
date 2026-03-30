@@ -505,6 +505,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				logger.Debug(fmt.Sprintf("UserPromptSubmit position: session=%s count=%d", p.SessionID, len(texts)))
 			}
 			if p.TmuxTarget != "" {
+				typingLog("state: event=UserPromptSubmit target=%s", p.TmuxTarget)
 				reactionTracker.promotePending(bot, p.TmuxTarget)
 				logger.Debug(fmt.Sprintf("Promoted pending reactions for tmux target: %s", p.TmuxTarget))
 				injectConfirm.confirm(p.TmuxTarget)
@@ -512,6 +513,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		case "Stop":
 			if p.TmuxTarget != "" {
 				hookRunningState.setIdle(p.TmuxTarget)
+				typingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 				stopCooldown.record(p.TmuxTarget)
 			}
 			cancelPendingFilesBySession(p.SessionID, bot)
@@ -567,6 +569,7 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		case "PreToolUse":
 			if p.TmuxTarget != "" {
 				hookRunningState.setRunning(p.TmuxTarget)
+				typingLog("state: event=PreToolUse target=%s state=running", p.TmuxTarget)
 			}
 			cancelPendingFilesBySession(p.SessionID, bot)
 			// Skip TG notifications for subagent tool calls

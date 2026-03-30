@@ -35,6 +35,7 @@ fi
 
 # Send a simple command to trigger hook
 LOG_BEFORE_HELLO=$(wc -l < "$LOG_FILE")
+TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[bot_hook] BEFORE 'say hello' prompt"
 inject_prompt "say hello"
 echo "Command sent, waiting for hook to trigger..."
@@ -98,3 +99,6 @@ if [ -n "$CONTEXT_LOG" ]; then
 else
   pass "Context window usage absent (statusline not triggered in short session — OK)"
 fi
+
+# Typing continuity: inject → Stop (short prompt, but should have >= 1 typing)
+check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase1"

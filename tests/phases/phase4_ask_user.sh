@@ -10,6 +10,7 @@ ensure_infrastructure
 wait_for_cc_idle
 
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
+TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 pane_log "[ask_user] BEFORE sending AskUserQuestion prompt"
 
@@ -41,6 +42,9 @@ pane_log "[ask_user] AFTER hook notification (idle)"
 
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
+
+  # Typing continuity: inject → PreToolUse (text generation before AskUserQuestion)
+  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
 
   # Verify Update notification sent BEFORE AskUserQuestion
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")

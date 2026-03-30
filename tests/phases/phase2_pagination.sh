@@ -10,6 +10,7 @@ ensure_infrastructure
 
 # Record log position before injecting long prompt
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
+TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Wait for Claude to settle after bot_hook
 echo "Waiting for Claude to settle..."
@@ -86,3 +87,6 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
 elif [ "$PAGINATION_FOUND" = false ]; then
   echo "  Skipping page turn test (pagination was not triggered)"
 fi
+
+# Typing continuity: inject → Stop (long prompt, ~30s+ without tools)
+check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase2"

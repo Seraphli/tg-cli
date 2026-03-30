@@ -25,6 +25,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func scanCustomCommands() map[string]customCmd {
@@ -1040,6 +1041,70 @@ func isSessionRunning(tmuxTarget string) bool {
 // CC shows ✳ prefix when idle, any other prefix when running.
 func isSessionBusy(tmuxTarget string) bool {
 	return isSessionRunning(tmuxTarget)
+}
+
+var typingLogWriter io.Writer
+
+func initTypingLog(configDir string) {
+	typingLogWriter = &lumberjack.Logger{
+		Filename:   filepath.Join(configDir, "typing.log"),
+		MaxSize:    5,
+		MaxBackups: 3,
+		Compress:   false,
+	}
+}
+
+func typingLog(format string, args ...interface{}) {
+	if typingLogWriter == nil {
+		return
+	}
+	ts := time.Now().Format(time.RFC3339)
+	msg := fmt.Sprintf(format, args...)
+	typingLogWriter.Write([]byte(fmt.Sprintf("[%s] %s\n", ts, msg)))
+}
+
+// sendTypingForTarget sends typing action for a specific session target.
+// Returns the chatID key used (for dedup tracking), or 0 if not sent.
+func sendTypingForTarget(bot *tele.Bot, info sessionInfo, creds *config.Credentials, sentChats map[int64]bool) int64 {
+	if info.name != "" {
+		if route, ok := creds.NameRouteMap[info.name]; ok {
+			key := route.ChatID*1000 + int64(route.TopicID)
+			if sentChats != nil && sentChats[key] {
+				return 0
+			}
+			var err error
+			if route.TopicID > 0 {
+				err = bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing, route.TopicID)
+			} else {
+				err = bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing)
+			}
+			if err != nil {
+				typingLog("Typing send failed: chat=%d topic=%d target=%s err=%v", route.ChatID, route.TopicID, info.tmuxTarget, err)
+				return 0
+			}
+			typingLog("Typing sent: chat=%d topic=%d target=%s", route.ChatID, route.TopicID, info.tmuxTarget)
+			return key
+		}
+	}
+	// Unbound session — use default chat
+	defaultChatIDStr := pairing.GetDefaultChatID()
+	if defaultChatIDStr == "" {
+		return 0
+	}
+	chatID, _ := strconv.ParseInt(defaultChatIDStr, 10, 64)
+	if chatID == 0 {
+		return 0
+	}
+	if sentChats != nil && sentChats[chatID] {
+		return 0
+	}
+	err := bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
+	if err != nil {
+		typingLog("Typing send failed: chat=%d target=%s err=%v", chatID, info.tmuxTarget, err)
+		return 0
+	}
+	typingLog("Typing sent: chat=%d target=%s", chatID, info.tmuxTarget)
+	return chatID
 }
 
 // hookPayload represents the CC payload enriched by hook.go
@@ -2357,6 +2422,7 @@ func flushInjectQueue(bot *tele.Bot, tmuxTarget string) {
 		time.Sleep(3 * time.Second)
 		// Ensure hook state is idle before injecting (Stop already set it, but be explicit)
 		hookRunningState.setIdle(target)
+		typingLog("state: event=flushInjectQueue target=%s state=idle", target)
 		// Register confirmation channel BEFORE inject to avoid race with UserPromptSubmit
 		ch := injectConfirm.register(target)
 		if err := safeInjectText(bot, target, text); err != nil {

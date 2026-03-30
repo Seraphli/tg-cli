@@ -9,6 +9,7 @@ TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$(mktemp -d /tmp/tg-cli-e2e-cl
 TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
 TEST_PORT=12501
 LOG_FILE="$TEST_CONFIG_DIR/bot.log"
+TYPING_LOG_FILE="$TEST_CONFIG_DIR/typing.log"
 CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
 TIMEOUT=60
 
@@ -114,6 +115,67 @@ wait_for_pane_content() {
   return 1
 }
 
+# Check typing continuity between inject and end event.
+# Usage: check_typing_continuity <typing_log_before> <end_event> <label>
+#   end_event: "Stop" or "PreToolUse"
+check_typing_continuity() {
+  local typing_log_before="$1"
+  local end_event="$2"
+  local label="$3"
+  local new_entries
+  new_entries=$(tail -n +"$((typing_log_before + 1))" "$TYPING_LOG_FILE")
+  # Find T1 (UserPromptSubmit) and T2 (end_event) timestamps
+  local t1_ts t2_ts
+  t1_ts=$(echo "$new_entries" | grep "state: event=UserPromptSubmit" | head -1 | grep -oP '^\[\K[^]]+' || true)
+  t2_ts=$(echo "$new_entries" | grep "state: event=$end_event" | head -1 | grep -oP '^\[\K[^]]+' || true)
+  if [ -z "$t1_ts" ] || [ -z "$t2_ts" ]; then
+    fail "[$label] Typing: missing state timestamps (T1=${t1_ts:-none} T2=${t2_ts:-none})"
+    return
+  fi
+  local t1_epoch t2_epoch duration
+  t1_epoch=$(date -d "$t1_ts" +%s 2>/dev/null || echo 0)
+  t2_epoch=$(date -d "$t2_ts" +%s 2>/dev/null || echo 0)
+  duration=$((t2_epoch - t1_epoch))
+  # Count "Typing sent" entries between T1 and T2
+  local typing_timestamps
+  typing_timestamps=$(echo "$new_entries" | grep "Typing sent" | grep -oP '^\[\K[^]]+' || true)
+  local count=0 max_gap=0 prev_epoch=""
+  if [ -n "$typing_timestamps" ]; then
+    while IFS= read -r ts; do
+      local epoch
+      epoch=$(date -d "$ts" +%s 2>/dev/null || echo "")
+      if [ -z "$epoch" ]; then continue; fi
+      if [ "$epoch" -ge "$t1_epoch" ] && [ "$epoch" -le "$t2_epoch" ]; then
+        count=$((count + 1))
+        if [ -n "$prev_epoch" ]; then
+          local gap=$((epoch - prev_epoch))
+          if [ "$gap" -gt "$max_gap" ]; then max_gap=$gap; fi
+        fi
+        prev_epoch="$epoch"
+      fi
+    done <<< "$typing_timestamps"
+  fi
+  # Expected count: duration/3 with margin of 2
+  local expected=1
+  if [ "$duration" -gt 0 ]; then
+    expected=$((duration / 3 - 2))
+    if [ "$expected" -lt 1 ]; then expected=1; fi
+  fi
+  if [ "$count" -ge "$expected" ]; then
+    pass "[$label] Typing continuity: $count actions in ${duration}s (expected >= $expected)"
+  else
+    fail "[$label] Typing continuity: $count actions in ${duration}s (expected >= $expected)"
+  fi
+  # Max gap check (only meaningful with >= 2 entries)
+  if [ "$count" -ge 2 ]; then
+    if [ "$max_gap" -le 5 ]; then
+      pass "[$label] Typing gap: max ${max_gap}s (<= 5s)"
+    else
+      fail "[$label] Typing gap: max ${max_gap}s (> 5s)"
+    fi
+  fi
+}
+
 ensure_credentials() {
   if [ ! -f "$CREDENTIALS" ]; then
     echo "ERROR: $CREDENTIALS not found. Complete pairing first."
@@ -129,6 +191,7 @@ ensure_credentials() {
 
 start_bot() {
   > "$LOG_FILE"
+  > "$TYPING_LOG_FILE"
   # Clean stale pending files from previous runs
   rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true

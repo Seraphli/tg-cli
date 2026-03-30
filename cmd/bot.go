@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -41,42 +40,32 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 			if err != nil {
 				continue
 			}
-			anyUnboundRunning := false
+			var mu sync.Mutex
 			sentChats := make(map[int64]bool)
+			var wg sync.WaitGroup
 			for _, info := range sessionState.all() {
-				if !isSessionRunning(info.tmuxTarget) {
-					// Flush inject queue when session transitions to idle
-					if injectQueue.hasItems(info.tmuxTarget) {
-						go flushInjectQueue(bot, info.tmuxTarget)
-					}
-					continue
-				}
-				// Check name route map
-				if info.name != "" {
-					if route, ok := creds.NameRouteMap[info.name]; ok {
-						key := route.ChatID*1000 + int64(route.TopicID)
-						if !sentChats[key] {
-							if route.TopicID > 0 {
-								bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing, route.TopicID)
-							} else {
-								bot.Notify(&tele.Chat{ID: route.ChatID}, tele.Typing)
-							}
-							sentChats[key] = true
+				wg.Add(1)
+				go func(info sessionInfo) {
+					defer wg.Done()
+					title := getPaneTitle(info.tmuxTarget)
+					paneRunning := title != "" && !strings.HasPrefix(title, "✳")
+					if !paneRunning {
+						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.tmuxTarget, title)
+						if injectQueue.hasItems(info.tmuxTarget) {
+							go flushInjectQueue(bot, info.tmuxTarget)
 						}
-						continue
+						return
 					}
-				}
-				anyUnboundRunning = true
-			}
-			if anyUnboundRunning {
-				defaultChatIDStr := pairing.GetDefaultChatID()
-				if defaultChatIDStr != "" {
-					chatID, _ := strconv.ParseInt(defaultChatIDStr, 10, 64)
-					if chatID != 0 && !sentChats[chatID] {
-						bot.Notify(&tele.Chat{ID: chatID}, tele.Typing)
+					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.tmuxTarget, title)
+					mu.Lock()
+					key := sendTypingForTarget(bot, info, &creds, sentChats)
+					if key != 0 {
+						sentChats[key] = true
 					}
-				}
+					mu.Unlock()
+				}(info)
 			}
+			wg.Wait()
 		}
 	}
 }
@@ -130,6 +119,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	}
 	logPath := filepath.Join(config.GetConfigDir(), "bot.log")
 	logger.Init(logPath, debugFlag)
+	initTypingLog(config.GetConfigDir())
 	creds, err := config.LoadCredentials()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load credentials: %v\n", err)
