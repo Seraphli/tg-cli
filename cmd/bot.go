@@ -31,22 +31,28 @@ var versionNotified sync.Map // tmuxTarget → "current→latest"
 func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	var cancelPrev context.CancelFunc
 	for {
 		select {
 		case <-ctx.Done():
+			if cancelPrev != nil {
+				cancelPrev()
+			}
 			return
 		case <-ticker.C:
+			// Cancel previous batch (don't wait for slow HTTP)
+			if cancelPrev != nil {
+				cancelPrev()
+			}
+			tickCtx, cancel := context.WithCancel(ctx)
+			cancelPrev = cancel
 			creds, err := config.LoadCredentials()
 			if err != nil {
 				continue
 			}
-			var mu sync.Mutex
-			sentChats := make(map[int64]bool)
-			var wg sync.WaitGroup
+			var sentChats sync.Map
 			for _, info := range sessionState.all() {
-				wg.Add(1)
-				go func(info sessionInfo) {
-					defer wg.Done()
+				go func(tickCtx context.Context, info sessionInfo) {
 					title := getPaneTitle(info.tmuxTarget)
 					paneRunning := title != "" && !strings.HasPrefix(title, "✳")
 					if !paneRunning {
@@ -56,16 +62,18 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 						}
 						return
 					}
-					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.tmuxTarget, title)
-					mu.Lock()
-					key := sendTypingForTarget(bot, info, &creds, sentChats)
-					if key != 0 {
-						sentChats[key] = true
+					// Check if this tick was cancelled (next tick arrived)
+					if tickCtx.Err() != nil {
+						typingLog("tick: target=%s title=%q paneRunning=true cancelled=true", info.tmuxTarget, title)
+						return
 					}
-					mu.Unlock()
-				}(info)
+					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.tmuxTarget, title)
+					key := sendTypingForTarget(bot, info, &creds, nil)
+					if key != 0 {
+						sentChats.Store(key, true)
+					}
+				}(tickCtx, info)
 			}
-			wg.Wait()
 		}
 	}
 }
