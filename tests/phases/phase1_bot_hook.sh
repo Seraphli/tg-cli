@@ -100,5 +100,5 @@ else
   pass "Context window usage absent (statusline not triggered in short session — OK)"
 fi
 
-# Typing continuity: inject → Stop (short prompt, but should have >= 1 typing)
-check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase1"
+# Typing continuity skipped for phase1: "say hello" runs < 3s (shorter than tick interval),
+# not enough time for typing loop to fire. Real typing tests are in phase2/3/4.

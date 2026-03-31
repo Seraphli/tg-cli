@@ -49,13 +49,7 @@ else
   fail "session log: missing timestamps"
 fi
 
-# Should contain known content — check with large line count
-LOG_FULL=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 9999 2>&1) || true
-if echo "$LOG_FULL" | grep -q "say hello\|tool_notify_test_ok\|e2e_session_send_test_marker"; then
-  pass "session log: contains known content from earlier phases"
-else
-  fail "session log: no known content found in transcript"
-fi
+# Content check moved after session send (line ~91) to ensure marker exists in transcript
 
 # Test --no-tools filter
 NOTOOLS_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 20 --no-tools 2>&1) || true
@@ -94,6 +88,14 @@ if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marke
   pass "session send: message injected and logged"
 else
   fail "session send: injection not found in bot log"
+fi
+# Verify session log contains known content (after injecting marker)
+wait_for_cc_idle 60
+LOG_FULL=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 9999 2>&1) || true
+if echo "$LOG_FULL" | grep -q "e2e_session_send_test_marker"; then
+  pass "session log: contains known content from transcript"
+else
+  fail "session log: no known content found in transcript"
 fi
 # Check TG notification for session send
 if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "Session send notification\|CLI Message"; then
