@@ -363,7 +363,7 @@ func runSessionLog(cmd *cobra.Command, args []string) {
 		// Format timestamp
 		tsStr := m.Timestamp
 		if t, err := time.Parse(time.RFC3339, m.Timestamp); err == nil {
-			tsStr = t.Format("2006-01-02 15:04:05")
+			tsStr = t.Local().Format("2006-01-02 15:04:05")
 		}
 		header := fmt.Sprintf("%s [%s]", tsStr, m.Type)
 		if m.Tool != "" {
