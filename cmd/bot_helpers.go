@@ -308,6 +308,33 @@ func readContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	return pct, int(used), int(effectiveLimit), true
 }
 
+func readSessionCCVersion(sessionID string) string {
+	path := filepath.Join(os.TempDir(), "tg-cli", "context", sessionID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var ctx map[string]interface{}
+	if err := json.Unmarshal(data, &ctx); err != nil {
+		return ""
+	}
+	v, _ := ctx["cc_version"].(string)
+	return v
+}
+
+func getInstalledCCVersion() string {
+	out, err := exec.Command("claude", "--version").Output()
+	if err != nil {
+		return ""
+	}
+	// Output: "2.1.89 (Claude Code)"
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return ""
+}
+
 func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) {
 	nd := notify.NotificationData{
 		Event:          event,
@@ -2577,110 +2604,66 @@ func handleVoiceCommand(c tele.Context) error {
 	return err
 }
 
-// checkAllSessionVersions checks each active CC session for version updates.
-var versionRe = regexp.MustCompile(`current:\s*([\d.]+)\s*·\s*latest:\s*([\d.]+)`)
-
 // checkSessionVersion checks a single session for CC version updates.
 func checkSessionVersion(bot *tele.Bot, tmuxTarget string) {
-	// Wait a moment for pane to settle after Stop
 	time.Sleep(2 * time.Second)
-	target, err := injector.ParseTarget(tmuxTarget)
-	if err != nil || !injector.SessionExists(target) {
+	sessionID, found := sessionState.findByTarget(tmuxTarget)
+	if !found {
 		return
 	}
-	content, err := injector.CapturePane(target)
-	if err != nil {
+	current := readSessionCCVersion(sessionID)
+	if current == "" {
 		return
 	}
-	lines := strings.Split(content, "\n")
-	checkLines := lines
-	if len(lines) > 3 {
-		checkLines = lines[len(lines)-3:]
+	latest := getInstalledCCVersion()
+	if latest == "" || current == latest {
+		return
 	}
-	for _, line := range checkLines {
-		matches := versionRe.FindStringSubmatch(line)
-		if len(matches) == 3 {
-			current := matches[1]
-			latest := matches[2]
-			if current == latest {
-				return
-			}
-			notifyKey := current + "→" + latest
-			if prev, ok := versionNotified.Load(tmuxTarget); ok && prev.(string) == notifyKey {
-				return
-			}
-			versionNotified.Store(tmuxTarget, notifyKey)
-			logger.Info(fmt.Sprintf("CC version update detected: target=%s current=%s latest=%s", tmuxTarget, current, latest))
-			sendVersionNotification(bot, tmuxTarget, current, latest)
-			return
-		}
+	notifyKey := current + "→" + latest
+	if prev, ok := versionNotified.Load(tmuxTarget); ok && prev.(string) == notifyKey {
+		return
 	}
+	versionNotified.Store(tmuxTarget, notifyKey)
+	logger.Info(fmt.Sprintf("CC version update detected: target=%s current=%s latest=%s", tmuxTarget, current, latest))
+	sendVersionNotification(bot, tmuxTarget, current, latest)
 }
 
 // checkAllSessionVersions checks all active sessions for version updates (used by /cu command).
 func checkAllSessionVersions(bot *tele.Bot) int {
+	latest := getInstalledCCVersion()
+	if latest == "" {
+		return 0
+	}
 	found := 0
-	for _, info := range sessionState.all() {
-		target, err := injector.ParseTarget(info.tmuxTarget)
-		if err != nil || !injector.SessionExists(target) {
+	for sid, info := range sessionState.all() {
+		current := readSessionCCVersion(sid)
+		if current == "" || current == latest {
 			continue
 		}
-		content, err := injector.CapturePane(target)
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(content, "\n")
-		checkLines := lines
-		if len(lines) > 3 {
-			checkLines = lines[len(lines)-3:]
-		}
-		for _, line := range checkLines {
-			matches := versionRe.FindStringSubmatch(line)
-			if len(matches) == 3 {
-				current := matches[1]
-				latest := matches[2]
-				if current != latest {
-					// Force notify (clear previous notification state)
-					versionNotified.Store(info.tmuxTarget, current+"→"+latest)
-					sendVersionNotification(bot, info.tmuxTarget, current, latest)
-					found++
-				}
-				break
-			}
-		}
+		versionNotified.Store(info.tmuxTarget, current+"→"+latest)
+		sendVersionNotification(bot, info.tmuxTarget, current, latest)
+		found++
 	}
 	return found
 }
 
 // checkSessionVersionByTarget checks a specific target and force-sends notification if update available.
 func checkSessionVersionByTarget(bot *tele.Bot, tmuxTarget string) bool {
-	target, err := injector.ParseTarget(tmuxTarget)
-	if err != nil || !injector.SessionExists(target) {
+	sessionID, found := sessionState.findByTarget(tmuxTarget)
+	if !found {
 		return false
 	}
-	content, err := injector.CapturePane(target)
-	if err != nil {
+	current := readSessionCCVersion(sessionID)
+	if current == "" {
 		return false
 	}
-	lines := strings.Split(content, "\n")
-	checkLines := lines
-	if len(lines) > 3 {
-		checkLines = lines[len(lines)-3:]
+	latest := getInstalledCCVersion()
+	if latest == "" || current == latest {
+		return false
 	}
-	for _, line := range checkLines {
-		matches := versionRe.FindStringSubmatch(line)
-		if len(matches) == 3 {
-			current := matches[1]
-			latest := matches[2]
-			if current != latest {
-				versionNotified.Store(tmuxTarget, current+"→"+latest)
-				sendVersionNotification(bot, tmuxTarget, current, latest)
-				return true
-			}
-			return false
-		}
-	}
-	return false
+	versionNotified.Store(tmuxTarget, current+"→"+latest)
+	sendVersionNotification(bot, tmuxTarget, current, latest)
+	return true
 }
 
 func sendVersionNotification(bot *tele.Bot, tmuxTarget, current, latest string) {

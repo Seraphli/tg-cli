@@ -24,6 +24,7 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 
 	var payload struct {
 		SessionID     string          `json:"session_id"`
+		Version       string          `json:"version"`
 		ContextWindow json.RawMessage `json:"context_window"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -37,5 +38,13 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(dir+"/"+payload.SessionID+".json", payload.ContextWindow, 0644)
+	saveData := map[string]interface{}{}
+	if payload.ContextWindow != nil {
+		json.Unmarshal(payload.ContextWindow, &saveData)
+	}
+	if payload.Version != "" {
+		saveData["cc_version"] = payload.Version
+	}
+	out, _ := json.Marshal(saveData)
+	return os.WriteFile(dir+"/"+payload.SessionID+".json", out, 0644)
 }
