@@ -12,10 +12,12 @@ ensure_credentials
 # Parse args
 PHASE_NUM=""
 SESSION_PREFIX=""
+BACKEND="all"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --phase) PHASE_NUM="$2"; shift 2;;
     --session) SESSION_PREFIX="$2"; shift 2;;
+    --backend) BACKEND="$2"; shift 2;;
     *) shift;;
   esac
 done
@@ -23,18 +25,25 @@ done
 # Override session names if specified
 if [ -n "$SESSION_PREFIX" ]; then
   BOT_SESSION="${SESSION_PREFIX}-bot"
-  CLAUDE_SESSION="${SESSION_PREFIX}-claude"
-  export BOT_SESSION CLAUDE_SESSION
+  E2E_SESSION="${SESSION_PREFIX}-claude"
+  export BOT_SESSION E2E_SESSION
 fi
 
 # Init results file
 > "$E2E_RESULTS_FILE"
 export E2E_ORCHESTRATED=1
 export TEST_CLAUDE_CONFIG_DIR
+export E2E_BACKEND="$BACKEND"
+case "$BACKEND" in
+  cc) source "$SCRIPT_DIR/cc/cc_common.sh" ;;
+  codex) source "$SCRIPT_DIR/codex/codex_common.sh" ;;
+  all) source "$SCRIPT_DIR/cc/cc_common.sh"; source "$SCRIPT_DIR/codex/codex_common.sh" ;;
+esac
 
 echo "=== tg-cli E2E Test ==="
 echo "Log file: $LOG_FILE"
 echo "Results file: $E2E_RESULTS_FILE"
+echo "Backend: $BACKEND"
 
 run_phase() {
   local script="$1"
@@ -46,9 +55,44 @@ run_phase() {
   fi
 }
 
+# Build phase list based on --backend
+build_phase_list() {
+  local phases=()
+  case "$BACKEND" in
+    cc)
+      phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
+      phases+=( $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V) )
+      ;;
+    codex)
+      phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
+      phases+=( $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V) )
+      ;;
+    all)
+      phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
+      phases+=( $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V) )
+      phases+=( $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V) )
+      ;;
+    *)
+      echo "ERROR: Unknown backend '$BACKEND'. Use cc, codex, or all."
+      exit 1
+      ;;
+  esac
+  echo "${phases[@]}"
+}
+
+# Find a specific phase across all subdirectories
+find_phase() {
+  local num="$1"
+  local matched=""
+  for dir in common cc codex; do
+    matched=$(ls "$SCRIPT_DIR/$dir/phase${num}_"*.sh 2>/dev/null | head -1 || true)
+    [ -n "$matched" ] && echo "$matched" && return
+  done
+}
+
 if [ -n "$PHASE_NUM" ]; then
   # Single phase
-  MATCHED=$(ls "$SCRIPT_DIR"/phases/phase${PHASE_NUM}_*.sh 2>/dev/null | head -1)
+  MATCHED=$(find_phase "$PHASE_NUM")
   if [ -z "$MATCHED" ]; then
     echo "ERROR: Phase $PHASE_NUM not found"
     exit 1
@@ -58,20 +102,29 @@ if [ -n "$PHASE_NUM" ]; then
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  start_claude
+  if [ "$BACKEND" = "codex" ]; then
+    start_codex
+  else
+    start_claude
+  fi
   trap cleanup_sessions EXIT
   run_phase "$MATCHED"
 else
-  # Run all phases
+  # Run all phases for selected backend
   echo "Building binary..."
   go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  start_claude
+  if [ "$BACKEND" = "codex" ]; then
+    start_codex
+  else
+    start_claude
+  fi
   trap cleanup_sessions EXIT
 
-  for phase in $(ls "$SCRIPT_DIR"/phases/phase*.sh | sort -V); do
+  PHASE_LIST=( $(build_phase_list) )
+  for phase in "${PHASE_LIST[@]}"; do
     [ -f "$phase" ] && run_phase "$phase"
   done
 fi

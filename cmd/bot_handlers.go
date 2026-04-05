@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +64,9 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 				}
 				logger.Info(fmt.Sprintf("TG recv %s: chat=%d type=%s sender=%d msg_id=%d%s%s%s text=%s",
 					msgType, c.Chat().ID, chatType, c.Sender().ID, msg.ID, replyInfo, threadInfo, topicInfo, preview))
+				if raw, err := json.Marshal(msg); err == nil {
+					logger.Debug(fmt.Sprintf("TG recv raw: %s", string(raw)))
+				}
 			}
 			return next(c)
 		}
@@ -195,8 +199,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		// Resolve target: reply-to or group
 		var target injector.TmuxTarget
 		var tmuxStr string
-		isTopicAnchor2 := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-		if c.Message().ReplyTo != nil && !isTopicAnchor2 {
+		if c.Message().ReplyTo != nil {
 			t, err := resolveReplyTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				if err.Error() == "no target found" {
@@ -387,8 +390,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 
 		// Mode 2: reply to notification — bind session from replied message
-		isTopicAnchorBind := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-		if c.Message().ReplyTo != nil && !isTopicAnchorBind {
+		if c.Message().ReplyTo != nil {
 			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
@@ -463,8 +465,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return c.Reply("❌ Not paired.")
 		}
 		// Mode 1: reply to notification — unbind session from replied message
-		isTopicAnchorUnbind := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-		if c.Message().ReplyTo != nil && !isTopicAnchorUnbind {
+		if c.Message().ReplyTo != nil {
 			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
@@ -561,8 +562,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 		// Resolve session: from replied message or single active session
 		var sessionID string
-		isTopicAnchorName := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-		if c.Message().ReplyTo != nil && !isTopicAnchorName {
+		if c.Message().ReplyTo != nil {
 			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
 			if err != nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")

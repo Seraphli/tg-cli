@@ -204,10 +204,29 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 	return target, nil
 }
 
+// injectMessage handles image + text injection to a target tmux pane.
+// If imagePath is set, pastes image path first (no submit), then pastes text and submits.
+func injectMessage(bot *tele.Bot, tmuxTarget string, text string, imagePath string) error {
+	if imagePath != "" && text == "" {
+		return safeInjectText(bot, tmuxTarget, imagePath)
+	}
+	if imagePath != "" {
+		if err := safeInjectText(bot, tmuxTarget, imagePath, false); err != nil {
+			return fmt.Errorf("image inject failed: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return safeInjectText(bot, tmuxTarget, text)
+}
+
 // processUserInput handles the shared logic for OnText and OnVoice after routing.
 // text is the raw transcribed or typed text; isVoice indicates input method.
 // voicePrefix is prepended to injected text when isVoice is true.
-func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string) error {
+func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string, imagePath ...string) error {
+	imgPath := ""
+	if len(imagePath) > 0 {
+		imgPath = imagePath[0]
+	}
 	// Merge mode: buffer content and return
 	key := mergeKey(c.Chat().ID)
 	if buf := mergeBuffers.get(key); buf != nil {
@@ -249,32 +268,13 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 	}
 
-	// Group path: no reply (or reply is just the topic anchor), group/supergroup chat
-	// isTopicAnchor: ReplyTo exists but points to the topic anchor message (same ID as ThreadID),
-	// meaning the message was sent directly in a topic, not as a real reply.
-	isTopicAnchor := c.Message().ReplyTo != nil && c.Message().ReplyTo.ID == c.Message().ThreadID
-	if c.Message().ReplyTo == nil || isTopicAnchor {
+	// Group path: no reply, group/supergroup chat
+	if c.Message().ReplyTo == nil {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
 		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
-			// Fallback: try extracting target from ReplyTo when in reply thread
-			if isTopicAnchor {
-				fallbackTarget, fbErr := resolveReplyTarget(c.Message().ReplyTo.Text)
-				if fbErr == nil {
-					fbTmuxStr := injector.FormatTarget(fallbackTarget)
-					if !checkSessionAlive(fbTmuxStr, bot) {
-						return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
-					}
-					sendFeedback(fbTmuxStr)
-					if err := safeInjectText(bot, fbTmuxStr, injectionText); err != nil {
-						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
-					}
-					logger.Info(fmt.Sprintf("Group quick reply (fallback): target=%s voice=%v text=%s", fbTmuxStr, isVoice, truncateStr(text, 200)))
-					return nil
-				}
-			}
 			if err.Error() == "no targets bound" {
 				return nil
 			}
@@ -287,7 +287,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
 		sendFeedback(tmuxStr)
-		if err := safeInjectText(bot, tmuxStr, injectionText); err != nil {
+		if err := injectMessage(bot, tmuxStr, injectionText, imgPath); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
 		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, truncateStr(text, 200)))
@@ -340,7 +340,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 					}
 				}
 				sendFeedback(tmuxStr)
-				injector.InjectText(*targetPtr, injectionText)
+				injectMessage(bot, injector.FormatTarget(*targetPtr), injectionText, imgPath)
 				logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, truncateStr(text, 200)))
 			}
 		}
@@ -355,7 +355,7 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		switch entry.toolName {
 		case "AskUserQuestion":
 			sendFeedback(entry.tmuxTarget)
-			if err := safeInjectText(bot, entry.tmuxTarget, injectionText); err != nil {
+			if err := injectMessage(bot, entry.tmuxTarget, injectionText, imgPath); err != nil {
 				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
 			}
 			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
@@ -375,15 +375,15 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 	}
 	sendFeedback(injector.FormatTarget(target))
-	// Prepend quoted original message for context
-	if replyTo.Text != "" {
+	// Prepend quoted original message for context (group only)
+	if replyTo.Text != "" && (c.Chat().Type == "group" || c.Chat().Type == "supergroup") {
 		var lines []string
 		for _, line := range strings.Split(replyTo.Text, "\n") {
 			lines = append(lines, "> "+line)
 		}
 		injectionText = strings.Join(lines, "\n") + "\n\n" + injectionText
 	}
-	if err := safeInjectText(bot, injector.FormatTarget(target), injectionText); err != nil {
+	if err := injectMessage(bot, injector.FormatTarget(target), injectionText, imgPath); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
 	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
@@ -494,11 +494,8 @@ func registerMessageHandlers(bot *tele.Bot) {
 			logger.Error(fmt.Sprintf("Document download failed: %v", err))
 			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
 		}
-		content := localPath
-		if c.Message().Caption != "" {
-			content = c.Message().Caption + "\n" + localPath
-		}
-		return processUserInput(c, bot, content, false, voicePrefix)
+		caption := c.Message().Caption
+		return processUserInput(c, bot, caption, false, voicePrefix, localPath)
 	})
 
 	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
@@ -514,10 +511,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 			logger.Error(fmt.Sprintf("Photo download failed: %v", err))
 			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
 		}
-		content := localPath
-		if c.Message().Caption != "" {
-			content = c.Message().Caption + "\n" + localPath
-		}
-		return processUserInput(c, bot, content, false, voicePrefix)
+		caption := c.Message().Caption
+		return processUserInput(c, bot, caption, false, voicePrefix, localPath)
 	})
 }

@@ -256,7 +256,7 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 		deleteLaunchState(state.UUID)
 		return
 	}
-	// Wait for CC TUI to load, then press Enter if trust dialog appears
+	// Wait for CLI TUI to load, then handle startup dialogs (CC trust / Codex continue)
 	go func() {
 		time.Sleep(5 * time.Second)
 		content, err := injector.CapturePane(target)
@@ -264,8 +264,12 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 			logger.Error(fmt.Sprintf("executeLaunch: CapturePane failed: pane=%s err=%v", paneID, err))
 			return
 		}
-		if strings.Contains(strings.ToLower(content), "trust") {
+		lower := strings.ToLower(content)
+		if strings.Contains(lower, "trust") {
 			logger.Info(fmt.Sprintf("executeLaunch: trust dialog detected, sending Enter: pane=%s", paneID))
+			injector.SendKeys(target, "Enter")
+		} else if strings.Contains(lower, "yes, continue") || strings.Contains(lower, "continue?") {
+			logger.Info(fmt.Sprintf("executeLaunch: Codex continue dialog detected, sending Enter: pane=%s", paneID))
 			injector.SendKeys(target, "Enter")
 		}
 	}()

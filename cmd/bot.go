@@ -54,7 +54,7 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 			for _, info := range sessionState.all() {
 				go func(tickCtx context.Context, info sessionInfo) {
 					title := getPaneTitle(info.tmuxTarget)
-					paneRunning := title != "" && !strings.HasPrefix(title, "✳")
+					paneRunning := isSessionRunning(info.tmuxTarget)
 					if !paneRunning {
 						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.tmuxTarget, title)
 						if injectQueue.hasItems(info.tmuxTarget) {

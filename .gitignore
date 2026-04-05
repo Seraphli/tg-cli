@@ -1,3 +1,8 @@
 tg-cli
 .ca/
 .claude/
+
+# Generated files
+.codex
+backups/
+cache/

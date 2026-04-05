@@ -26,9 +26,11 @@ var HookCmd = &cobra.Command{
 }
 
 var hookPortFlag int
+var hookBackendFlag string
 
 func init() {
 	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
+	HookCmd.Flags().StringVar(&hookBackendFlag, "backend", "cc", "Backend CLI type (cc or codex)")
 }
 
 // hookLog appends a debug line to bot.log.
@@ -127,6 +129,7 @@ func runHook(cmd *cobra.Command, args []string) {
 	if cwd, ok := payload["cwd"].(string); ok && cwd != "" {
 		payload["project"] = filepath.Base(cwd)
 	}
+	payload["backend"] = hookBackendFlag
 	// Determine port
 	port := hookPortFlag
 	if port == 0 {

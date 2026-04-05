@@ -31,9 +31,9 @@ ensure_infrastructure
 LOG_BEFORE_PHASE=$(wc -l < "$LOG_FILE")
 
 # --- Step 1: describe what you do ---
-pane_log "[myphase] BEFORE step 1: <action>" "$CLAUDE_PANE"
+pane_log "[myphase] BEFORE step 1: <action>" "$E2E_PANE"
 # ... do the action ...
-pane_log "[myphase] AFTER step 1: <action>" "$CLAUDE_PANE"
+pane_log "[myphase] AFTER step 1: <action>" "$E2E_PANE"
 
 # --- Verify log output ---
 if tail -n +"$((LOG_BEFORE_PHASE + 1))" "$LOG_FILE" | grep "expected pattern" > /dev/null 2>&1; then
@@ -75,7 +75,7 @@ Sends text to Claude Code's TUI via the `/inject` HTTP API. Returns non-zero on 
 ### Waiting for CC to Be Idle
 
 ```bash
-wait_for_cc_idle [timeout] [target]
+wait_for_idle [timeout] [target]
 ```
 
 Polls `/session/idle` until CC reports idle. Adds an extra 5s sleep after idle is confirmed.
@@ -97,7 +97,7 @@ pane_log "label" [target]
 ```
 
 Calls `/capture` API and appends the pane content to `$LOG_FILE` with surrounding markers.
-- `target`: tmux pane ID (default: `$CLAUDE_PANE`)
+- `target`: tmux pane ID (default: `$E2E_PANE`)
 
 Use `pane_log` before and after every significant action so failures can be analyzed post-run.
 
@@ -196,12 +196,12 @@ These are set by `e2e_common.sh` and available in all phase files:
 |---|---|---|
 | `$TEST_PORT` | `12501` | Bot HTTP server port (test instance) |
 | `$LOG_FILE` | `~/.tg-cli-test/bot.log` | Bot log file path |
-| `$CLAUDE_PANE` | tmux pane ID | The active CC pane (set by `start_claude`) |
+| `$E2E_PANE` | tmux pane ID | The active CC pane (set by `start_claude`) |
 | `$DEFAULT_CHAT_ID` | from credentials | Paired Telegram chat ID |
 | `$TIMEOUT` | `60` | Default wait timeout in seconds |
 | `$LOG_BEFORE` | line count | Set by `ensure_infrastructure` (use as baseline for full-run log greps) |
 | `$BOT_SESSION` | `tg-cli-e2e-bot` | tmux session name for bot |
-| `$CLAUDE_SESSION` | `tg-cli-e2e-claude` | tmux session name for CC |
+| `$E2E_SESSION` | `tg-cli-e2e-claude` | tmux session name for CC |
 | `$TEST_CONFIG_DIR` | `~/.tg-cli-test` | Config directory for test bot |
 
 ---
@@ -262,12 +262,12 @@ fi
 ### Inject a prompt and wait for CC to finish
 
 ```bash
-wait_for_cc_idle
-pane_log "[myphase] BEFORE inject" "$CLAUDE_PANE"
+wait_for_idle
+pane_log "[myphase] BEFORE inject" "$E2E_PANE"
 inject_prompt "Do something and reply with DONE"
-pane_log "[myphase] AFTER inject" "$CLAUDE_PANE"
-wait_for_cc_idle 120
-pane_log "[myphase] AFTER cc_idle" "$CLAUDE_PANE"
+pane_log "[myphase] AFTER inject" "$E2E_PANE"
+wait_for_idle 120
+pane_log "[myphase] AFTER cc_idle" "$E2E_PANE"
 ```
 
 ### Non-interactive phase (unit test, config check)

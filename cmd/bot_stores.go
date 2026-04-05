@@ -339,10 +339,12 @@ func (s *sessionCountStore) cleanup(sessionID string) {
 
 // sessionInfo holds the tmux target, working directory, project dir, and agent name for a CC session.
 type sessionInfo struct {
-	tmuxTarget string
-	cwd        string
-	projectDir string
-	name       string
+	tmuxTarget     string
+	cwd            string
+	projectDir     string
+	transcriptPath string
+	name           string
+	backend        string
 }
 
 // sessionStateStore tracks active CC sessions and their associated info.
@@ -379,6 +381,9 @@ func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath strin
 		if existing.projectDir == "" && transcriptPath != "" {
 			existing.projectDir = filepath.Dir(transcriptPath)
 		}
+		if existing.transcriptPath == "" && transcriptPath != "" {
+			existing.transcriptPath = transcriptPath
+		}
 		// Preserve name from existing entry
 		s.sessions[sessionID] = existing
 		s.mu.Unlock()
@@ -393,9 +398,19 @@ func (s *sessionStateStore) add(sessionID, tmuxTarget, cwd, transcriptPath strin
 	if transcriptPath != "" {
 		projectDir = filepath.Dir(transcriptPath)
 	}
-	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir, name: staleName}
+	s.sessions[sessionID] = sessionInfo{tmuxTarget: tmuxTarget, cwd: cwd, projectDir: projectDir, transcriptPath: transcriptPath, name: staleName}
 	s.mu.Unlock()
 	s.save()
+}
+
+// setBackend updates the backend field for an existing session.
+func (s *sessionStateStore) setBackend(sessionID, backend string) {
+	s.mu.Lock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.backend = backend
+		s.sessions[sessionID] = info
+	}
+	s.mu.Unlock()
 }
 
 func (s *sessionStateStore) remove(sessionID string) {
@@ -416,10 +431,12 @@ func (s *sessionStateStore) clearPendingName(tmuxTarget string) {
 
 // sessionEntry is the JSON-serializable form of sessionInfo.
 type sessionEntry struct {
-	TmuxTarget string `json:"tmux_target"`
-	CWD        string `json:"cwd"`
-	ProjectDir string `json:"project_dir,omitempty"`
-	Name       string `json:"name,omitempty"`
+	TmuxTarget     string `json:"tmux_target"`
+	CWD            string `json:"cwd"`
+	ProjectDir     string `json:"project_dir,omitempty"`
+	TranscriptPath string `json:"transcript_path,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	Name           string `json:"name,omitempty"`
 }
 
 // save persists the current session map to disk.
@@ -427,7 +444,7 @@ func (s *sessionStateStore) save() {
 	s.mu.RLock()
 	data := make(map[string]sessionEntry, len(s.sessions))
 	for sid, info := range s.sessions {
-		data[sid] = sessionEntry{TmuxTarget: info.tmuxTarget, CWD: info.cwd, ProjectDir: info.projectDir, Name: info.name}
+		data[sid] = sessionEntry{TmuxTarget: info.tmuxTarget, CWD: info.cwd, ProjectDir: info.projectDir, TranscriptPath: info.transcriptPath, Backend: info.backend, Name: info.name}
 	}
 	s.mu.RUnlock()
 	b, err := json.Marshal(data)
@@ -459,7 +476,7 @@ func (s *sessionStateStore) loadFromFile() {
 	}
 	s.mu.Lock()
 	for sid, entry := range data {
-		s.sessions[sid] = sessionInfo{tmuxTarget: entry.TmuxTarget, cwd: entry.CWD, projectDir: entry.ProjectDir, name: entry.Name}
+		s.sessions[sid] = sessionInfo{tmuxTarget: entry.TmuxTarget, cwd: entry.CWD, projectDir: entry.ProjectDir, transcriptPath: entry.TranscriptPath, backend: entry.Backend, name: entry.Name}
 	}
 	s.mu.Unlock()
 	s.save()

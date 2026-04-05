@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5}]}],
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5}]}],
+    "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5}]}],
+    "PermissionRequest": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
+    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5, "async": true}]}]
+  },
+  "permissions": {
+    "allow": ["mcp__tg-cli__send_file", "Bash(tg-cli:*)", "Bash(./tg-cli:*)"]
+  }
+}

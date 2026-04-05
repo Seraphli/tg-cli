@@ -195,40 +195,68 @@ func readAssistantTexts(transcriptPath string) []string {
 		if json.Unmarshal([]byte(line), &entry) != nil {
 			continue
 		}
-		if typ, _ := entry["type"].(string); typ != "assistant" {
-			continue
-		}
-		if model, _ := entry["model"].(string); model == "<synthetic>" {
-			continue
-		}
-		msg, _ := entry["message"].(map[string]interface{})
-		if msg == nil {
-			continue
-		}
-		contentArr, _ := msg["content"].([]interface{})
-		if contentArr == nil {
-			continue
-		}
-		var textParts []string
-		for _, c := range contentArr {
-			cMap, _ := c.(map[string]interface{})
-			if cMap == nil {
+		typ, _ := entry["type"].(string)
+		// CC format: {type: "assistant", message: {content: [{type: "text", text: "..."}]}}
+		if typ == "assistant" {
+			if model, _ := entry["model"].(string); model == "<synthetic>" {
 				continue
 			}
-			if cType, _ := cMap["type"].(string); cType == "text" {
-				if text, ok := cMap["text"].(string); ok {
-					textParts = append(textParts, text)
-				}
+			msg, _ := entry["message"].(map[string]interface{})
+			if msg == nil {
+				continue
 			}
+			contentArr, _ := msg["content"].([]interface{})
+			if extracted := extractTextParts(contentArr); extracted != "" {
+				texts = append(texts, extracted)
+			}
+			continue
 		}
-		if len(textParts) > 0 {
-			joined := strings.Join(textParts, "\n")
-			if joined != "No response requested." {
-				texts = append(texts, joined)
+		// Codex format: {type: "response_item", payload: {role: "assistant", content: [{type: "output_text", text: "..."}]}}
+		if typ == "response_item" {
+			payload, _ := entry["payload"].(map[string]interface{})
+			if payload == nil {
+				continue
 			}
+			if role, _ := payload["role"].(string); role != "assistant" {
+				continue
+			}
+			contentArr, _ := payload["content"].([]interface{})
+			if extracted := extractTextParts(contentArr); extracted != "" {
+				texts = append(texts, extracted)
+			}
+			continue
 		}
 	}
 	return texts
+}
+
+// extractTextParts extracts text from content arrays in both CC and Codex formats.
+func extractTextParts(contentArr []interface{}) string {
+	if contentArr == nil {
+		return ""
+	}
+	var textParts []string
+	for _, c := range contentArr {
+		cMap, _ := c.(map[string]interface{})
+		if cMap == nil {
+			continue
+		}
+		cType, _ := cMap["type"].(string)
+		// CC: type="text", Codex: type="output_text"
+		if cType == "text" || cType == "output_text" {
+			if text, ok := cMap["text"].(string); ok {
+				textParts = append(textParts, text)
+			}
+		}
+	}
+	if len(textParts) == 0 {
+		return ""
+	}
+	joined := strings.Join(textParts, "\n")
+	if joined == "No response requested." {
+		return ""
+	}
+	return joined
 }
 
 func processTranscriptUpdates(sessionID, transcriptPath string, isQuestion ...bool) string {
@@ -250,12 +278,15 @@ func processTranscriptUpdates(sessionID, transcriptPath string, isQuestion ...bo
 		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, count))
 	}
 	notified := sessionCounts.counts[sessionID]
-	var texts []string
-	for retry := 0; retry < 5; retry++ {
-		time.Sleep(2 * time.Second)
-		texts = readAssistantTexts(transcriptPath)
-		if len(texts) > notified {
-			break
+	// Read immediately first, then retry with shorter delays
+	texts := readAssistantTexts(transcriptPath)
+	if len(texts) <= notified {
+		for retry := 0; retry < 5; retry++ {
+			time.Sleep(500 * time.Millisecond)
+			texts = readAssistantTexts(transcriptPath)
+			if len(texts) > notified {
+				break
+			}
 		}
 	}
 	if len(texts) <= notified {
@@ -322,6 +353,27 @@ func readSessionCCVersion(sessionID string) string {
 	return v
 }
 
+// getPaneCLICommand returns the full command line of the process running in the tmux pane.
+func getPaneCLICommand(tmuxTarget string) string {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return ""
+	}
+	pidOut, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
+	if err != nil {
+		return ""
+	}
+	shellPID := strings.TrimSpace(string(pidOut))
+	if shellPID == "" {
+		return ""
+	}
+	cmdOut, err := exec.Command("ps", "--ppid", shellPID, "-o", "cmd", "--no-headers").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(cmdOut))
+}
+
 func getInstalledCCVersion() string {
 	out, err := exec.Command("claude", "--version").Output()
 	if err != nil {
@@ -336,6 +388,11 @@ func getInstalledCCVersion() string {
 }
 
 func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) {
+	backend := "cc"
+	if info := sessionState.findInfoByTarget(tmuxTarget); info != nil && info.backend != "" {
+		backend = info.backend
+	}
+	cliCmd := getPaneCLICommand(tmuxTarget)
 	nd := notify.NotificationData{
 		Event:          event,
 		Project:        project,
@@ -343,6 +400,8 @@ func sendEventNotification(b *tele.Bot, chat *tele.Chat, chatID, sessionID, even
 		TmuxTarget:     tmuxTarget,
 		ToolName:       toolName,
 		AgentName:      agentName,
+		Backend:        backend,
+		CLICommand:     cliCmd,
 		ContextUsedPct: -1,
 	}
 	if usedPct, usedTokens, windowSize, ok := readContextUsage(sessionID); ok {
@@ -1056,12 +1115,42 @@ func getPaneTitle(tmuxTarget string) string {
 	return title
 }
 
+func getPaneCommand(tmuxTarget string) string {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return ""
+	}
+	cmd, err := injector.GetPaneCommand(target)
+	if err != nil {
+		return ""
+	}
+	return cmd
+}
+
 func isSessionRunning(tmuxTarget string) bool {
 	title := getPaneTitle(tmuxTarget)
 	if title == "" {
 		return false
 	}
-	return !strings.HasPrefix(title, "✳")
+	info := sessionState.findInfoByTarget(tmuxTarget)
+	isCodex := info != nil && info.backend == "codex"
+	if isCodex || info == nil {
+		// Codex idle: title == basename(cwd)
+		cwd := getPaneCWD(tmuxTarget)
+		if cwd != "" && title == filepath.Base(cwd) {
+			return false
+		}
+	}
+	// CC: idle when title starts with ✳
+	if strings.HasPrefix(title, "✳") {
+		return false
+	}
+	// Known CC session: not idle
+	if info != nil && !isCodex {
+		return true
+	}
+	// Unknown session: if neither CC nor Codex idle pattern matched, assume running
+	return true
 }
 
 // isSessionBusy checks if CC is busy by reading tmux pane title.
@@ -1149,6 +1238,7 @@ type hookPayload struct {
 	LastAssistantMessage string          `json:"last_assistant_message"`
 	AgentID   string `json:"agent_id"`
 	AgentType string `json:"agent_type"`
+	Backend   string `json:"backend"`
 }
 
 func parseHookPayload(r *http.Request) (*hookPayload, []byte, error) {
@@ -2018,8 +2108,16 @@ func getPaneLabel(tmuxTarget string) string {
 }
 
 // getPaneCWD returns the current working directory of the given tmux pane.
-func getPaneCWD(paneID string) string {
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{pane_current_path}").Output()
+func getPaneCWD(tmuxTarget string) string {
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return ""
+	}
+	args := []string{"display-message", "-t", target.PaneID, "-p", "#{pane_current_path}"}
+	if injector.ServerName != "" {
+		args = append([]string{"-L", injector.ServerName}, args...)
+	}
+	out, err := exec.Command("tmux", args...).Output()
 	if err != nil {
 		return ""
 	}
@@ -2484,7 +2582,7 @@ func flushInjectQueue(bot *tele.Bot, tmuxTarget string) {
 
 // safeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
 // If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
-func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
+func safeInjectText(bot *tele.Bot, tmuxTarget string, text string, submit ...bool) error {
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
 		return err
@@ -2499,7 +2597,7 @@ func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 			chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
 			injectQueue.enqueue(tmuxTarget, injectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
 			count := injectQueue.itemCount(tmuxTarget)
-			logger.Info(fmt.Sprintf("safeInjectText: CC busy, queued for target=%s count=%d text=%s", tmuxTarget, count, truncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("safeInjectText: CC busy, queued for target=%s count=%d text=%s", tmuxTarget, count, strings.ReplaceAll(text, "\n", "\\n")))
 			if chat != nil {
 				// Show all queued messages with inject ID and delimiters
 				allTexts := injectQueue.getTexts(tmuxTarget)
@@ -2585,7 +2683,24 @@ func safeInjectText(bot *tele.Bot, tmuxTarget string, text string) error {
 	}
 	// Wait for Stop event cooldown before injecting
 	stopCooldown.waitIfNeeded(tmuxTarget, 3*time.Second)
-	return injector.InjectText(target, text)
+	shouldSubmit := len(submit) == 0 || submit[0]
+	ch := injectConfirm.register(tmuxTarget)
+	if err := injector.InjectText(target, text, shouldSubmit); err != nil {
+		injectConfirm.cancel(tmuxTarget)
+		return err
+	}
+	if !shouldSubmit {
+		injectConfirm.cancel(tmuxTarget)
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(10 * time.Second):
+		injectConfirm.cancel(tmuxTarget)
+		logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
+		return nil
+	}
 }
 
 // handleVoiceCommand handles /bot_voice — shows voice config and allows engine/language switch.

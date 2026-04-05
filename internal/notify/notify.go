@@ -17,7 +17,9 @@ type NotificationData struct {
 	TmuxTarget        string
 	ToolName          string
 	AgentName         string
-	Page              int // 0 = no pagination
+	Backend           string // "cc" or "codex"
+	CLICommand        string
+	Page              int    // 0 = no pagination
 	TotalPages        int
 	ContextUsedPct    int // -1 means no data
 	ContextWindowSize int
@@ -32,6 +34,7 @@ type PermissionData struct {
 	ToolInput      map[string]interface{}
 	SuggestionDesc string
 	AgentName      string
+	CLICommand     string
 }
 
 type QuestionOption struct {
@@ -55,6 +58,7 @@ type QuestionData struct {
 	Options           []QuestionOption
 	Questions         []QuestionEntry
 	AgentName         string
+	CLICommand        string
 	ContextUsedPct    int
 	ContextUsedTokens int
 	ContextWindowSize int
@@ -77,6 +81,38 @@ func CompressPath(path string) string {
 		}
 	}
 	return strings.Join(parts, sep)
+}
+
+// HeaderInfo contains common header fields for all notification types.
+type HeaderInfo struct {
+	Project           string
+	CWD               string
+	TmuxTarget        string
+	CLICommand        string
+	ContextUsedPct    int // -1 means no data
+	ContextUsedTokens int
+	ContextWindowSize int
+}
+
+// buildHeader generates the common header lines for notifications.
+func buildHeader(firstLine string, h HeaderInfo) []string {
+	lines := []string{
+		firstLine,
+		"📂 " + markdown.EscapeHTML(projectDisplay(h.Project, h.CWD)),
+	}
+	if h.TmuxTarget != "" {
+		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(h.TmuxTarget)))
+	}
+	if h.CLICommand != "" {
+		lines = append(lines, "🖥 "+markdown.EscapeHTML(h.CLICommand))
+	}
+	if h.ContextUsedPct >= 0 {
+		used := float64(h.ContextUsedTokens)
+		usedStr := formatTokens(used)
+		totalStr := formatTokens(float64(h.ContextWindowSize))
+		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", h.ContextUsedPct, usedStr, totalStr))
+	}
+	return lines
 }
 
 // FormatPaneID extracts the pane ID from a tmux target string (strips the /tmp/... suffix after '@').
@@ -107,13 +143,16 @@ func BuildNotificationText(data NotificationData) string {
 	switch {
 	case data.Event == "SessionStart":
 		emoji = "🟢"
-		status = "CC Session Started"
+		status = "Session Started"
 	case data.Event == "SessionEnd":
 		emoji = "🔴"
-		status = "CC Session Ended"
+		status = "Session Ended"
 	case data.Event == "PreToolUse":
 		emoji = "💬"
 		status = "Update"
+	case data.Event == "PostToolUse":
+		emoji = "🔧"
+		status = "Tool Done"
 	case data.Event == "ToolUse":
 		emoji = "🔧"
 		status = data.ToolName
@@ -133,19 +172,11 @@ func BuildNotificationText(data NotificationData) string {
 	if data.Page > 0 {
 		statusLine += fmt.Sprintf(" (%d/%d)", data.Page, data.TotalPages)
 	}
-	lines := []string{
-		statusLine,
-		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
-	}
-	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
-	}
-	if data.ContextUsedPct >= 0 {
-		used := float64(data.ContextUsedTokens)
-		usedStr := formatTokens(used)
-		totalStr := formatTokens(float64(data.ContextWindowSize))
-		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
-	}
+	lines := buildHeader(statusLine, HeaderInfo{
+		Project: data.Project, CWD: data.CWD, TmuxTarget: data.TmuxTarget,
+		CLICommand: data.CLICommand, ContextUsedPct: data.ContextUsedPct,
+		ContextUsedTokens: data.ContextUsedTokens, ContextWindowSize: data.ContextWindowSize,
+	})
 	if data.Body != "" {
 		lines = append(lines, "", data.Body)
 	}
@@ -163,13 +194,10 @@ func BuildPermissionText(data PermissionData) string {
 	if data.AgentName != "" {
 		firstLine = "🔐 [" + markdown.EscapeHTML(data.AgentName) + "] Permission Request"
 	}
-	lines := []string{
-		firstLine,
-		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
-	}
-	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
-	}
+	lines := buildHeader(firstLine, HeaderInfo{
+		Project: data.Project, CWD: data.CWD, TmuxTarget: data.TmuxTarget,
+		CLICommand: data.CLICommand, ContextUsedPct: -1,
+	})
 	lines = append(lines, "", "🔧 Tool: "+markdown.EscapeHTML(data.ToolName))
 	// Show key fields from tool_input
 	for _, key := range []string{"command", "description", "file_path", "old_string", "new_string", "replace_all", "url", "query", "pattern", "prompt"} {
@@ -318,19 +346,11 @@ func BuildQuestionText(data QuestionData) string {
 	if data.AgentName != "" {
 		firstLine = "❓ [" + markdown.EscapeHTML(data.AgentName) + "] Question"
 	}
-	lines := []string{
-		firstLine,
-		"📂 " + markdown.EscapeHTML(projectDisplay(data.Project, data.CWD)),
-	}
-	if data.TmuxTarget != "" {
-		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(data.TmuxTarget)))
-	}
-	if data.ContextUsedPct >= 0 {
-		used := float64(data.ContextUsedTokens)
-		usedStr := formatTokens(used)
-		totalStr := formatTokens(float64(data.ContextWindowSize))
-		lines = append(lines, fmt.Sprintf("📊 Context: %d%% (%s/%s)", data.ContextUsedPct, usedStr, totalStr))
-	}
+	lines := buildHeader(firstLine, HeaderInfo{
+		Project: data.Project, CWD: data.CWD, TmuxTarget: data.TmuxTarget,
+		CLICommand: data.CLICommand, ContextUsedPct: data.ContextUsedPct,
+		ContextUsedTokens: data.ContextUsedTokens, ContextWindowSize: data.ContextWindowSize,
+	})
 	if len(data.Questions) > 1 {
 		for qIdx, q := range data.Questions {
 			multiTag := ""

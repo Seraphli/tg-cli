@@ -71,7 +71,7 @@ func SessionExists(target TmuxTarget) bool {
 
 // InjectText injects text into a tmux pane using bracketed paste.
 // Uses a per-target mutex to prevent concurrent injections into the same pane.
-func InjectText(target TmuxTarget, text string) error {
+func InjectText(target TmuxTarget, text string, submit ...bool) error {
 	mu := getInjectLock(target)
 	mu.Lock()
 	defer mu.Unlock()
@@ -100,15 +100,11 @@ func InjectText(target TmuxTarget, text string) error {
 		return fmt.Errorf("paste-buffer failed: %w", err)
 	}
 	time.Sleep(1000 * time.Millisecond)
-	// Submit
-	if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
-		return fmt.Errorf("submit failed: %w", err)
-	}
-	// Verify submission — if CC still idle after C-m, retry once
-	time.Sleep(500 * time.Millisecond)
-	title, titleErr := GetPaneTitle(target)
-	if titleErr == nil && strings.HasPrefix(title, "✳") {
-		tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run()
+	// Submit unless explicitly disabled
+	if len(submit) == 0 || submit[0] {
+		if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
+			return fmt.Errorf("submit failed: %w", err)
+		}
 	}
 	return nil
 }
@@ -193,6 +189,16 @@ func GetPaneTitle(target TmuxTarget) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// GetPaneCommand returns the current command running in a tmux pane.
+func GetPaneCommand(target TmuxTarget) (string, error) {
+	cmd := tmuxCmd(target, "display-message", "-t", target.PaneID, "-p", "#{pane_current_command}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("display-message failed: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

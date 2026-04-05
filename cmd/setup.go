@@ -20,27 +20,17 @@ var availableTools = []string{
 	"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch",
 }
 
-//go:embed hooks_config.json
-var hooksConfigJSON []byte
+//go:embed config/cc.json
+var ccConfigJSON []byte
+
+//go:embed config/codex.json
+var codexConfigJSON []byte
 
 //go:embed commands/tg-cli/cron.md
 var cronSkillDoc []byte
 
 //go:embed commands/tg-cli/agent.md
 var agentSkillDoc []byte
-
-type hookEntry struct {
-	Event   string `json:"event"`
-	Matcher string `json:"matcher"`
-	Timeout int    `json:"timeout"`
-	Async   bool   `json:"async,omitempty"`
-}
-
-type hooksConfig struct {
-	Hooks        []hookEntry         `json:"hooks"`
-	CleanupHooks []string            `json:"cleanup_hooks"`
-	Permissions  map[string][]string `json:"permissions"`
-}
 
 var SetupCmd = &cobra.Command{
 	Use:   "install",
@@ -110,128 +100,97 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if !ok {
 		hooks = make(map[string]interface{})
 	}
-	var hcfg hooksConfig
-	json.Unmarshal(hooksConfigJSON, &hcfg)
-	for _, hk := range hcfg.Hooks {
-		entry := map[string]interface{}{
-			"matcher": hk.Matcher,
-			"hooks": []map[string]interface{}{
-				{
-					"type":    "command",
-					"command": hookCommand,
-					"timeout": hk.Timeout,
-				},
-			},
-		}
-		if hk.Async {
-			entry["hooks"].([]map[string]interface{})[0]["async"] = true
-		}
-		existing, ok := hooks[hk.Event].([]interface{})
-		if !ok {
-			existing = []interface{}{}
-		}
-		filtered := []interface{}{}
-		for _, h := range existing {
-			hJSON, _ := json.Marshal(h)
-			hStr := string(hJSON)
-			if !strings.Contains(hStr, "tg-cli") {
+	// Parse CC hooks config template
+	ccTemplate := strings.ReplaceAll(string(ccConfigJSON), "HOOK_CMD", hookCommand)
+	var ccConfig map[string]interface{}
+	json.Unmarshal([]byte(ccTemplate), &ccConfig)
+	// Merge hooks
+	if ccHooks, ok := ccConfig["hooks"].(map[string]interface{}); ok {
+		for event, ourEntries := range ccHooks {
+			existing, _ := hooks[event].([]interface{})
+			filtered := []interface{}{}
+			for _, h := range existing {
+				hJSON, _ := json.Marshal(h)
+				hStr := string(hJSON)
+				if !strings.Contains(hStr, "tg-cli") {
+					filtered = append(filtered, h)
+					continue
+				}
+				if config.ConfigDir != "" {
+					if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
+						continue
+					}
+				} else {
+					if !strings.Contains(hStr, "--config-dir") {
+						continue
+					}
+				}
 				filtered = append(filtered, h)
-				continue
 			}
-			if config.ConfigDir != "" {
-				if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
-					continue
-				}
-			} else {
-				if !strings.Contains(hStr, "--config-dir") {
-					continue
+			if !setupUninstallFlag {
+				if ourList, ok := ourEntries.([]interface{}); ok {
+					filtered = append(filtered, ourList...)
 				}
 			}
-			filtered = append(filtered, h)
+			hooks[event] = filtered
 		}
-		if !setupUninstallFlag {
-			filtered = append(filtered, entry)
-		}
-		hooks[hk.Event] = filtered
-	}
-	for _, event := range hcfg.CleanupHooks {
-		existing, ok := hooks[event].([]interface{})
-		if !ok {
-			existing = []interface{}{}
-		}
-		filtered := []interface{}{}
-		for _, h := range existing {
-			hJSON, _ := json.Marshal(h)
-			hStr := string(hJSON)
-			if !strings.Contains(hStr, "tg-cli") {
-				filtered = append(filtered, h)
-				continue
-			}
-			if config.ConfigDir != "" {
-				if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
-					continue
-				}
-			} else {
-				if !strings.Contains(hStr, "--config-dir") {
-					continue
-				}
-			}
-			filtered = append(filtered, h)
-		}
-		hooks[event] = filtered
 	}
 	settings["hooks"] = hooks
 	// Manage permissions
-	if len(hcfg.Permissions) > 0 {
-		perms, _ := settings["permissions"].(map[string]interface{})
-		if perms == nil {
-			perms = make(map[string]interface{})
-		}
-		if setupUninstallFlag {
-			// Remove tg-cli permissions
-			if existing, ok := perms["allow"].([]interface{}); ok {
-				filtered := []interface{}{}
-				for _, p := range existing {
-					ps, _ := p.(string)
-					isTgCli := false
-					for _, allowed := range hcfg.Permissions["allow"] {
-						if ps == allowed {
-							isTgCli = true
+	if ccPerms, ok := ccConfig["permissions"].(map[string]interface{}); ok {
+		if allowPerms, ok := ccPerms["allow"].([]interface{}); ok && len(allowPerms) > 0 {
+			perms, _ := settings["permissions"].(map[string]interface{})
+			if perms == nil {
+				perms = make(map[string]interface{})
+			}
+			if setupUninstallFlag {
+				// Remove tg-cli permissions
+				if existing, ok := perms["allow"].([]interface{}); ok {
+					filtered := []interface{}{}
+					for _, p := range existing {
+						ps, _ := p.(string)
+						isTgCli := false
+						for _, allowed := range allowPerms {
+							as, _ := allowed.(string)
+							if ps == as {
+								isTgCli = true
+								break
+							}
+						}
+						if !isTgCli {
+							filtered = append(filtered, p)
+						}
+					}
+					if len(filtered) > 0 {
+						perms["allow"] = filtered
+					} else {
+						delete(perms, "allow")
+					}
+				}
+				if len(perms) == 0 {
+					delete(settings, "permissions")
+				} else {
+					settings["permissions"] = perms
+				}
+			} else {
+				// Add tg-cli permissions (idempotent)
+				existing, _ := perms["allow"].([]interface{})
+				for _, allowed := range allowPerms {
+					as, _ := allowed.(string)
+					found := false
+					for _, p := range existing {
+						if ps, _ := p.(string); ps == as {
+							found = true
 							break
 						}
 					}
-					if !isTgCli {
-						filtered = append(filtered, p)
+					if !found {
+						existing = append(existing, as)
 					}
 				}
-				if len(filtered) > 0 {
-					perms["allow"] = filtered
-				} else {
-					delete(perms, "allow")
-				}
-			}
-			if len(perms) == 0 {
-				delete(settings, "permissions")
-			} else {
+				perms["allow"] = existing
 				settings["permissions"] = perms
 			}
-		} else {
-			// Add tg-cli permissions (idempotent)
-			existing, _ := perms["allow"].([]interface{})
-			for _, allowed := range hcfg.Permissions["allow"] {
-				found := false
-				for _, p := range existing {
-					if ps, _ := p.(string); ps == allowed {
-						found = true
-						break
-					}
-				}
-				if !found {
-					existing = append(existing, allowed)
-				}
-			}
-			perms["allow"] = existing
-			settings["permissions"] = perms
 		}
 	}
 	// Register statusLine command so CC statusbar shows context window usage
@@ -327,6 +286,99 @@ func runSetup(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Warning: failed to install agent skill doc: %v\n", err)
 	} else {
 		fmt.Printf("Skill doc installed: %s\n", agentDocPath)
+	}
+	// Register Codex hooks (write to ~/.codex/hooks.json)
+	if !setupUninstallFlag {
+		codexHome := os.Getenv("CODEX_HOME")
+		if codexHome == "" {
+			codexHome = filepath.Join(home, ".codex")
+		}
+		os.MkdirAll(codexHome, 0755)
+		codexHooksPath := filepath.Join(codexHome, "hooks.json")
+		// Read template and replace HOOK_CMD placeholder
+		codexTemplate := string(codexConfigJSON)
+		codexTemplate = strings.ReplaceAll(codexTemplate, "HOOK_CMD", hookCommand)
+		// Read existing hooks.json if present
+		var codexHooks map[string]interface{}
+		if data, err := os.ReadFile(codexHooksPath); err == nil {
+			json.Unmarshal(data, &codexHooks)
+		}
+		if codexHooks == nil {
+			codexHooks = make(map[string]interface{})
+		}
+		// Parse our template
+		var ourCodexHooks map[string]interface{}
+		json.Unmarshal([]byte(codexTemplate), &ourCodexHooks)
+		// Merge: for each event, remove existing tg-cli entries, add ours
+		if ourHooksMap, ok := ourCodexHooks["hooks"].(map[string]interface{}); ok {
+			existingHooksMap, _ := codexHooks["hooks"].(map[string]interface{})
+			if existingHooksMap == nil {
+				existingHooksMap = make(map[string]interface{})
+			}
+			for event, ourEntries := range ourHooksMap {
+				existing, _ := existingHooksMap[event].([]interface{})
+				// Filter out existing tg-cli entries
+				filtered := []interface{}{}
+				for _, e := range existing {
+					eJSON, _ := json.Marshal(e)
+					if !strings.Contains(string(eJSON), "tg-cli") {
+						filtered = append(filtered, e)
+					}
+				}
+				// Add our entries
+				if ourList, ok := ourEntries.([]interface{}); ok {
+					filtered = append(filtered, ourList...)
+				}
+				existingHooksMap[event] = filtered
+			}
+			codexHooks["hooks"] = existingHooksMap
+		}
+		codexData, _ := json.MarshalIndent(codexHooks, "", "  ")
+		os.WriteFile(codexHooksPath, codexData, 0644)
+		fmt.Printf("Codex hooks installed to %s\n", codexHooksPath)
+		// Enable codex_hooks feature flag in config.toml
+		codexConfigPath := filepath.Join(codexHome, "config.toml")
+		configContent, _ := os.ReadFile(codexConfigPath)
+		configStr := string(configContent)
+		if !strings.Contains(configStr, "codex_hooks") {
+			if strings.Contains(configStr, "[features]") {
+				configStr = strings.Replace(configStr, "[features]", "[features]\ncodex_hooks = true", 1)
+			} else {
+				configStr += "\n[features]\ncodex_hooks = true\n"
+			}
+			os.WriteFile(codexConfigPath, []byte(configStr), 0644)
+			fmt.Println("Codex hooks feature enabled in config.toml")
+		}
+	} else {
+		// Uninstall: remove tg-cli entries from CODEX_HOME/hooks.json
+		codexUninstallHome := os.Getenv("CODEX_HOME")
+		if codexUninstallHome == "" {
+			codexUninstallHome = filepath.Join(home, ".codex")
+		}
+		codexHooksPath := filepath.Join(codexUninstallHome, "hooks.json")
+		if data, err := os.ReadFile(codexHooksPath); err == nil {
+			var codexHooks map[string]interface{}
+			if json.Unmarshal(data, &codexHooks) == nil {
+				if hooksMap, ok := codexHooks["hooks"].(map[string]interface{}); ok {
+					for event, entries := range hooksMap {
+						if list, ok := entries.([]interface{}); ok {
+							filtered := []interface{}{}
+							for _, e := range list {
+								eJSON, _ := json.Marshal(e)
+								if !strings.Contains(string(eJSON), "tg-cli") {
+									filtered = append(filtered, e)
+								}
+							}
+							hooksMap[event] = filtered
+						}
+					}
+					codexHooks["hooks"] = hooksMap
+					codexData, _ := json.MarshalIndent(codexHooks, "", "  ")
+					os.WriteFile(codexHooksPath, codexData, 0644)
+					fmt.Printf("Codex hooks uninstalled from %s\n", codexHooksPath)
+				}
+			}
+		}
 	}
 	skipTmux, _ := cmd.Flags().GetBool("skip-tmux")
 	if !skipTmux {

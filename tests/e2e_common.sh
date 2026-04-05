@@ -1,30 +1,39 @@
 #!/bin/bash
 
+# Guard against double-sourcing
+[ -n "${_E2E_COMMON_LOADED:-}" ] && return 0
+_E2E_COMMON_LOADED=1
+
 # Shared config (allow override via env)
 BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot}"
-CLAUDE_SESSION="${CLAUDE_SESSION:-tg-cli-e2e-claude}"
-export TMUX_TEST="tmux -L tg-cli-test"
+E2E_SESSION="${E2E_SESSION:-tg-cli-e2e}"
+export TMUX_TEST="tmux -L tg-cli-test -f /dev/null"
 TEST_CONFIG_DIR="$HOME/.tg-cli-test"
-TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$(mktemp -d /tmp/tg-cli-e2e-claude-XXXXXX)}"
+TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$TEST_CONFIG_DIR/claude-config}"
 TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
 TEST_PORT=12501
 LOG_FILE="$TEST_CONFIG_DIR/bot.log"
 TYPING_LOG_FILE="$TEST_CONFIG_DIR/typing.log"
 CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
-TIMEOUT=60
+# Codex is significantly slower than CC; use longer timeout
+if [ "${E2E_BACKEND:-}" = "codex" ]; then
+  TIMEOUT=180
+else
+  TIMEOUT=60
+fi
 
 # Results tracking via shared file
 E2E_RESULTS_FILE="${E2E_RESULTS_FILE:-/tmp/tg-cli-e2e-results-$$.txt}"
 export E2E_RESULTS_FILE
 
 pass() { echo "PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  PASS: $1"; }
-fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; }
+fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; exit 1; }
 
 # Log pane capture to bot log file via /capture API
 # Usage: pane_log "label"
 pane_log() {
   local label="$1"
-  local target="${2:-$CLAUDE_PANE}"
+  local target="${2:-$E2E_PANE}"
   local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$target" | jq -sRr @uri)"
   local capture
   capture=$(curl -s "$api_url" | jq -r '.content // "(empty)"' 2>/dev/null || echo "(capture failed)")
@@ -35,13 +44,19 @@ pane_log() {
   } >> "$LOG_FILE"
 }
 
-# Inject prompt into Claude pane via bot API
 inject_prompt() {
   local text="$1"
-  local api_url="http://127.0.0.1:$TEST_PORT/inject"
+  local image="${2:-}"
+  local api_url="http://127.0.0.1:$TEST_PORT/inject/message"
   local payload
-  payload=$(jq -n --arg t "$CLAUDE_PANE" --arg txt "$text" '{target: $t, text: $txt}')
-  echo "  API call: POST $api_url target=$CLAUDE_PANE text=${text:0:80}..."
+  if [ -n "$image" ]; then
+    payload=$(jq -n --arg t "$E2E_PANE" --arg txt "$text" --arg img "$image" \
+      '{target: $t, text: $txt, imagePath: $img}')
+  else
+    payload=$(jq -n --arg t "$E2E_PANE" --arg txt "$text" \
+      '{target: $t, text: $txt}')
+  fi
+  echo "  API call: POST $api_url target=$E2E_PANE text=${text:0:80}..."
   local resp
   resp=$(curl -s -w "\n%{http_code}" -X POST \
     -H "Content-Type: application/json" \
@@ -50,7 +65,7 @@ inject_prompt() {
   local code
   code=$(echo "$resp" | tail -1)
   if [ "$code" != "200" ]; then
-    echo "  WARNING: Inject API returned $code"
+    echo "  WARNING: inject/message API returned $code"
     return 1
   fi
   return 0
@@ -70,7 +85,7 @@ wait_for_bot_ready() {
   return 1
 }
 
-wait_for_cc_idle() {
+wait_for_idle() {
   local timeout=${1:-$TIMEOUT}
   local target=${2:-}
   local url="http://127.0.0.1:$TEST_PORT/session/idle"
@@ -88,17 +103,17 @@ wait_for_cc_idle() {
       sleep 5
       return 0
     fi
-    sleep 2
-    elapsed=$((elapsed + 2))
+    sleep 1
+    elapsed=$((elapsed + 1))
   done
-  echo "WARN: wait_for_cc_idle timed out after ${timeout}s"
+  echo "WARN: wait_for_idle timed out after ${timeout}s"
   return 1
 }
 
 wait_for_pane_content() {
   local pattern="$1"
   local timeout=${2:-$TIMEOUT}
-  local target=${3:-$CLAUDE_PANE}
+  local target=${3:-$E2E_PANE}
   local encoded_target
   encoded_target=$(printf '%s' "$target" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
   local elapsed=0
@@ -196,43 +211,20 @@ start_bot() {
   rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
   $TMUX_TEST send-keys -t "$BOT_SESSION" \
-    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug" Enter
+    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1 | tee -a $LOG_FILE" Enter
   echo "Waiting for bot to start..."
   wait_for_bot_ready
 }
 
-start_claude() {
-  $TMUX_TEST kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
-  $TMUX_TEST new-session -d -s "$CLAUDE_SESSION"
-  CLAUDE_PANE=$($TMUX_TEST list-panes -t "$CLAUDE_SESSION" -F '#{pane_id}')
-  export CLAUDE_PANE
-  $TMUX_TEST send-keys -t "$CLAUDE_SESSION" \
-    "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions" Enter
-  echo "Waiting for Claude to start..."
-  # Check if trust dialog is present before sending Enter
-  sleep 5
-  pane_log "[start_claude] after 5s sleep, before trust check"
-  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$CLAUDE_PANE" -p -S - 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
-    # Bypass Permissions dialog: cursor defaults to "No, exit", need Down then Enter
-    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" Down
-    sleep 1
-    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
-    echo "Bypass Permissions dialog detected, accepted."
-  elif echo "$PANE_CONTENT" | grep -qi "trust"; then
-    $TMUX_TEST send-keys -t "$CLAUDE_SESSION" C-m
-    echo "Trust dialog detected, confirmed."
-  else
-    echo "No dialog detected, skipping."
-  fi
-  pane_log "[start_claude] after trust dialog handling"
-  echo "Waiting for Claude to reach idle state..."
-  pane_log "[start_claude] before wait_for_cc_idle"
-  wait_for_cc_idle
-  pane_log "[start_claude] after wait_for_cc_idle"
-}
-
 setup_hooks() {
+  # Clean previous test config
+  rm -rf "$TEST_CLAUDE_CONFIG_DIR" 2>/dev/null || true
+  mkdir -p "$TEST_CLAUDE_CONFIG_DIR"
+  # Isolate Codex hooks via CODEX_HOME (must NOT be under /tmp — Codex refuses helper binaries there)
+  export CODEX_HOME="$TEST_CONFIG_DIR/codex-home"
+  rm -rf "$CODEX_HOME" 2>/dev/null || true
+  mkdir -p "$CODEX_HOME"
+  cp "$HOME/.codex/auth.json" "$CODEX_HOME/auth.json" 2>/dev/null || true
   # Copy credentials (CLAUDE_CONFIG_DIR maps to ~/.claude)
   cp "$HOME/.claude/.credentials.json" "$TEST_CLAUDE_CONFIG_DIR/.credentials.json" 2>/dev/null || true
   # Write minimal .claude.json (skip onboarding, no MCP leak)
@@ -248,7 +240,7 @@ MINEOF
   CLAUDE_CONFIG_DIR="$TEST_CLAUDE_CONFIG_DIR" claude mcp add --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT" 2>/dev/null || true
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
-  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model haiku --allow-dangerously-skip-permissions"
+  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"
   echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
@@ -257,12 +249,11 @@ cleanup_sessions() {
   local exit_code=$?
   echo ""
   echo "Cleaning up..."
-  if [ -n "$TEST_CLAUDE_CONFIG_DIR" ] && [ -d "$TEST_CLAUDE_CONFIG_DIR" ]; then
-    rm -rf "$TEST_CLAUDE_CONFIG_DIR"
-  fi
-  $TMUX_TEST kill-session -t "$CLAUDE_SESSION" 2>/dev/null || true
+  rm -rf "$TEST_CLAUDE_CONFIG_DIR" 2>/dev/null || true
+  rm -rf "$CODEX_HOME" 2>/dev/null || true
+  $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   sleep 2
-  $TMUX_TEST kill-session -t "$BOT_SESSION" 2>/dev/null || true
+  $TMUX_TEST kill-session -t "=$BOT_SESSION" 2>/dev/null || true
   $TMUX_TEST kill-server 2>/dev/null || true
   return $exit_code
 }

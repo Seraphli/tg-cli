@@ -185,7 +185,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 		ctxPct, ctxUsed, ctxWindow, ctxOk := readContextUsage(p.SessionID)
 		qData := notify.QuestionData{
 			Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, Questions: questionEntries,
-			AgentName: agentName, ContextUsedPct: -1,
+			AgentName: agentName, CLICommand: getPaneCLICommand(p.TmuxTarget), ContextUsedPct: -1,
 		}
 		if ctxOk {
 			qData.ContextUsedPct = ctxPct
@@ -284,7 +284,7 @@ func processPendingRequest(bot *tele.Bot, creds *config.Credentials, uuid string
 	text := notify.BuildPermissionText(notify.PermissionData{
 		Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget,
 		ToolName: p.ToolName, ToolInput: toolInput, SuggestionDesc: sugDesc,
-		AgentName: agentName,
+		AgentName: agentName, CLICommand: getPaneCLICommand(p.TmuxTarget),
 	})
 	markup := &tele.ReplyMarkup{}
 	row1 := []tele.Btn{
@@ -385,6 +385,9 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 		// Exclude SessionStart (handled inside switch after filter) and SessionEnd
 		if event != "SessionEnd" && event != "SessionStart" && p.SessionID != "" && p.TmuxTarget != "" {
 			sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
+			if p.Backend != "" {
+				sessionState.setBackend(p.SessionID, p.Backend)
+			}
 		}
 		if p.SessionID != "" {
 			mu := getHookSessionLock(p.SessionID)
@@ -452,6 +455,9 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 			}
 			if p.SessionID != "" && p.TmuxTarget != "" {
 				sessionState.add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
+				if p.Backend != "" {
+					sessionState.setBackend(p.SessionID, p.Backend)
+				}
 				logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
 			}
 		case "SessionEnd":
@@ -550,7 +556,9 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 					sessionCounts.counts[p.SessionID] = len(texts)
 					lock.Unlock()
 				}
-				sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+				if body != "" {
+					sendEventNotification(bot, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+				}
 			notifySessionWatchers(hookAgentName, watchEvent{
 				Event:   "Stop",
 				Agent:   hookAgentName,
@@ -593,6 +601,27 @@ func registerHTTPHooks(mux *http.ServeMux, bot *tele.Bot, creds *config.Credenti
 				toolText := notify.BuildToolNotifyText(p.ToolName, p.ToolInput, cwdForRoute)
 				if toolText != "" {
 					sendEventNotification(bot, chat, chatID, p.SessionID, "ToolUse", p.Project, cwdForRoute, p.TmuxTarget, toolText, p.ToolName, hookAgentName, hookTopicID)
+				}
+			}
+		case "PostToolUse":
+			// Codex-specific: tool execution completed
+			if chat != nil && p.ToolName != "" {
+				// Send optional tool completion notification (similar to ToolUse notify)
+				cfg, cfgErr := config.LoadAppConfig()
+				if cfgErr != nil {
+					break
+				}
+				if cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled {
+					shouldNotify := false
+					for _, t := range cfg.ToolNotifyList {
+						if strings.EqualFold(t, p.ToolName) {
+							shouldNotify = true
+							break
+						}
+					}
+					if shouldNotify {
+						logger.Info(fmt.Sprintf("PostToolUse notification: tool=%s target=%s", p.ToolName, p.TmuxTarget))
+					}
 				}
 			}
 		case "PermissionRequest":
