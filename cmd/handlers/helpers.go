@@ -97,16 +97,6 @@ func doChatAsk(bs *types.BotState, msgID int) error {
 	return helpers.DoChatAsk(bs.Bot, bs.ToolNotifs, bs.PendingFiles, bs.ReactionTracker, msgID)
 }
 
-// isSessionRunning checks if CC is running by reading tmux pane title.
-func isSessionRunning(bs *types.BotState, tmuxTarget string) bool {
-	return helpers.IsSessionRunning(bs.SessionState, tmuxTarget)
-}
-
-// isSessionBusy checks if CC is busy.
-func isSessionBusy(bs *types.BotState, tmuxTarget string) bool {
-	return helpers.IsSessionBusy(bs.SessionState, tmuxTarget)
-}
-
 // handlePermCommand handles /bot_perm_<cmd>.
 func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 	cmd := strings.TrimPrefix(c.Message().Text, "/bot_perm_")

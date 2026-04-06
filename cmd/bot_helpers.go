@@ -191,38 +191,6 @@ func recordPending(bs *BotState, tmuxTarget string, chatID int64, msgID int) {
 	bs.ReactionTracker.RecordPending(tmuxTarget, chatID, msgID)
 }
 
-func isSessionRunning(bs *BotState, tmuxTarget string) bool {
-	title := helpers.GetPaneTitle(tmuxTarget)
-	if title == "" {
-		return false
-	}
-	info := bs.SessionState.FindInfoByTarget(tmuxTarget)
-	isCodex := info != nil && info.Backend == "codex"
-	if isCodex || info == nil {
-		// Codex idle: title == basename(cwd)
-		cwd := helpers.GetPaneCWD(tmuxTarget)
-		if cwd != "" && title == filepath.Base(cwd) {
-			return false
-		}
-	}
-	// CC: idle when title starts with ✳
-	if strings.HasPrefix(title, "✳") {
-		return false
-	}
-	// Known CC session: not idle
-	if info != nil && !isCodex {
-		return true
-	}
-	// Unknown session: if neither CC nor Codex idle pattern matched, assume running
-	return true
-}
-
-// isSessionBusy checks if CC is busy by reading tmux pane title.
-// CC shows ✳ prefix when idle, any other prefix when running.
-func isSessionBusy(bs *BotState, tmuxTarget string) bool {
-	return isSessionRunning(bs, tmuxTarget)
-}
-
 var typingLogWriter io.Writer
 
 func initTypingLog(configDir string) {
@@ -433,7 +401,7 @@ func safeInjectText(bs *BotState, tmuxTarget string, text string, submit ...bool
 		return err
 	}
 	// PRE-INJECT: check if CC is busy (hook-based + pane title fallback). If busy, queue and return.
-	if isSessionBusy(bs, tmuxTarget) {
+	if helpers.IsSessionRunning(tmuxTarget) {
 		// Check if there's a pending AskUserQuestion — if so, answer it directly (don't queue)
 		if _, _, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxTarget); ok {
 			// Fall through to AskUserQuestion handling below

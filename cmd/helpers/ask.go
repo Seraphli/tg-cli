@@ -168,7 +168,7 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 	}
 	// PRE-INJECT: check if there's a pending AskUserQuestion
 	_, _, hasAskQ := p.ToolNotifs.FindByTmuxTarget(tmuxTarget)
-	if isSessionBusyFn(tmuxTarget, p) && !hasAskQ {
+	if IsSessionRunning(tmuxTarget) && !hasAskQ {
 		chat, chatIDStr, topicID := p.ResolveChat(tmuxTarget)
 		chatIDInt := int64(0)
 		for _, c := range chatIDStr {
@@ -383,33 +383,6 @@ func cleanupAskState(
 	}
 	pendingFiles.Remove(msgID)
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
-}
-
-// isSessionBusyFn checks session busy state using pane title.
-func isSessionBusyFn(tmuxTarget string, p SafeInjectTextParams) bool {
-	title := GetPaneTitle(tmuxTarget)
-	if title == "" {
-		return false
-	}
-	info := p.SessionState.FindInfoByTarget(tmuxTarget)
-	isCodex := info != nil && info.Backend == "codex"
-	if isCodex || info == nil {
-		// Codex idle: title == basename(cwd)
-		cwd := GetPaneCWD(tmuxTarget)
-		if cwd != "" && title == filepath.Base(cwd) {
-			return false
-		}
-	}
-	// CC: idle when title starts with ✳
-	if strings.HasPrefix(title, "✳") {
-		return false
-	}
-	// Known CC session: not idle
-	if info != nil && !isCodex {
-		return true
-	}
-	// Unknown session: assume running
-	return true
 }
 
 // ExtractTmuxTargetFromText extracts tmux target from notification text.

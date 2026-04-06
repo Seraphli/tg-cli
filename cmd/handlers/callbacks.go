@@ -775,7 +775,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 	bot.Handle(&tele.Btn{Unique: "upgrade"}, func(c tele.Context) error {
 		tmuxTarget := c.Data()
 		logger.Info(fmt.Sprintf("Upgrade callback: target=%s", tmuxTarget))
-		if isSessionRunning(bs, tmuxTarget) {
+		if helpers.IsSessionRunning(tmuxTarget) {
 			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session is busy. Wait for idle before upgrading."})
 		}
 		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("🔄 Upgrading CC...\n📟 %s", notify.FormatPaneID(tmuxTarget)), tele.ModeHTML)

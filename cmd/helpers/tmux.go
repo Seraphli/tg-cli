@@ -203,6 +203,30 @@ func ListProjectSessionsByDir(dir string, limit int, excludeID string) ([]Sessio
 	return listSessionsFromDir(dir, limit, excludeID)
 }
 
+// DetectBackend determines the CLI backend running in the tmux pane.
+// Returns "cc", "codex", or "" (unknown/exited).
+func DetectBackend(tmuxTarget string) string {
+	cmd := GetPaneCommand(tmuxTarget)
+	switch cmd {
+	case "claude":
+		return "cc"
+	case "codex":
+		return "codex"
+	case "node":
+		cliCmd := GetPaneCLICommand(tmuxTarget)
+		for _, token := range strings.Fields(cliCmd) {
+			base := filepath.Base(token)
+			if base == "codex" {
+				return "codex"
+			}
+			if base == "claude" {
+				return "cc"
+			}
+		}
+	}
+	return ""
+}
+
 func listSessionsFromDir(dir string, limit int, excludeID string) ([]SessionListEntry, error) {
 	entries, err := readDir(dir)
 	if err != nil {

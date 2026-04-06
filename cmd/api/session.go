@@ -38,12 +38,11 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			if targetFilter != "" && info.TmuxTarget != targetFilter {
 				continue
 			}
-			running := helpers.IsSessionRunning(bs.SessionState, info.TmuxTarget)
-			busy := helpers.IsSessionBusy(bs.SessionState, info.TmuxTarget)
+			running := helpers.IsSessionRunning(info.TmuxTarget)
 			if running {
 				allIdle = false
 			}
-			result[sid] = sessionIdleEntry{Target: info.TmuxTarget, Idle: !running, Busy: busy}
+			result[sid] = sessionIdleEntry{Target: info.TmuxTarget, Idle: !running, Busy: running}
 		}
 
 		// If target filter specified but no match found, not idle
@@ -122,7 +121,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				Target:     info.TmuxTarget,
 				CWD:        info.CWD,
 				ProjectDir: info.ProjectDir,
-				Running:    helpers.IsSessionRunning(bs.SessionState, info.TmuxTarget),
+				Running:    helpers.IsSessionRunning(info.TmuxTarget),
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")

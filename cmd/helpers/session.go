@@ -80,32 +80,21 @@ func CleanupPendingState(
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }
 
-// IsSessionRunning checks if CC is running by reading tmux pane title.
-func IsSessionRunning(sessionState *stores.SessionStateStore, tmuxTarget string) bool {
+// IsSessionRunning checks if a CLI session is actively running by examining the tmux pane.
+func IsSessionRunning(tmuxTarget string) bool {
 	title := GetPaneTitle(tmuxTarget)
 	if title == "" {
 		return false
 	}
-	info := sessionState.FindInfoByTarget(tmuxTarget)
-	isCodex := info != nil && info.Backend == "codex"
-	if isCodex || info == nil {
+	switch DetectBackend(tmuxTarget) {
+	case "cc":
+		return !strings.HasPrefix(title, "✳")
+	case "codex":
 		cwd := GetPaneCWD(tmuxTarget)
-		if cwd != "" && title == filepath.Base(cwd) {
-			return false
-		}
-	}
-	if strings.HasPrefix(title, "✳") {
+		return !(cwd != "" && title == filepath.Base(cwd))
+	default:
 		return false
 	}
-	if info != nil && !isCodex {
-		return true
-	}
-	return true
-}
-
-// IsSessionBusy checks if CC is busy by reading tmux pane title.
-func IsSessionBusy(sessionState *stores.SessionStateStore, tmuxTarget string) bool {
-	return IsSessionRunning(sessionState, tmuxTarget)
 }
 
 // RecordPending records a message for later ✍ reaction when UserPromptSubmit fires.

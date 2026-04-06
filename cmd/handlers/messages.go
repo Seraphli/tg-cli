@@ -316,7 +316,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 					injector.SendKeys(*targetPtr, "Escape")
 					for i := 0; i < 20; i++ {
 						time.Sleep(500 * time.Millisecond)
-						if !isSessionBusy(bs, tmuxStr) {
+						if !helpers.IsSessionRunning(tmuxStr) {
 							break
 						}
 					}
