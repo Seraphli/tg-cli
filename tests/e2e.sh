@@ -116,17 +116,40 @@ else
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  if [ "$BACKEND" = "codex" ]; then
-    start_codex
-  else
-    start_claude
-  fi
   trap cleanup_sessions EXIT
 
-  PHASE_LIST=( $(build_phase_list) )
-  for phase in "${PHASE_LIST[@]}"; do
+  # Run common phases first (API-only, no CC/Codex needed)
+  for phase in $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V); do
     [ -f "$phase" ] && run_phase "$phase"
   done
+
+  if [ "$BACKEND" = "all" ]; then
+    # Run CC phases
+    start_claude
+    for phase in $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V); do
+      [ -f "$phase" ] && run_phase "$phase"
+    done
+    # Switch: kill CC session, start Codex
+    echo ""
+    echo "=== Switching backend: CC -> Codex ==="
+    $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
+    sleep 2
+    export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+    start_codex
+    for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
+      [ -f "$phase" ] && run_phase "$phase"
+    done
+  elif [ "$BACKEND" = "codex" ]; then
+    start_codex
+    for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
+      [ -f "$phase" ] && run_phase "$phase"
+    done
+  else
+    start_claude
+    for phase in $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V); do
+      [ -f "$phase" ] && run_phase "$phase"
+    done
+  fi
 fi
 
 # Final report

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	tele "gopkg.in/telebot.v3"
@@ -320,7 +321,7 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 				}
 				tgMsg, err = bot.Send(channel, doc)
 			} else {
-				tgMsg, err = retrySend(bot, channel, formatted)
+				tgMsg, err = helpers.RetrySend(bot, channel, formatted)
 			}
 			if err != nil {
 				logger.Error(fmt.Sprintf("Mailbox TG send failed: %v", err))
@@ -372,7 +373,8 @@ func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
 }
 
 // registerMailboxAPI registers mailbox HTTP endpoints on the given mux.
-func registerMailboxAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credentials) {
+func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
+	bot := bs.Bot
 	// POST /mailbox/send — send a message from one agent to another (multipart form)
 	mux.HandleFunc("/mailbox/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -421,11 +423,11 @@ func registerMailboxAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credent
 			fileName = header.Filename
 		}
 		msgID := mailbox.send(bot, from, to, subject, text, fileData, fileName)
-		logger.Info(fmt.Sprintf("Mailbox send: from=%s to=%s subject=%s text=%s", from, to, subject, truncateStr(text, 200)))
+		logger.Info(fmt.Sprintf("Mailbox send: from=%s to=%s subject=%s text=%s", from, to, subject, helpers.TruncateStr(text, 200)))
 		// Send TG notification to target agent's chat
-		targetInfo := sessionState.findByName(to)
+		targetInfo := bs.SessionState.FindByName(to)
 		if targetInfo != nil {
-			chat, _, topicID := resolveChat(targetInfo.tmuxTarget)
+			chat, _, topicID := resolveChat(bs, targetInfo.TmuxTarget)
 			if chat != nil {
 				receiverNotify := fmt.Sprintf("📥 Mail Received\n📤 From: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s",
 					from, time.Now().Format(time.RFC3339), msgID, subject, text)
@@ -433,18 +435,18 @@ func registerMailboxAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credent
 				if topicID > 0 {
 					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
 				}
-				chunks := splitBody(receiverNotify, 4000)
+				chunks := helpers.SplitBody(receiverNotify, 4000)
 				if len(chunks) <= 1 {
-					retrySend(bot, chat, receiverNotify, sendOpts...)
+					helpers.RetrySend(bot, chat, receiverNotify, sendOpts...)
 				} else {
-					retrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
+					helpers.RetrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
 				}
 			}
 		}
 		// Notify sender's chat
-		fromInfo := sessionState.findByName(from)
+		fromInfo := bs.SessionState.FindByName(from)
 		if fromInfo != nil {
-			fromChat, _, fromTopicID := resolveChat(fromInfo.tmuxTarget)
+			fromChat, _, fromTopicID := resolveChat(bs, fromInfo.TmuxTarget)
 			if fromChat != nil {
 				senderNotify := fmt.Sprintf("📤 Mail Sent\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s",
 					to, time.Now().Format(time.RFC3339), msgID, subject, text)
@@ -452,11 +454,11 @@ func registerMailboxAPI(mux *http.ServeMux, bot *tele.Bot, creds *config.Credent
 				if fromTopicID > 0 {
 					senderOpts = append(senderOpts, &tele.SendOptions{ThreadID: fromTopicID})
 				}
-				chunks := splitBody(senderNotify, 4000)
+				chunks := helpers.SplitBody(senderNotify, 4000)
 				if len(chunks) <= 1 {
-					retrySend(bot, fromChat, senderNotify, senderOpts...)
+					helpers.RetrySend(bot, fromChat, senderNotify, senderOpts...)
 				} else {
-					retrySend(bot, fromChat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), senderOpts...)
+					helpers.RetrySend(bot, fromChat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), senderOpts...)
 				}
 			}
 		}

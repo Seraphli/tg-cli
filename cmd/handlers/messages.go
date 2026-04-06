@@ -1,4 +1,4 @@
-package cmd
+package handlers
 
 import (
 	"fmt"
@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/stores"
+	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -19,9 +22,7 @@ import (
 )
 
 // resolveGroupTarget finds the unique bound tmux target for a group/topic chat.
-// Uses NameRouteMap: finds name routes matching (chatID, topicID), then finds active session by name.
-// Pass topicID=0 for non-topic group chats.
-func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget, error) {
+func resolveGroupTarget(bs *types.BotState, chatID int64, topicID int) (string, injector.TmuxTarget, error) {
 	creds, _ := config.LoadCredentials()
 	var targets []string
 	for key, route := range creds.NameRouteMap {
@@ -31,16 +32,14 @@ func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget,
 		if route.TopicID != topicID {
 			continue
 		}
-		// Try as name first
 		var tmuxTarget string
-		info := sessionState.findByName(key)
+		info := bs.SessionState.FindByName(key)
 		if info != nil {
-			tmuxTarget = info.tmuxTarget
+			tmuxTarget = info.TmuxTarget
 		} else {
-			// Try as session ID
-			sessionInfo := sessionState.findInfoByID(key)
+			sessionInfo := bs.SessionState.FindInfoByID(key)
 			if sessionInfo != nil {
-				tmuxTarget = sessionInfo.tmuxTarget
+				tmuxTarget = sessionInfo.TmuxTarget
 			}
 		}
 		if tmuxTarget == "" {
@@ -63,19 +62,18 @@ func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget,
 		}
 	}
 	if len(targets) == 0 && topicID != 0 {
-		// Fallback: retry with topicID=0 for reply threads in non-topic supergroups
 		for key, route := range creds.NameRouteMap {
 			if route.ChatID != chatID || route.TopicID != 0 {
 				continue
 			}
 			var tmuxTarget string
-			info := sessionState.findByName(key)
+			info := bs.SessionState.FindByName(key)
 			if info != nil {
-				tmuxTarget = info.tmuxTarget
+				tmuxTarget = info.TmuxTarget
 			} else {
-				sessionInfo := sessionState.findInfoByID(key)
+				sessionInfo := bs.SessionState.FindInfoByID(key)
 				if sessionInfo != nil {
-					tmuxTarget = sessionInfo.tmuxTarget
+					tmuxTarget = sessionInfo.TmuxTarget
 				}
 			}
 			if tmuxTarget == "" {
@@ -111,7 +109,7 @@ func resolveGroupTarget(chatID int64, topicID int) (string, injector.TmuxTarget,
 	return targets[0], target, nil
 }
 
-// transcribeVoice downloads and transcribes a voice message
+// transcribeVoice downloads and transcribes a voice message.
 func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
 	file, err := bot.FileByID(fileID)
 	if err != nil {
@@ -129,11 +127,11 @@ func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
 		logger.Error(fmt.Sprintf("Voice transcription failed: %v", err))
 		return "", fmt.Errorf("transcription failed: %w", err)
 	}
-	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, truncateStr(text, 200)))
+	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, helpers.TruncateStr(text, 200)))
 	return text, nil
 }
 
-// downloadTGFile downloads a Telegram file to /tmp/tg-cli/uploads/
+// downloadTGFile downloads a Telegram file to /tmp/tg-cli/uploads/.
 func downloadTGFile(bot *tele.Bot, fileID, fileName string) (string, error) {
 	dir := "/tmp/tg-cli/uploads"
 	os.MkdirAll(dir, 0755)
@@ -178,15 +176,14 @@ func restoreSpoilers(text string, entities []tele.MessageEntity) string {
 }
 
 // resolveReplyTarget extracts and validates tmux target from reply message.
-// If the pane is alive but not in sessionState, recovers it.
-func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
+func resolveReplyTarget(bs *types.BotState, replyText string) (injector.TmuxTarget, error) {
 	if replyText == "" {
 		logger.Debug("resolveReplyTarget: empty replyText")
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
-	targetPtr, err := extractTmuxTarget(replyText)
+	targetPtr, err := helpers.ExtractTmuxTargetFromText(replyText)
 	if err != nil {
-		logger.Debug(fmt.Sprintf("resolveReplyTarget: extractTmuxTarget failed: %v text=%s", err, truncateStr(replyText, 100)))
+		logger.Debug(fmt.Sprintf("resolveReplyTarget: ExtractTmuxTargetFromText failed: %v text=%s", err, helpers.TruncateStr(replyText, 100)))
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
 	target := *targetPtr
@@ -194,60 +191,55 @@ func resolveReplyTarget(replyText string) (injector.TmuxTarget, error) {
 		return injector.TmuxTarget{}, fmt.Errorf("session not found")
 	}
 	tmuxStr := injector.FormatTarget(target)
-	if _, found := sessionState.findByTarget(tmuxStr); !found {
-		cwd := getPaneCWD(target.PaneID)
+	if _, found := bs.SessionState.FindByTarget(tmuxStr); !found {
+		cwd := helpers.GetPaneCWD(target.PaneID)
 		if cwd != "" {
-			sessionState.add("recovered-"+target.PaneID, tmuxStr, cwd, "")
+			bs.SessionState.Add("recovered-"+target.PaneID, tmuxStr, cwd, "")
 			logger.Info(fmt.Sprintf("Session recovered from reply: tmux=%s cwd=%s", tmuxStr, cwd))
 		}
 	}
 	return target, nil
 }
 
-// injectMessage handles image + text injection to a target tmux pane.
-// If imagePath is set, pastes image path first (no submit), then pastes text and submits.
-func injectMessage(bot *tele.Bot, tmuxTarget string, text string, imagePath string) error {
+// InjectMessage handles image + text injection to a target tmux pane.
+func InjectMessage(bs *types.BotState, tmuxTarget string, text string, imagePath string) error {
 	if imagePath != "" && text == "" {
-		return safeInjectText(bot, tmuxTarget, imagePath)
+		return safeInjectText(bs, tmuxTarget, imagePath)
 	}
 	if imagePath != "" {
-		if err := safeInjectText(bot, tmuxTarget, imagePath, false); err != nil {
+		if err := safeInjectText(bs, tmuxTarget, imagePath, false); err != nil {
 			return fmt.Errorf("image inject failed: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return safeInjectText(bot, tmuxTarget, text)
+	return safeInjectText(bs, tmuxTarget, text)
 }
 
-// processUserInput handles the shared logic for OnText and OnVoice after routing.
-// text is the raw transcribed or typed text; isVoice indicates input method.
-// voicePrefix is prepended to injected text when isVoice is true.
-func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string, imagePath ...string) error {
+// processUserInput handles shared logic for OnText and OnVoice after routing.
+func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string, imagePath ...string) error {
 	imgPath := ""
 	if len(imagePath) > 0 {
 		imgPath = imagePath[0]
 	}
-	// Merge mode: buffer content and return
-	key := mergeKey(c.Chat().ID)
-	if buf := mergeBuffers.get(key); buf != nil {
+	key := stores.MergeKey(c.Chat().ID)
+	if buf := bs.MergeBuffers.Get(key); buf != nil {
 		content := text
 		if isVoice {
 			content = voicePrefix + " " + text
 		}
-		items, notifyMsgID, chatID, _ := mergeBuffers.addAndGetInfo(key, content)
-		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), truncateStr(content, 200)))
+		items, notifyMsgID, chatID, _ := bs.MergeBuffers.AddAndGetInfo(key, content)
+		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), helpers.TruncateStr(content, 200)))
 		if isVoice {
 			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
-		// Update notification with content preview
 		if notifyMsgID != 0 {
-			preview := buildMergeNotifyText(fmt.Sprintf("📝 Collecting (%d messages)", len(items)), items)
+			preview := BuildMergeNotifyText(fmt.Sprintf("📝 Collecting (%d messages)", len(items)), items)
 			menu := &tele.ReplyMarkup{}
 			btnSubmit := menu.Data("📤 Submit", "merge_submit")
 			btnCancel := menu.Data("❌ Cancel", "merge_cancel")
 			menu.Inline(menu.Row(btnSubmit, btnCancel))
 			editMsg := &tele.Message{ID: notifyMsgID, Chat: &tele.Chat{ID: chatID}}
-			retryEdit(bot, editMsg, preview, menu, tele.ModeHTML)
+			helpers.RetryEdit(bot, editMsg, preview, menu, tele.ModeHTML)
 		}
 		return nil
 	}
@@ -256,24 +248,20 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 	if isVoice {
 		injectionText = voicePrefix + " " + text
 	}
-	// Skip forwarded messages globally (not just in group path)
 	if c.Message().OriginalUnixtime != 0 {
 		return nil
 	}
-	// sendFeedback sends the appropriate feedback message for a group or reply context
 	sendFeedback := func(tmuxTarget string) {
-		recordPending(tmuxTarget, c.Message().Chat.ID, c.Message().ID)
+		recordPending(bs, tmuxTarget, c.Message().Chat.ID, c.Message().ID)
 		if isVoice {
 			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
 	}
-
-	// Group path: no reply, group/supergroup chat
 	if c.Message().ReplyTo == nil {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
-		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+		tmuxStr, _, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
 			if err.Error() == "no targets bound" {
 				return nil
@@ -283,33 +271,29 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 			return c.Reply("❌ tmux session not found.")
 		}
-		if !checkSessionAlive(tmuxStr, bot) {
+		if !checkSessionAlive(bs, tmuxStr) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
 		sendFeedback(tmuxStr)
-		if err := injectMessage(bot, tmuxStr, injectionText, imgPath); err != nil {
+		if err := InjectMessage(bs, tmuxStr, injectionText, imgPath); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
-		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, truncateStr(text, 200)))
+		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
 		return nil
 	}
-
-	// Reply path: ReplyTo != nil
 	replyTo := c.Message().ReplyTo
-
-	// Check if this is a reply to a bot_new confirmation message
-	if val, ok := launchPending.Load(replyTo.ID); ok {
+	if val, ok := bs.LaunchPending.Load(replyTo.ID); ok {
 		state := val.(*LaunchState)
 		customValue := strings.TrimSpace(c.Text())
-		launchPending.Delete(replyTo.ID)
+		bs.LaunchPending.Delete(replyTo.ID)
 		switch state.Step {
 		case "session":
 			state.SessionName = customValue
 			c.Bot().Edit(c.Message().ReplyTo, fmt.Sprintf("📦 Session name\n✅ %s", state.SessionName))
 			if state.WorkDir == "" {
-				askWorkDir(c.Bot(), state.ChatID, state)
+				AskWorkDir(bs, c.Bot(), state.ChatID, state)
 			} else {
-				go executeLaunch(c.Bot(), state.ChatID, state)
+				go ExecuteLaunch(bs, c.Bot(), state.ChatID, state)
 			}
 		case "workdir":
 			if strings.HasPrefix(customValue, "~") {
@@ -318,64 +302,58 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 			}
 			state.WorkDir = customValue
 			c.Bot().Edit(c.Message().ReplyTo, fmt.Sprintf("📂 Working directory\n✅ %s", state.WorkDir))
-			go executeLaunch(c.Bot(), state.ChatID, state)
+			go ExecuteLaunch(bs, c.Bot(), state.ChatID, state)
 		}
 		return nil
 	}
-
-	if _, ok := pendingPerms.getTarget(replyTo.ID); ok {
-		targetPtr, err := extractTmuxTarget(replyTo.Text)
+	if _, ok := bs.PendingPerms.GetTarget(replyTo.ID); ok {
+		targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text)
 		if err == nil && targetPtr != nil {
 			tmuxStr := injector.FormatTarget(*targetPtr)
 			if injector.SessionExists(*targetPtr) {
-				// Cancel PermissionRequest explicitly, then inject
-				if permMsgID, found := pendingPerms.findByTmuxTarget(tmuxStr); found {
-					doCancelPerm(bot, permMsgID)
+				if permMsgID, found := bs.PendingPerms.FindByTmuxTarget(tmuxStr); found {
+					doCancelPerm(bs, permMsgID)
 					injector.SendKeys(*targetPtr, "Escape")
 					for i := 0; i < 20; i++ {
 						time.Sleep(500 * time.Millisecond)
-						if !isSessionBusy(tmuxStr) {
+						if !isSessionBusy(bs, tmuxStr) {
 							break
 						}
 					}
 				}
 				sendFeedback(tmuxStr)
-				injectMessage(bot, injector.FormatTarget(*targetPtr), injectionText, imgPath)
-				logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, truncateStr(text, 200)))
+				InjectMessage(bs, injector.FormatTarget(*targetPtr), injectionText, imgPath)
+				logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
 			}
 		}
 		return nil
 	}
-
-	if entry, ok := toolNotifs.get(replyTo.ID); ok {
-		target, err := injector.ParseTarget(entry.tmuxTarget)
+	if entry, ok := bs.ToolNotifs.Get(replyTo.ID); ok {
+		target, err := injector.ParseTarget(entry.TmuxTarget)
 		if err != nil || !injector.SessionExists(target) {
 			return c.Reply("❌ tmux session not found.")
 		}
-		switch entry.toolName {
+		switch entry.ToolName {
 		case "AskUserQuestion":
-			sendFeedback(entry.tmuxTarget)
-			if err := injectMessage(bot, entry.tmuxTarget, injectionText, imgPath); err != nil {
+			sendFeedback(entry.TmuxTarget)
+			if err := InjectMessage(bs, entry.TmuxTarget, injectionText, imgPath); err != nil {
 				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
 			}
-			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, entry.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
 			return nil
 		}
-		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.toolName, replyTo.ID, entry.tmuxTarget, isVoice, truncateStr(text, 200)))
-		recordPending(entry.tmuxTarget, c.Message().Chat.ID, c.Message().ID)
+		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.ToolName, replyTo.ID, entry.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
+		recordPending(bs, entry.TmuxTarget, c.Message().Chat.ID, c.Message().ID)
 		return nil
 	}
-
-	// General reply path
-	target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+	target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 	if err != nil {
 		return c.Reply("❌ No tmux session info found in the original message.")
 	}
-	if !checkSessionAlive(injector.FormatTarget(target), bot) {
+	if !checkSessionAlive(bs, injector.FormatTarget(target)) {
 		return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 	}
 	sendFeedback(injector.FormatTarget(target))
-	// Prepend quoted original message for context (group only)
 	if replyTo.Text != "" && (c.Chat().Type == "group" || c.Chat().Type == "supergroup") {
 		var lines []string
 		for _, line := range strings.Split(replyTo.Text, "\n") {
@@ -383,15 +361,16 @@ func processUserInput(c tele.Context, bot *tele.Bot, text string, isVoice bool, 
 		}
 		injectionText = strings.Join(lines, "\n") + "\n\n" + injectionText
 	}
-	if err := injectMessage(bot, injector.FormatTarget(target), injectionText, imgPath); err != nil {
+	if err := InjectMessage(bs, injector.FormatTarget(target), injectionText, imgPath); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
-	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, truncateStr(text, 200)))
+	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, helpers.TruncateStr(text, 200)))
 	return nil
 }
 
-// registerMessageHandlers registers OnText and OnVoice handlers
-func registerMessageHandlers(bot *tele.Bot) {
+// RegisterMessageHandlers registers OnText and OnVoice handlers.
+func RegisterMessageHandlers(bs *types.BotState) {
+	bot := bs.Bot
 	cfg, _ := config.LoadAppConfig()
 	voicePrefix := cfg.VoicePrefix
 
@@ -408,7 +387,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
 					c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@")
 				if isCmd {
-					_, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+					_, target, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 					if err != nil {
 						if err.Error() == "multiple sessions bound" {
 							return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
@@ -419,36 +398,36 @@ func registerMessageHandlers(bot *tele.Bot) {
 						return handlePermCommand(c, target)
 					}
 					if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
-						return handleCaptureCommand(c, target)
+						return handleCaptureCommand(bs, c, target)
 					}
 					return handleEscapeCommand(c, target)
 				}
 			}
 		} else {
 			if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
-				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
 				return handlePermCommand(c, target)
 			}
 			if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
-				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
-				return handleCaptureCommand(c, target)
+				return handleCaptureCommand(bs, c, target)
 			}
 			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
-			c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") {
-				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") {
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
 				return handleEscapeCommand(c, target)
 			}
 		}
-		return processUserInput(c, bot, c.Message().Text, false, voicePrefix)
+		return processUserInput(bs, c, bot, c.Message().Text, false, voicePrefix)
 	})
 
 	bot.Handle(tele.OnVoice, func(c tele.Context) error {
@@ -470,7 +449,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 				logger.Error("Group voice transcription failed: empty text")
 				return c.Reply("❌ Transcription produced empty text.")
 			}
-			return processUserInput(c, bot, text, true, voicePrefix)
+			return processUserInput(bs, c, bot, text, true, voicePrefix)
 		}
 		text, err := transcribeVoice(bot, c.Message().Voice.FileID)
 		if err != nil {
@@ -479,7 +458,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 		if text == "" {
 			return c.Reply("❌ Transcription produced empty text.")
 		}
-		return processUserInput(c, bot, text, true, voicePrefix)
+		return processUserInput(bs, c, bot, text, true, voicePrefix)
 	})
 
 	bot.Handle(tele.OnDocument, func(c tele.Context) error {
@@ -495,7 +474,7 @@ func registerMessageHandlers(bot *tele.Bot) {
 			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
 		}
 		caption := c.Message().Caption
-		return processUserInput(c, bot, caption, false, voicePrefix, localPath)
+		return processUserInput(bs, c, bot, caption, false, voicePrefix, localPath)
 	})
 
 	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
@@ -512,6 +491,6 @@ func registerMessageHandlers(bot *tele.Bot) {
 			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
 		}
 		caption := c.Message().Caption
-		return processUserInput(c, bot, caption, false, voicePrefix, localPath)
+		return processUserInput(bs, c, bot, caption, false, voicePrefix, localPath)
 	})
 }

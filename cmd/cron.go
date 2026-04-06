@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -210,7 +211,7 @@ func runCronList(cmd *cobra.Command, args []string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Jobs []cronJob `json:"jobs"`
+		Jobs []stores.CronJob `json:"jobs"`
 	}
 	json.Unmarshal(body, &result)
 	if len(result.Jobs) == 0 {
@@ -293,10 +294,10 @@ func runCronLog(cmd *cobra.Command, args []string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Jobs []cronJob `json:"jobs"`
+		Jobs []stores.CronJob `json:"jobs"`
 	}
 	json.Unmarshal(body, &result)
-	var job *cronJob
+	var job *stores.CronJob
 	for i, j := range result.Jobs {
 		if j.ID == idOrName || j.Name == idOrName || (len(j.ID) >= 8 && j.ID[:8] == idOrName) {
 			job = &result.Jobs[i]

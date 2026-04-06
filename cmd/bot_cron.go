@@ -12,12 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	tele "gopkg.in/telebot.v3"
 )
 
-func startCronLoop(ctx context.Context, bot *tele.Bot) {
+func startCronLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -25,21 +27,21 @@ func startCronLoop(ctx context.Context, bot *tele.Bot) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			checkAndRunCronJobs(bot)
+			checkAndRunCronJobs(bs)
 		}
 	}
 }
 
-func checkAndRunCronJobs(bot *tele.Bot) {
+func checkAndRunCronJobs(bs *BotState) {
 	now := time.Now()
-	for _, job := range cronJobs.all() {
+	for _, job := range bs.CronJobs.All() {
 		if shouldRunCronJob(job, now) {
-			go executeCronJob(job, bot, now)
+			go executeCronJob(job, bs, now)
 		}
 	}
 }
 
-func shouldRunCronJob(job *cronJob, now time.Time) bool {
+func shouldRunCronJob(job *stores.CronJob, now time.Time) bool {
 	if job.Paused {
 		return false
 	}
@@ -52,22 +54,22 @@ func shouldRunCronJob(job *cronJob, now time.Time) bool {
 	return matchesCronExpression(job.Schedule, now) && (job.LastRun.IsZero() || now.Sub(job.LastRun) > 55*time.Second)
 }
 
-func executeCronJob(job *cronJob, bot *tele.Bot, now time.Time) {
-	cronJobs.updateLastRun(job.ID, now)
+func executeCronJob(job *stores.CronJob, bs *BotState, now time.Time) {
+	bs.CronJobs.UpdateLastRun(job.ID, now)
 	logger.Info(fmt.Sprintf("Cron job executing: id=%s mode=%s schedule=%s", job.ID[:8], job.Mode, job.Schedule))
 	switch job.Mode {
 	case "print":
-		executePrintJob(job, bot)
+		executePrintJob(job, bs)
 	case "inject":
-		executeInjectJob(job, bot)
+		executeInjectJob(job, bs)
 	}
 	if job.Once {
-		cronJobs.remove(job.ID)
+		bs.CronJobs.Remove(job.ID)
 		logger.Info(fmt.Sprintf("Cron job auto-deleted (once): id=%s", job.ID[:8]))
 	}
 }
 
-func executePrintJob(job *cronJob, bot *tele.Bot) {
+func executePrintJob(job *stores.CronJob, bs *BotState) {
 	cfg, _ := config.LoadAppConfig()
 	claudeCmd := cfg.ClaudeCommand
 	var args []string
@@ -76,7 +78,7 @@ func executePrintJob(job *cronJob, bot *tele.Bot) {
 		args = append(args, "--max-turns", strconv.Itoa(job.MaxTurns))
 	}
 	if job.Fresh && job.SessionID != "" {
-		cronJobs.updateSessionID(job.ID, "")
+		bs.CronJobs.UpdateSessionID(job.ID, "")
 		job.SessionID = ""
 		logger.Info(fmt.Sprintf("Cron fresh mode: cleared session_id for id=%s", job.ID[:8]))
 	}
@@ -100,26 +102,26 @@ func executePrintJob(job *cronJob, bot *tele.Bot) {
 	c.Env = env
 	output, err := c.CombinedOutput()
 	if err != nil {
-		logger.Error(fmt.Sprintf("Cron print job failed: id=%s err=%v output=%s", job.ID[:8], err, truncateStr(string(output), 500)))
-		sendCronNotification(bot, fmt.Sprintf("%s\n\n❌ <b>Error:</b> %s", cronNotifyHeader(job), err.Error()), "")
+		logger.Error(fmt.Sprintf("Cron print job failed: id=%s err=%v output=%s", job.ID[:8], err, helpers.TruncateStr(string(output), 500)))
+		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Error:</b> %s", cronNotifyHeader(job), err.Error()), "")
 		return
 	}
 	var result string
 	if job.SessionID == "" {
 		sid, res := parsePrintJobOutput(output)
 		if sid != "" {
-			cronJobs.updateSessionID(job.ID, sid)
+			bs.CronJobs.UpdateSessionID(job.ID, sid)
 		}
 		result = res
 	} else {
 		result = strings.TrimSpace(string(output))
 	}
-	logger.Info(fmt.Sprintf("Cron print job result: id=%s result=%s", job.ID[:8], truncateStr(result, 200)))
+	logger.Info(fmt.Sprintf("Cron print job result: id=%s result=%s", job.ID[:8], helpers.TruncateStr(result, 200)))
 	if strings.HasPrefix(strings.TrimSpace(result), "HEARTBEAT_OK") {
 		logger.Info(fmt.Sprintf("Cron heartbeat OK: id=%s", job.ID[:8]))
 		return
 	}
-	sendCronNotification(bot, fmt.Sprintf("%s\n\n%s", cronNotifyHeader(job), result), "")
+	sendCronNotification(bs, fmt.Sprintf("%s\n\n%s", cronNotifyHeader(job), result), "")
 }
 
 func parsePrintJobOutput(output []byte) (sessionID, result string) {
@@ -143,14 +145,14 @@ func parsePrintJobOutput(output []byte) (sessionID, result string) {
 	return "", strings.TrimSpace(string(output))
 }
 
-func executeInjectJob(job *cronJob, bot *tele.Bot) {
+func executeInjectJob(job *stores.CronJob, bs *BotState) {
 	// Try agent name first, then tmux target fallback
-	var info *sessionInfo
+	var info *stores.SessionInfo
 	if job.AgentName != "" {
-		info = sessionState.findByName(job.AgentName)
+		info = bs.SessionState.FindByName(job.AgentName)
 	}
 	if info == nil && job.TmuxTarget != "" {
-		info = sessionState.findInfoByTarget(job.TmuxTarget)
+		info = bs.SessionState.FindInfoByTarget(job.TmuxTarget)
 	}
 	agentLabel := job.AgentName
 	if agentLabel == "" {
@@ -158,7 +160,7 @@ func executeInjectJob(job *cronJob, bot *tele.Bot) {
 	}
 	if info == nil {
 		logger.Info(fmt.Sprintf("Cron inject job: agent '%s' not online, sending TG notification", agentLabel))
-		sendCronNotification(bot, fmt.Sprintf("%s\n\n⚠️ Agent <b>%s</b> is not online.\nPrompt: %s", cronNotifyHeader(job), agentLabel, job.Prompt), job.TmuxTarget)
+		sendCronNotification(bs, fmt.Sprintf("%s\n\n⚠️ Agent <b>%s</b> is not online.\nPrompt: %s", cronNotifyHeader(job), agentLabel, job.Prompt), job.TmuxTarget)
 		return
 	}
 	injectText := job.Prompt
@@ -169,16 +171,16 @@ func executeInjectJob(job *cronJob, bot *tele.Bot) {
 		}
 		injectText = fmt.Sprintf("---\n⏰ Cron: %s\n---\n%s", headerName, job.Prompt)
 	}
-	if err := safeInjectText(bot, info.tmuxTarget, injectText); err != nil {
+	if err := safeInjectText(bs, info.TmuxTarget, injectText); err != nil {
 		logger.Error(fmt.Sprintf("Cron inject job: inject failed: %v", err))
-		sendCronNotification(bot, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.tmuxTarget)
+		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.TmuxTarget)
 		return
 	}
-	logger.Info(fmt.Sprintf("Cron inject job: injected to '%s' target=%s text=%s", agentLabel, info.tmuxTarget, truncateStr(job.Prompt, 200)))
-	sendCronNotification(bot, fmt.Sprintf("%s\n\n✅ Injected → %s\n\n%s", cronNotifyHeader(job), agentLabel, job.Prompt), info.tmuxTarget)
+	logger.Info(fmt.Sprintf("Cron inject job: injected to '%s' target=%s text=%s", agentLabel, info.TmuxTarget, helpers.TruncateStr(job.Prompt, 200)))
+	sendCronNotification(bs, fmt.Sprintf("%s\n\n✅ Injected → %s\n\n%s", cronNotifyHeader(job), agentLabel, job.Prompt), info.TmuxTarget)
 }
 
-func cronNotifyHeader(job *cronJob) string {
+func cronNotifyHeader(job *stores.CronJob) string {
 	icon := "🔔"
 	label := "Cron"
 	if job.NoHeader {
@@ -195,8 +197,8 @@ func cronNotifyHeader(job *cronJob) string {
 	return header
 }
 
-func sendCronNotification(bot *tele.Bot, text string, tmuxTarget string) {
-	chat, _, topicID := resolveChat(tmuxTarget)
+func sendCronNotification(bs *BotState, text string, tmuxTarget string) {
+	chat, _, topicID := resolveChat(bs, tmuxTarget)
 	if chat == nil {
 		return
 	}
@@ -205,19 +207,19 @@ func sendCronNotification(bot *tele.Bot, text string, tmuxTarget string) {
 	if topicID > 0 {
 		sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
 	}
-	chunks := splitBody(text, 3900)
+	chunks := helpers.SplitBody(text, 3900)
 	if len(chunks) <= 1 {
-		retrySend(bot, chat, text, sendOpts...)
+		helpers.RetrySend(bs.Bot, chat, text, sendOpts...)
 		return
 	}
 	firstText := chunks[0] + fmt.Sprintf("\n\n📄 1/%d", len(chunks))
-	kb := buildPageKeyboard(1, len(chunks))
+	kb := helpers.BuildPageKeyboard(1, len(chunks))
 	opts := append([]interface{}{kb}, sendOpts...)
-	sent, err := retrySend(bot, chat, firstText, opts...)
+	sent, err := helpers.RetrySend(bs.Bot, chat, firstText, opts...)
 	if err != nil {
 		return
 	}
-	pages.store(sent.ID, "", &pageEntry{chunks: chunks, chatID: chat.ID})
+	bs.Pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, ChatID: chat.ID})
 }
 
 func matchesCronExpression(expr string, t time.Time) bool {

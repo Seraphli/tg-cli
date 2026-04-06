@@ -1,14 +1,18 @@
-package cmd
+package handlers
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
+	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/stores"
+	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -18,25 +22,134 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// unbindMenuItems maps msgID to list of name-route keys for /bot_unbind inline menu
-var unbindMenuItems sync.Map // msgID (int) -> []string (name keys)
-
-// bindMenuItems maps msgID to bind menu context for /bot_bind inline menu
-var bindMenuItems sync.Map // msgID (int) -> bindMenuContext
-
-type bindMenuItem struct {
-	key   string // name or sessionID
-	label string
+// BindMenuItem describes a session entry for the bind selection menu.
+type BindMenuItem struct {
+	Key   string // name or sessionID
+	Label string
 }
 
-type bindMenuContext struct {
-	items   []bindMenuItem
-	chatID  int64
-	topicID int
+// BindMenuContext holds the context for an active bind selection menu.
+type BindMenuContext struct {
+	Items   []BindMenuItem
+	ChatID  int64
+	TopicID int
 }
 
-// registerTGHandlers registers all Telegram bot handlers
-func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
+var builtinTools = []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch", "MCP"}
+
+// buildToolsMenu builds an inline keyboard for tool notification selection.
+func buildToolsMenu(selected []string) *tele.ReplyMarkup {
+	availTools := builtinTools
+	menu := &tele.ReplyMarkup{}
+	selectedSet := make(map[string]bool)
+	for _, t := range selected {
+		selectedSet[t] = true
+	}
+	var rows []tele.Row
+	var pending []tele.Btn
+	for _, tool := range availTools {
+		label := "⬜ " + tool
+		if selectedSet[tool] {
+			label = "✅ " + tool
+		}
+		pending = append(pending, menu.Data(label, "tools_toggle", tool))
+		if len(pending) == 2 {
+			rows = append(rows, menu.Row(pending...))
+			pending = nil
+		}
+	}
+	if len(pending) > 0 {
+		rows = append(rows, menu.Row(pending...))
+	}
+	// Add All toggle button on the last row
+	allSelected := len(selected) >= len(availTools)
+	if allSelected {
+		for _, tool := range availTools {
+			if !selectedSet[tool] {
+				allSelected = false
+				break
+			}
+		}
+	}
+	allLabel := "⬜ All"
+	if allSelected {
+		allLabel = "✅ All"
+	}
+	rows = append(rows, menu.Row(menu.Data(allLabel, "tools_toggle_all")))
+	menu.Inline(rows...)
+	return menu
+}
+
+// ScanCustomCommands scans ~/.claude/commands/ for custom slash commands.
+func ScanCustomCommands() map[string]stores.CustomCmd {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	commandsDir := filepath.Join(home, ".claude", "commands")
+	result := make(map[string]stores.CustomCmd)
+	filepath.Walk(commandsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		rel, _ := filepath.Rel(commandsDir, path)
+		name := strings.TrimSuffix(rel, ".md")
+		// Build CC command name: dir/file → dir:file
+		parts := strings.Split(name, string(filepath.Separator))
+		ccName := strings.Join(parts, ":")
+		// Build TG command name: replace : and - with _
+		tgName := strings.ReplaceAll(ccName, ":", "_")
+		tgName = strings.ReplaceAll(tgName, "-", "_")
+		// Read description: parse YAML frontmatter if present, else use first line
+		desc := "Custom command: /" + ccName
+		f, err := os.Open(path)
+		if err == nil {
+			scanner := bufio.NewScanner(f)
+			if scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "---" {
+					// YAML frontmatter: scan until closing --- and extract description
+					for scanner.Scan() {
+						fmLine := strings.TrimSpace(scanner.Text())
+						if fmLine == "---" {
+							break
+						}
+						if strings.HasPrefix(fmLine, "description:") {
+							desc = helpers.TruncateStr(strings.TrimSpace(strings.TrimPrefix(fmLine, "description:")), 200)
+						}
+					}
+				} else {
+					line = strings.TrimLeft(line, "# ")
+					if len(line) > 0 {
+						desc = helpers.TruncateStr(line, 200)
+					}
+				}
+			}
+			f.Close()
+		}
+		result[tgName] = stores.CustomCmd{Desc: desc, CCName: ccName}
+		return nil
+	})
+	return result
+}
+
+// resolveReplyTargetFromText resolves a tmux target from reply-to message text.
+func resolveReplyTargetFromText(bs *types.BotState, text string) (injector.TmuxTarget, error) {
+	targetPtr, err := helpers.ExtractTmuxTargetFromText(text)
+	if err != nil || targetPtr == nil {
+		return injector.TmuxTarget{}, fmt.Errorf("no target found")
+	}
+	tmuxStr := injector.FormatTarget(*targetPtr)
+	if !checkSessionAlive(bs, tmuxStr) {
+		return injector.TmuxTarget{}, fmt.Errorf("session not found")
+	}
+	return *targetPtr, nil
+}
+
+// Register registers all Telegram bot handlers.
+func Register(bs *types.BotState) {
+	bot := bs.Bot
+	_ = bs.Creds
 	// Log every incoming Telegram message and callback for debugging
 	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
@@ -48,7 +161,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 				if msg.Voice != nil {
 					msgType = "voice"
 				}
-				preview := truncateStr(c.Text(), 50)
+				preview := helpers.TruncateStr(c.Text(), 50)
 				replyInfo := ""
 				if msg.ReplyTo != nil {
 					replyInfo = fmt.Sprintf(" reply_to=%d", msg.ReplyTo.ID)
@@ -79,21 +192,21 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return nil
 		}
 		logger.Info(fmt.Sprintf("Chat migration completed: %d → %d", from, to))
-		retrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to), tele.ModeHTML)
+		helpers.RetrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to), tele.ModeHTML)
 		return nil
 	})
 	// Build TG→CC name mapping
 	ccCommandMap := make(map[string]string)
-	for tgName := range ccBuiltinCommands {
+	for tgName := range stores.CCBuiltinCommands {
 		ccName := tgName
 		if tgName == "terminal_setup" {
 			ccName = "terminal-setup"
 		}
 		ccCommandMap[tgName] = ccName
 	}
-	customCmds := scanCustomCommands()
+	customCmds := ScanCustomCommands()
 	for tgName, cmd := range customCmds {
-		ccCommandMap[tgName] = cmd.ccName
+		ccCommandMap[tgName] = cmd.CCName
 	}
 
 	// Register CC command handlers
@@ -102,7 +215,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		bot.Handle("/"+tg, func(c tele.Context) error {
 			// Try reply path first when ReplyTo exists and contains target info
 			if c.Message().ReplyTo != nil {
-				target, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+				target, err := resolveReplyTargetFromText(bs, c.Message().ReplyTo.Text)
 				if err == nil {
 					text := "/" + cc
 					if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
@@ -110,41 +223,41 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					}
 					tmuxStr := injector.FormatTarget(target)
 					// Check for pending AskUserQuestion
-					if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-						uuid, uuidOk := pendingFiles.get(msgID)
-						if uuidOk && !handleStalePending(msgID, uuid, bot) {
-							path := filepath.Join(pendingDir(), uuid+".json")
-							pf, pfErr := readPendingFile(path)
+					if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
+						uuid, uuidOk := bs.PendingFiles.Get(msgID)
+						if uuidOk && !handleStalePending(bs, msgID, uuid) {
+							path := filepath.Join(helpers.PendingDir(), uuid+".json")
+							pf, pfErr := helpers.ReadPendingFile(path)
 							if pfErr == nil {
 								answers := make(map[string]string)
-								if len(entry.questions) > 0 {
-									answers[entry.questions[0].questionText] = text
+								if len(entry.Questions) > 0 {
+									answers[entry.Questions[0].QuestionText] = text
 								}
-								ccOutput := buildAskCCOutput(pf.Payload, answers)
-								if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
+								ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
+								if werr := helpers.WritePendingAnswer(uuid, ccOutput); werr != nil {
 									logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
 								} else {
-									toolNotifs.markResolved(msgID)
-									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-									retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+									bs.ToolNotifs.MarkResolved(msgID)
+									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
+									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
+									helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 								}
 							}
 						}
-						recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 						return nil
 					}
 					if err := injector.InjectText(target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 					}
-					recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 					return nil
 				}
 				// ReplyTo exists but no target found (e.g. topic anchor) — fall through to group path
 			}
 			// Group path
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-				tmuxStr, target, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+				tmuxStr, target, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 				if err != nil {
 					if err.Error() == "no targets bound" {
 						return c.Reply("💡 Please reply to a notification message to target a session.")
@@ -159,35 +272,35 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					text += " " + payload
 				}
 				// Check for pending AskUserQuestion
-				if msgID, entry, ok := toolNotifs.findByTmuxTarget(tmuxStr); ok {
-					uuid, uuidOk := pendingFiles.get(msgID)
-					if uuidOk && !handleStalePending(msgID, uuid, bot) {
-						path := filepath.Join(pendingDir(), uuid+".json")
-						pf, pfErr := readPendingFile(path)
+				if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
+					uuid, uuidOk := bs.PendingFiles.Get(msgID)
+					if uuidOk && !handleStalePending(bs, msgID, uuid) {
+						path := filepath.Join(helpers.PendingDir(), uuid+".json")
+						pf, pfErr := helpers.ReadPendingFile(path)
 						if pfErr == nil {
 							answers := make(map[string]string)
-							if len(entry.questions) > 0 {
-								answers[entry.questions[0].questionText] = text
+							if len(entry.Questions) > 0 {
+								answers[entry.Questions[0].QuestionText] = text
 							}
-							ccOutput := buildAskCCOutput(pf.Payload, answers)
-							if werr := writePendingAnswer(uuid, ccOutput); werr != nil {
+							ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
+							if werr := helpers.WritePendingAnswer(uuid, ccOutput); werr != nil {
 								logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
 							} else {
-								toolNotifs.markResolved(msgID)
-								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, truncateStr(text, 200)))
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.chatID}}
-								retryEdit(bot, editMsg, entry.msgText, buildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+								bs.ToolNotifs.MarkResolved(msgID)
+								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
+								helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 							}
 						}
 					}
-					recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 					return nil
 				}
 				if err := injector.InjectText(target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
-				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, truncateStr(text, 200)))
-				recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+				recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 				return nil
 			}
 			return c.Reply("💡 Please reply to a notification message to target a session.")
@@ -200,7 +313,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		var target injector.TmuxTarget
 		var tmuxStr string
 		if c.Message().ReplyTo != nil {
-			t, err := resolveReplyTarget(c.Message().ReplyTo.Text)
+			t, err := resolveReplyTargetFromText(bs, c.Message().ReplyTo.Text)
 			if err != nil {
 				if err.Error() == "no target found" {
 					return c.Reply("❌ No tmux session info found in the original message.")
@@ -210,7 +323,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			target = t
 			tmuxStr = injector.FormatTarget(t)
 		} else if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-			ts, t, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+			ts, t, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 			if err != nil {
 				if err.Error() == "no targets bound" {
 					return c.Reply("💡 Please reply to a notification message to target a session.")
@@ -231,15 +344,15 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if err := injector.InjectText(target, "/resume "+payload); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
-			recordPending(tmuxStr, c.Message().Chat.ID, c.Message().ID)
+			recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 			return nil
 		}
 		// Without payload: show session picker
 		var cwd string
-		info := sessionState.findInfoByTarget(tmuxStr)
+		info := bs.SessionState.FindInfoByTarget(tmuxStr)
 		logger.Debug(fmt.Sprintf("/resume: findInfoByTarget tmuxStr=%s found=%v", tmuxStr, info != nil))
-		if info != nil && info.cwd != "" {
-			cwd = info.cwd
+		if info != nil && info.CWD != "" {
+			cwd = info.CWD
 		} else {
 			// Fallback: get CWD directly from tmux pane
 			out, err := exec.Command("tmux", "display-message", "-p", "-t", tmuxStr, "#{pane_current_path}").Output()
@@ -251,13 +364,13 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if cwd == "" {
 			return c.Reply("❌ No working directory info available for this session.")
 		}
-		currentSID, _ := sessionState.findByTarget(tmuxStr)
-		var sessions []sessionListEntry
+		currentSID, _ := bs.SessionState.FindByTarget(tmuxStr)
+		var sessions []helpers.SessionListEntry
 		var err error
-		if info != nil && info.projectDir != "" {
-			sessions, err = listProjectSessionsByDir(info.projectDir, 8, currentSID)
+		if info != nil && info.ProjectDir != "" {
+			sessions, err = helpers.ListProjectSessionsByDir(info.ProjectDir, 8, currentSID)
 		} else {
-			sessions, err = listProjectSessions(cwd, 8, currentSID)
+			sessions, err = helpers.ListProjectSessions(cwd, 8, currentSID)
 		}
 		if err != nil || len(sessions) == 0 {
 			return c.Reply("📂 No previous sessions found for this project.")
@@ -265,7 +378,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if len(sessions) == 0 {
 			return c.Reply("📂 No other sessions found for this project.")
 		}
-		kb := buildResumeKeyboard(sessions)
+		kb := helpers.BuildResumeKeyboard(sessions)
 		var lines []string
 		lines = append(lines, "📟 "+notify.FormatPaneID(tmuxStr))
 		lines = append(lines, "")
@@ -274,10 +387,10 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			if s.SummarySource == "user" {
 				prefix = "👤"
 			}
-			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, markdown.EscapeHTML(truncateStr(s.Summary, 500)), relativeTime(s.Modified)))
+			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, markdown.EscapeHTML(helpers.TruncateStr(s.Summary, 500)), helpers.RelativeTime(s.Modified)))
 		}
 		text := strings.Join(lines, "\n")
-		_, err = retrySend(bot, c.Chat(), text, kb, tele.ModeHTML)
+		_, err = helpers.RetrySend(bot, c.Chat(), text, kb, tele.ModeHTML)
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
 		}
@@ -314,7 +427,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
 		creds, _ := config.LoadCredentials()
-		sessions := sessionState.all()
+		sessions := bs.SessionState.All()
 		var sections []string
 		// Section 1: Agent routes (NameRouteMap)
 		if len(creds.NameRouteMap) > 0 {
@@ -336,8 +449,8 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 					}
 				}
 				paneID := ""
-				if info := sessionState.findByName(name); info != nil {
-					paneID = " (" + notify.FormatPaneID(info.tmuxTarget) + ")"
+				if info := bs.SessionState.FindByName(name); info != nil {
+					paneID = " (" + notify.FormatPaneID(info.TmuxTarget) + ")"
 				}
 				lines = append(lines, fmt.Sprintf("  %s%s → %s%s", name, paneID, chatName, topicStr))
 			}
@@ -346,11 +459,11 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		// Section 2: Unnamed sessions
 		var unnamedLines []string
 		for _, info := range sessions {
-			if info.name != "" {
+			if info.Name != "" {
 				continue
 			}
-			label := notify.FormatPaneID(info.tmuxTarget)
-			unnamedLines = append(unnamedLines, fmt.Sprintf("  %s → %s", label, notify.CompressPath(info.cwd)))
+			label := notify.FormatPaneID(info.TmuxTarget)
+			unnamedLines = append(unnamedLines, fmt.Sprintf("  %s → %s", label, notify.CompressPath(info.CWD)))
 		}
 		if len(unnamedLines) > 0 {
 			sections = append(sections, "📟 Unnamed sessions:\n"+strings.Join(unnamedLines, "\n"))
@@ -391,22 +504,22 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 
 		// Mode 2: reply to notification — bind session from replied message
 		if c.Message().ReplyTo != nil {
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-			if err != nil {
+			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
-			tmuxStr := injector.FormatTarget(*target)
-			sid, found := sessionState.findByTarget(tmuxStr)
+			tmuxStr := injector.FormatTarget(*targetPtr)
+			sid, found := bs.SessionState.FindByTarget(tmuxStr)
 			if !found {
 				return c.Reply("❌ Session not found for that pane.")
 			}
-			info := sessionState.findInfoByTarget(tmuxStr)
+			info := bs.SessionState.FindInfoByTarget(tmuxStr)
 			// Use name if available, otherwise session ID
 			key := sid
 			keyLabel := fmt.Sprintf("session:%s", sid[:8])
-			if info != nil && info.name != "" {
-				key = info.name
-				keyLabel = info.name
+			if info != nil && info.Name != "" {
+				key = info.Name
+				keyLabel = info.Name
 			}
 			creds, err := config.LoadCredentials()
 			if err != nil {
@@ -425,35 +538,35 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 
 		// Mode 3: no args, no reply — show session list buttons
-		sessions := sessionState.all()
+		sessions := bs.SessionState.All()
 		if len(sessions) == 0 {
 			return c.Reply("No active sessions to bind.")
 		}
 		sel := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		var lines []string
-		var items []bindMenuItem
+		var items []BindMenuItem
 		idx := 1
 		for sid, info := range sessions {
 			key := sid
 			label := fmt.Sprintf("session:%s", sid[:8])
-			if info.name != "" {
-				key = info.name
-				label = info.name
+			if info.Name != "" {
+				key = info.Name
+				label = info.Name
 			}
 			cwdStr := ""
-			if info.cwd != "" {
-				cwdStr = " " + notify.CompressPath(info.cwd)
+			if info.CWD != "" {
+				cwdStr = " " + notify.CompressPath(info.CWD)
 			}
 			lines = append(lines, fmt.Sprintf("  %d. %s%s", idx, label, cwdStr))
-			items = append(items, bindMenuItem{key: key, label: label})
+			items = append(items, BindMenuItem{Key: key, Label: label})
 			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🔗 %d: %s", idx, label), "bind_select", fmt.Sprintf("%d", idx))))
 			idx++
 		}
 		sel.Inline(rows...)
 		sent, err := bot.Reply(c.Message(), fmt.Sprintf("Select a session to bind to this chat:\n%s", strings.Join(lines, "\n")), sel)
 		if err == nil {
-			bindMenuItems.Store(sent.ID, bindMenuContext{items: items, chatID: chatID, topicID: topicID})
+			bs.BindMenuItems.Store(sent.ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
 		}
 		return err
 	})
@@ -466,26 +579,26 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		}
 		// Mode 1: reply to notification — unbind session from replied message
 		if c.Message().ReplyTo != nil {
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-			if err != nil {
+			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
-			tmuxStr := injector.FormatTarget(*target)
-			sid, found := sessionState.findByTarget(tmuxStr)
+			tmuxStr := injector.FormatTarget(*targetPtr)
+			sid, found := bs.SessionState.FindByTarget(tmuxStr)
 			if !found {
 				return c.Reply("❌ Session not found for that pane.")
 			}
-			info := sessionState.findInfoByTarget(tmuxStr)
+			info := bs.SessionState.FindInfoByTarget(tmuxStr)
 			creds, err := config.LoadCredentials()
 			if err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 			}
 			// Try unbind by name first, then by session ID
 			var unboundKey string
-			if info != nil && info.name != "" {
-				if _, ok := creds.NameRouteMap[info.name]; ok {
-					delete(creds.NameRouteMap, info.name)
-					unboundKey = info.name
+			if info != nil && info.Name != "" {
+				if _, ok := creds.NameRouteMap[info.Name]; ok {
+					delete(creds.NameRouteMap, info.Name)
+					unboundKey = info.Name
 				}
 			}
 			if unboundKey == "" {
@@ -546,10 +659,11 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		sel.Inline(rows...)
 		sent, err := bot.Reply(c.Message(), "Select a route to unbind:\n"+strings.Join(lines, "\n"), sel)
 		if err == nil {
-			unbindMenuItems.Store(sent.ID, keys)
+			bs.UnbindMenuItems.Store(sent.ID, keys)
 		}
 		return err
 	})
+
 	bot.Handle("/bot_name", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
@@ -563,17 +677,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		// Resolve session: from replied message or single active session
 		var sessionID string
 		if c.Message().ReplyTo != nil {
-			target, err := extractTmuxTarget(c.Message().ReplyTo.Text)
-			if err != nil {
+			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
-			sid, found := sessionState.findByTarget(injector.FormatTarget(*target))
+			sid, found := bs.SessionState.FindByTarget(injector.FormatTarget(*targetPtr))
 			if !found {
 				return c.Reply("❌ Session not found for that pane.")
 			}
 			sessionID = sid
 		} else {
-			sessions := sessionState.all()
+			sessions := bs.SessionState.All()
 			if len(sessions) == 0 {
 				return c.Reply("❌ No active sessions found.")
 			}
@@ -584,7 +698,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 				sessionID = sid
 			}
 		}
-		ok, errMsg := sessionState.setName(sessionID, name)
+		ok, errMsg := bs.SessionState.SetName(sessionID, name)
 		if !ok {
 			return c.Reply(fmt.Sprintf("❌ Failed to set name: %s", errMsg))
 		}
@@ -598,7 +712,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
 			return c.Reply("❌ Not paired.")
 		}
-		sessions := sessionState.all()
+		sessions := bs.SessionState.All()
 		if len(sessions) == 0 {
 			return c.Reply("No active sessions.")
 		}
@@ -606,18 +720,18 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		var rows []tele.Row
 		var lines []string
 		for sid, info := range sessions {
-			label := notify.FormatPaneID(info.tmuxTarget)
+			label := notify.FormatPaneID(info.TmuxTarget)
 			rawNameTag := ""
 			escapedNameTag := ""
-			if info.name != "" {
-				rawNameTag = " [" + info.name + "]"
-				escapedNameTag = " [" + markdown.EscapeHTML(info.name) + "]"
+			if info.Name != "" {
+				rawNameTag = " [" + info.Name + "]"
+				escapedNameTag = " [" + markdown.EscapeHTML(info.Name) + "]"
 			}
-			lines = append(lines, fmt.Sprintf("  %s%s → %s", markdown.EscapeHTML(label), escapedNameTag, markdown.EscapeHTML(notify.CompressPath(info.cwd))))
+			lines = append(lines, fmt.Sprintf("  %s%s → %s", markdown.EscapeHTML(label), escapedNameTag, markdown.EscapeHTML(notify.CompressPath(info.CWD))))
 			rows = append(rows, sel.Row(sel.Data(label+rawNameTag, "names", sid)))
 		}
 		sel.Inline(rows...)
-		_, err := retrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel, tele.ModeHTML)
+		_, err := helpers.RetrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel, tele.ModeHTML)
 		return err
 	})
 
@@ -677,8 +791,8 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			return c.Reply("❌ Not paired.")
 		}
 		args := strings.TrimSpace(c.Message().Payload)
-		sessionName, workDir, command := parseBotNewArgs(args)
-		return startLaunchFlow(c, sessionName, workDir, command)
+		sessionName, workDir, command := ParseBotNewArgs(args)
+		return StartLaunchFlow(bs, c, sessionName, workDir, command)
 	})
 
 	bot.Handle("/bot_usage", func(c tele.Context) error {
@@ -687,7 +801,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("❌ Not paired.")
 		}
-		return handleUsageCommand(c, bot)
+		return handleUsageCommand(bs, c)
 	})
 
 	checkUpdateHandler := func(c tele.Context) error {
@@ -699,13 +813,13 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if c.Chat().Type != tele.ChatPrivate {
 			chatIDInt := c.Chat().ID
 			found := false
-			for _, info := range sessionState.all() {
-				if info.name == "" {
+			for _, info := range bs.SessionState.All() {
+				if info.Name == "" {
 					continue
 				}
 				creds, _ := config.LoadCredentials()
-				if route, ok := creds.NameRouteMap[info.name]; ok && route.ChatID == chatIDInt {
-					if checkSessionVersionByTarget(bot, info.tmuxTarget) {
+				if route, ok := creds.NameRouteMap[info.Name]; ok && route.ChatID == chatIDInt {
+					if checkSessionVersionByTarget(bs, info.TmuxTarget) {
 						found = true
 					}
 				}
@@ -715,7 +829,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			}
 			return nil
 		}
-		count := checkAllSessionVersions(bot)
+		count := checkAllSessionVersions(bs)
 		if count == 0 {
 			return c.Reply("✅ All sessions are up to date.")
 		}
@@ -742,21 +856,21 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return c.Reply("❌ Merge mode is only available in groups.")
 		}
-		key := mergeKey(c.Chat().ID)
+		key := stores.MergeKey(c.Chat().ID)
 		// Force cancel: /bot_merge cancel
 		if strings.TrimSpace(c.Message().Payload) == "cancel" {
-			buf, _ := mergeBuffers.finish(key)
+			buf, _ := bs.MergeBuffers.Finish(key)
 			logger.Info(fmt.Sprintf("Merge force cancelled: chat=%d key=%s", c.Chat().ID, key))
 			if buf != nil && buf.NotifyMsgID != 0 {
 				editMsg := &tele.Message{ID: buf.NotifyMsgID, Chat: &tele.Chat{ID: buf.ChatID}}
-				retryEdit(bot, editMsg, buildMergeNotifyText("❌ Cancelled", buf.Items), tele.ModeHTML)
+				helpers.RetryEdit(bot, editMsg, BuildMergeNotifyText("❌ Cancelled", buf.Items), tele.ModeHTML)
 			}
 			return c.Reply("📎 Merge mode cancelled.")
 		}
-		if mergeBuffers.get(key) != nil {
+		if bs.MergeBuffers.Get(key) != nil {
 			return c.Reply("⚠️ Merge mode already active. Send messages, then click Submit.")
 		}
-		tmuxStr, _, err := resolveGroupTarget(c.Chat().ID, c.Message().ThreadID)
+		tmuxStr, _, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 		if err != nil {
 			if err.Error() == "multiple sessions bound" {
 				return c.Reply("❌ Multiple sessions bound. Reply to a specific notification.")
@@ -767,17 +881,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		btnSubmit := menu.Data("📤 Submit", "merge_submit")
 		btnCancel := menu.Data("❌ Cancel", "merge_cancel")
 		menu.Inline(menu.Row(btnSubmit, btnCancel))
-		sent, err := bot.Reply(c.Message(), buildMergeNotifyText("📝 Collecting (0 messages)", nil), menu, tele.ModeHTML)
+		sent, err := bot.Reply(c.Message(), BuildMergeNotifyText("📝 Collecting (0 messages)", nil), menu, tele.ModeHTML)
 		if err != nil {
 			return err
 		}
-		mergeBuffers.start(key, c.Chat().ID, tmuxStr, sent.ID)
+		bs.MergeBuffers.Start(key, c.Chat().ID, tmuxStr, sent.ID)
 		logger.Info(fmt.Sprintf("Merge started: chat=%d target=%s key=%s notify_msg=%d", c.Chat().ID, tmuxStr, key, sent.ID))
 		return nil
 	})
 
 	bot.Handle("/bot_cron", func(c tele.Context) error {
-		jobs := cronJobs.all()
+		jobs := bs.CronJobs.All()
 		if len(jobs) == 0 {
 			return c.Reply("📋 No cron jobs configured.")
 		}
@@ -800,7 +914,7 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			}
 			lastRunStr := "never"
 			if !j.LastRun.IsZero() {
-				lastRunStr = relativeTime(j.LastRun)
+				lastRunStr = helpers.RelativeTime(j.LastRun)
 			}
 			nameStr := ""
 			if j.Name != "" {
@@ -815,17 +929,17 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 			rows = append(rows, markup.Row(markup.Data(btnLabel, "cron_delete", j.ID)))
 		}
 		fullText := text.String()
-		chunks := splitBody(fullText, 3900)
+		chunks := helpers.SplitBody(fullText, 3900)
 		if len(chunks) <= 1 {
 			markup.Inline(rows...)
 			return c.Reply(fullText, markup, tele.ModeHTML)
 		}
-		kb := buildPageKeyboardWithExtra(1, len(chunks), rows)
-		sent, err := retrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
+		kb := helpers.BuildPageKeyboardWithExtra(1, len(chunks), rows)
+		sent, err := helpers.RetrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
 		if err != nil {
 			return err
 		}
-		pages.store(sent.ID, "", &pageEntry{chunks: chunks, permRows: rows, chatID: c.Chat().ID})
+		bs.Pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, PermRows: rows, ChatID: c.Chat().ID})
 		return nil
 	})
 
@@ -852,51 +966,6 @@ func registerTGHandlers(bot *tele.Bot, creds *config.Credentials) {
 		return c.Reply("📬 No mailbox group bound. Send /bot_mailbox in a group to bind it.")
 	})
 
-	registerMessageHandlers(bot)
-	registerCallbackHandlers(bot)
-}
-
-var builtinTools = []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch", "MCP"}
-
-// buildToolsMenu builds an inline keyboard for tool notification selection.
-func buildToolsMenu(selected []string) *tele.ReplyMarkup {
-	availTools := builtinTools
-	menu := &tele.ReplyMarkup{}
-	selectedSet := make(map[string]bool)
-	for _, t := range selected {
-		selectedSet[t] = true
-	}
-	var rows []tele.Row
-	var pending []tele.Btn
-	for _, tool := range availTools {
-		label := "⬜ " + tool
-		if selectedSet[tool] {
-			label = "✅ " + tool
-		}
-		pending = append(pending, menu.Data(label, "tools_toggle", tool))
-		if len(pending) == 2 {
-			rows = append(rows, menu.Row(pending...))
-			pending = nil
-		}
-	}
-	if len(pending) > 0 {
-		rows = append(rows, menu.Row(pending...))
-	}
-	// Add All toggle button on the last row
-	allSelected := len(selected) >= len(availTools)
-	if allSelected {
-		for _, tool := range availTools {
-			if !selectedSet[tool] {
-				allSelected = false
-				break
-			}
-		}
-	}
-	allLabel := "⬜ All"
-	if allSelected {
-		allLabel = "✅ All"
-	}
-	rows = append(rows, menu.Row(menu.Data(allLabel, "tools_toggle_all")))
-	menu.Inline(rows...)
-	return menu
+	RegisterMessageHandlers(bs)
+	RegisterCallbackHandlers(bs)
 }

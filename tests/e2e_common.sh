@@ -33,7 +33,11 @@ fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; exit 1; }
 # Usage: pane_log "label"
 pane_log() {
   local label="$1"
-  local target="${2:-$E2E_PANE}"
+  local target="${2:-${E2E_PANE:-}}"
+  if [ -z "$target" ]; then
+    echo "=== PANE: $label === (no pane)" >> "$LOG_FILE"
+    return
+  fi
   local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$target" | jq -sRr @uri)"
   local capture
   capture=$(curl -s "$api_url" | jq -r '.content // "(empty)"' 2>/dev/null || echo "(capture failed)")
@@ -207,8 +211,9 @@ ensure_credentials() {
 start_bot() {
   > "$LOG_FILE"
   > "$TYPING_LOG_FILE"
-  # Clean stale pending files from previous runs
+  # Clean stale state from previous runs
   rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
+  rm -f "$TEST_CONFIG_DIR/inject-queue.json" "$TEST_CONFIG_DIR/merge-buffers.json" "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
   $TMUX_TEST send-keys -t "$BOT_SESSION" \
     "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1 | tee -a $LOG_FILE" Enter

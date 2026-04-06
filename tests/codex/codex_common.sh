@@ -4,6 +4,8 @@ CODEX_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CODEX_COMMON_DIR}/../e2e_common.sh"
 
 start_codex() {
+  # Clean stale session state so bot doesn't confuse Codex pane with prior CC session
+  rm -f "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$E2E_SESSION"
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}')

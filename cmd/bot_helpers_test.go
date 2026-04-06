@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Seraphli/tg-cli/cmd/helpers"
 )
 
 // TestScanCustomCommandsFrontmatter tests the YAML frontmatter parsing logic
@@ -31,13 +33,13 @@ func TestScanCustomCommandsFrontmatter(t *testing.T) {
 						break
 					}
 					if strings.HasPrefix(fmLine, "description:") {
-						desc = truncateStr(strings.TrimSpace(strings.TrimPrefix(fmLine, "description:")), 200)
+						desc = helpers.TruncateStr(strings.TrimSpace(strings.TrimPrefix(fmLine, "description:")), 200)
 					}
 				}
 			} else {
 				line = strings.TrimLeft(line, "# ")
 				if len(line) > 0 {
-					desc = truncateStr(line, 200)
+					desc = helpers.TruncateStr(line, 200)
 				}
 			}
 		}

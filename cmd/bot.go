@@ -16,6 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/api"
+	"github.com/Seraphli/tg-cli/cmd/handlers"
+	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/hooks"
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -26,9 +31,7 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-var versionNotified sync.Map // tmuxTarget → "current→latest"
-
-func startTypingLoop(ctx context.Context, bot *tele.Bot) {
+func startTypingLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	var cancelPrev context.CancelFunc
@@ -51,24 +54,24 @@ func startTypingLoop(ctx context.Context, bot *tele.Bot) {
 				continue
 			}
 			var sentChats sync.Map
-			for _, info := range sessionState.all() {
-				go func(tickCtx context.Context, info sessionInfo) {
-					title := getPaneTitle(info.tmuxTarget)
-					paneRunning := isSessionRunning(info.tmuxTarget)
+			for _, info := range bs.SessionState.All() {
+				go func(tickCtx context.Context, info stores.SessionInfo) {
+					title := helpers.GetPaneTitle(info.TmuxTarget)
+					paneRunning := isSessionRunning(bs, info.TmuxTarget)
 					if !paneRunning {
-						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.tmuxTarget, title)
-						if injectQueue.hasItems(info.tmuxTarget) {
-							go flushInjectQueue(bot, info.tmuxTarget)
+						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
+						if bs.InjectQueue.HasItems(info.TmuxTarget) {
+							go flushInjectQueue(bs, info.TmuxTarget)
 						}
 						return
 					}
 					// Check if this tick was cancelled (next tick arrived)
 					if tickCtx.Err() != nil {
-						typingLog("tick: target=%s title=%q paneRunning=true cancelled=true", info.tmuxTarget, title)
+						typingLog("tick: target=%s title=%q paneRunning=true cancelled=true", info.TmuxTarget, title)
 						return
 					}
-					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.tmuxTarget, title)
-					key := sendTypingForTarget(bot, info, &creds, nil)
+					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.TmuxTarget, title)
+					key := sendTypingForTarget(bs.Bot, info, &creds, nil)
 					if key != 0 {
 						sentChats.Store(key, true)
 					}
@@ -169,6 +172,27 @@ func runBot(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Failed to create bot: %v\n", err)
 		os.Exit(1)
 	}
+	configDir := config.GetConfigDir()
+	// Create BotState with all stores
+	bs := &BotState{
+		Bot:             bot,
+		Creds:           &creds,
+		Pages:           stores.NewPageCacheStore(),
+		PendingPerms:    stores.NewPendingPermStore(),
+		ToolNotifs:      stores.NewToolNotifyStore(),
+		PendingFiles:    stores.NewPendingFileStore(),
+		SessionState:    stores.NewSessionStateStore(configDir),
+		SessionCounts:   stores.NewSessionCountStore(),
+		MergeBuffers:    stores.NewMergeBufferStore(configDir),
+		InjectQueue:     stores.NewInjectQueueStore(configDir),
+		InjectConfirm:   stores.NewInjectConfirmStore(),
+		CronJobs:        stores.NewCronJobStore(configDir),
+		ReactionTracker: stores.NewReactionTrackerStore(),
+		HookRunning:     stores.NewHookRunningStateStore(),
+		StopCooldown:    stores.NewStopCooldownStore(),
+		SessionWatch:    stores.NewSessionWatchStore(),
+	}
+	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	// Build command list for Telegram menu
 	var commands []tele.Command
 	// Bot's own commands
@@ -203,17 +227,17 @@ func runBot(cmd *cobra.Command, args []string) {
 		tele.Command{Text: "check_update", Description: "Check for CC version updates"},
 	)
 	// CC built-in commands
-	for name, desc := range ccBuiltinCommands {
+	for name, desc := range stores.CCBuiltinCommands {
 		commands = append(commands, tele.Command{Text: name, Description: desc})
 	}
 	// CC custom commands
-	customCmds := scanCustomCommands()
+	customCmds := handlers.ScanCustomCommands()
 	for name, cmd := range customCmds {
-		commands = append(commands, tele.Command{Text: name, Description: cmd.desc})
+		commands = append(commands, tele.Command{Text: name, Description: cmd.Desc})
 	}
 	// Register known slash commands for markdown renderer
 	cmds := make(map[string]bool)
-	for k := range ccBuiltinCommands {
+	for k := range stores.CCBuiltinCommands {
 		cmds[k] = true
 	}
 	for c := range customCmds {
@@ -222,22 +246,30 @@ func runBot(cmd *cobra.Command, args []string) {
 	markdown.SlashCommands = cmds
 	bot.SetCommands(commands)
 	// Register all Telegram handlers
-	registerTGHandlers(bot, &creds)
+	handlers.Register(bs)
 	// Scan pending directory to rebuild in-memory state after restart
-	scanPendingDir(bot, &creds)
+	hookCB := hooks.Callbacks{
+		ResolveChat:              resolveChat,
+		ProcessTranscriptUpdates: processTranscriptUpdates,
+		SendEventNotification:    sendEventNotification,
+		TypingLog:                typingLog,
+		FlushInjectQueue:         flushInjectQueue,
+		CheckSessionVersion:      checkSessionVersion,
+	}
+	hooks.ScanPendingDir(bs, hookCB, func(bsArg *BotState) { handlers.ScanLaunchDir(bsArg) })
 	// Restore persisted sessions and clean up stale routes
-	sessionState.loadFromFile()
-	sessionState.validateAlive()
-	cleanStaleRoutes(bot)
-	cronJobs.load()
+	bs.SessionState.LoadFromFile()
+	bs.SessionState.ValidateAlive()
+	cleanStaleRoutes(bs)
+	bs.CronJobs.Load()
 	mailbox.load()
-	injectQueue.load()
-	mergeBuffers.load()
+	bs.InjectQueue.Load()
+	bs.MergeBuffers.Load()
 	// Setup HTTP server
 	mux := http.NewServeMux()
-	registerHTTPHooks(mux, bot, &creds, port)
-	registerHTTPAPI(mux, bot, &creds)
-	registerMailboxAPI(mux, bot, &creds)
+	hooks.Register(mux, bs, port, hookCB)
+	api.Register(mux, bs)
+	registerMailboxAPI(mux, bs)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	handler := http.Handler(mux)
 	if creds.APIToken != "" {
@@ -248,8 +280,8 @@ func runBot(cmd *cobra.Command, args []string) {
 	defer stop()
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
-	go startTypingLoop(typingCtx, bot)
-	go startCronLoop(typingCtx, bot)
+	go startTypingLoop(typingCtx, bs)
+	go startCronLoop(typingCtx, bs)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

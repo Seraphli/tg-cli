@@ -85,6 +85,13 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if setupSettingsFlag != "" {
 		settingsPath = setupSettingsFlag
 	}
+	// Require --settings when --config-dir is non-default to prevent polluting production hooks
+	defaultSettingsPath := filepath.Join(home, ".claude", "settings.json")
+	if settingsPath == defaultSettingsPath && config.ConfigDir != "" && config.ConfigDir != filepath.Join(home, ".tg-cli") {
+		fmt.Fprintf(os.Stderr, "Error: --config-dir %s requires --settings to specify the target CC settings file.\n", config.ConfigDir)
+		fmt.Fprintf(os.Stderr, "Without --settings, hooks would be written to production %s with test parameters.\n", defaultSettingsPath)
+		os.Exit(1)
+	}
 	var settings map[string]interface{}
 	if _, err := os.Stat(settingsPath); err == nil {
 		backupPath := settingsPath + ".backup"

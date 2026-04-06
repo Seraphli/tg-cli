@@ -1,4 +1,4 @@
-package cmd
+package handlers
 
 import (
 	"crypto/rand"
@@ -9,9 +9,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -20,13 +21,12 @@ import (
 )
 
 // LaunchState holds the state for the /bot_new interactive launch flow.
-// Persisted to a pending file for crash recovery.
 type LaunchState struct {
-	Step        string `json:"step"`        // "session", "workdir", "launching", "done"
+	Step        string `json:"step"`
 	SessionName string `json:"sessionName"`
 	WorkDir     string `json:"workDir"`
 	Command     string `json:"command"`
-	AgentName   string `json:"agentName,omitempty"` // optional agent name to assign after launch
+	AgentName   string `json:"agentName,omitempty"`
 	MsgID       int    `json:"msgID"`
 	ChatID      int64  `json:"chatID"`
 	TopicID     int    `json:"topicID,omitempty"`
@@ -36,10 +36,6 @@ type LaunchState struct {
 	DirPage     int    `json:"dirPage,omitempty"`
 }
 
-// launchPending maps msgID (int) -> *LaunchState for callback/reply routing
-var launchPending sync.Map
-
-// launchDir returns the directory used to persist LaunchState files
 func launchDir() string {
 	base := filepath.Base(config.GetConfigDir())
 	dir := filepath.Join("/tmp", base, "launch")
@@ -47,7 +43,6 @@ func launchDir() string {
 	return dir
 }
 
-// writeLaunchState atomically writes a LaunchState to disk
 func writeLaunchState(state *LaunchState) error {
 	path := filepath.Join(launchDir(), state.UUID+".json")
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -61,21 +56,20 @@ func writeLaunchState(state *LaunchState) error {
 	return os.Rename(tmpPath, path)
 }
 
-// deleteLaunchState removes the persisted launch state file
-func deleteLaunchState(uuid string) {
+// DeleteLaunchState removes the persisted launch state file for the given UUID.
+func DeleteLaunchState(uuid string) {
 	os.Remove(filepath.Join(launchDir(), uuid+".json"))
 }
 
-// generateLaunchUUID generates a random 16-byte hex UUID
-func generateLaunchUUID() string {
+// GenerateLaunchUUID generates a random UUID for a new launch flow.
+func GenerateLaunchUUID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// parseBotNewArgs parses /bot_new arguments.
-// @xxx sets session name, #xxx sets workdir, remaining words form the command.
-func parseBotNewArgs(text string) (sessionName, workDir, command string) {
+// ParseBotNewArgs parses /bot_new arguments.
+func ParseBotNewArgs(text string) (sessionName, workDir, command string) {
 	words := strings.Fields(text)
 	var remaining []string
 	for _, w := range words {
@@ -91,27 +85,26 @@ func parseBotNewArgs(text string) (sessionName, workDir, command string) {
 	return
 }
 
-// startLaunchFlow initiates the interactive /bot_new confirmation flow.
-func startLaunchFlow(c tele.Context, sessionName, workDir, command string) error {
+// StartLaunchFlow initiates the interactive /bot_new confirmation flow.
+func StartLaunchFlow(bs *types.BotState, c tele.Context, sessionName, workDir, command string) error {
 	state := &LaunchState{
 		SessionName: sessionName,
 		WorkDir:     workDir,
 		Command:     command,
 		ChatID:      c.Chat().ID,
 		TopicID:     c.Message().ThreadID,
-		UUID:        generateLaunchUUID(),
+		UUID:        GenerateLaunchUUID(),
 	}
 	if sessionName == "" {
-		askSessionName(c.Bot(), c.Chat().ID, state)
+		AskSessionName(bs, c.Bot(), c.Chat().ID, state)
 	} else if workDir == "" {
-		askWorkDir(c.Bot(), c.Chat().ID, state)
+		AskWorkDir(bs, c.Bot(), c.Chat().ID, state)
 	} else {
-		go executeLaunch(c.Bot(), c.Chat().ID, state)
+		go ExecuteLaunch(bs, c.Bot(), c.Chat().ID, state)
 	}
 	return nil
 }
 
-// launchSendOpts returns send options with ThreadID and optional ReplyMarkup merged into SendOptions.
 func launchSendOpts(state *LaunchState, markup ...*tele.ReplyMarkup) []interface{} {
 	if state.TopicID > 0 {
 		so := &tele.SendOptions{ThreadID: state.TopicID}
@@ -126,8 +119,8 @@ func launchSendOpts(state *LaunchState, markup ...*tele.ReplyMarkup) []interface
 	return []interface{}{tele.ModeHTML}
 }
 
-// askSessionName sends a TG message asking the user for a session name.
-func askSessionName(bot *tele.Bot, chatID int64, state *LaunchState) {
+// AskSessionName sends a TG message asking the user for a session name.
+func AskSessionName(bs *types.BotState, bot *tele.Bot, chatID int64, state *LaunchState) {
 	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		logger.Error(fmt.Sprintf("askSessionName: failed to load config: %v", err))
@@ -137,7 +130,7 @@ func askSessionName(bot *tele.Bot, chatID int64, state *LaunchState) {
 	btnDefault := sel.Data(fmt.Sprintf("Use default: %s", cfg.DefaultSessionName), "bot_new", "session_default")
 	btnCancel := sel.Data("❌ Cancel", "bot_new", "cancel")
 	sel.Inline(sel.Row(btnDefault, btnCancel))
-	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("📦 Session name\nDefault: %s\n\n💡 Click the button to use default, or reply to this message with a custom name.", markdown.EscapeHTML(cfg.DefaultSessionName)), launchSendOpts(state, sel)...)
+	sent, err := helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("📦 Session name\nDefault: %s\n\n💡 Click the button to use default, or reply to this message with a custom name.", markdown.EscapeHTML(cfg.DefaultSessionName)), launchSendOpts(state, sel)...)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askSessionName: failed to send: %v", err))
 		return
@@ -148,12 +141,12 @@ func askSessionName(bot *tele.Bot, chatID int64, state *LaunchState) {
 	if err := writeLaunchState(state); err != nil {
 		logger.Error(fmt.Sprintf("askSessionName: failed to write pending state: %v", err))
 	}
-	launchPending.Store(sent.ID, state)
+	bs.LaunchPending.Store(sent.ID, state)
 	logger.Info(fmt.Sprintf("askSessionName: sent msg_id=%d uuid=%s buttons=1", sent.ID, state.UUID))
 }
 
-// askWorkDir sends a TG directory browser message for the user to pick a working directory.
-func askWorkDir(bot *tele.Bot, chatID int64, state *LaunchState) {
+// AskWorkDir sends a TG directory browser message for the user to pick a working directory.
+func AskWorkDir(bs *types.BotState, bot *tele.Bot, chatID int64, state *LaunchState) {
 	if state.BrowsePath == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -163,14 +156,14 @@ func askWorkDir(bot *tele.Bot, chatID int64, state *LaunchState) {
 		state.BrowsePath = home
 	}
 	state.DirPage = 0
-	dirs, err := listSubDirs(state.BrowsePath, state.ShowHidden)
+	dirs, err := ListSubDirs(state.BrowsePath, state.ShowHidden)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askWorkDir: failed to list dirs %s: %v", state.BrowsePath, err))
 		dirs = []string{}
 	}
 	kb := buildDirKeyboard(dirs, 0, state.ShowHidden)
 	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", markdown.EscapeHTML(state.BrowsePath), len(dirs))
-	sent, err := retrySend(bot, &tele.Chat{ID: chatID}, text, launchSendOpts(state, kb)...)
+	sent, err := helpers.RetrySend(bot, &tele.Chat{ID: chatID}, text, launchSendOpts(state, kb)...)
 	if err != nil {
 		logger.Error(fmt.Sprintf("askWorkDir: failed to send: %v", err))
 		return
@@ -181,26 +174,24 @@ func askWorkDir(bot *tele.Bot, chatID int64, state *LaunchState) {
 	if err := writeLaunchState(state); err != nil {
 		logger.Error(fmt.Sprintf("askWorkDir: failed to write pending state: %v", err))
 	}
-	launchPending.Store(sent.ID, state)
+	bs.LaunchPending.Store(sent.ID, state)
 	logger.Info(fmt.Sprintf("askWorkDir: sent msg_id=%d uuid=%s browsePath=%s buttons=%d", sent.ID, state.UUID, state.BrowsePath, len(kb.InlineKeyboard)))
 }
 
-// executeLaunch creates (or reuses) a tmux session/window and runs the command.
-func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
+// ExecuteLaunch creates (or reuses) a tmux session/window and runs the command.
+func ExecuteLaunch(bs *types.BotState, bot *tele.Bot, chatID int64, state *LaunchState) {
 	cfg, err := config.LoadAppConfig()
 	if err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: failed to load config: %v", err))
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
+		helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
 		return
 	}
-	// Fill defaults for any still-empty fields
 	if state.SessionName == "" {
 		state.SessionName = cfg.DefaultSessionName
 	}
 	if state.WorkDir == "" {
 		state.WorkDir = cfg.DefaultWorkDir
 	}
-	// Expand leading ~ in workDir
 	if strings.HasPrefix(state.WorkDir, "~") {
 		home, err := os.UserHomeDir()
 		if err == nil {
@@ -211,52 +202,46 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 	if err := writeLaunchState(state); err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: failed to write launch state: %v", err))
 	}
-
 	var paneID string
 	if injector.NamedSessionExists(state.SessionName) {
-		// Session exists — create a new window
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("ℹ️ Session '%s' already exists, creating a new window in it.", markdown.EscapeHTML(state.SessionName)), launchSendOpts(state)...)
+		helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("ℹ️ Session '%s' already exists, creating a new window in it.", markdown.EscapeHTML(state.SessionName)), launchSendOpts(state)...)
 		id, err := injector.CreateWindow(state.SessionName, state.WorkDir)
 		if err != nil {
 			logger.Error(fmt.Sprintf("executeLaunch: CreateWindow failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create window in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
-			deleteLaunchState(state.UUID)
+			helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create window in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
+			DeleteLaunchState(state.UUID)
 			return
 		}
 		paneID = id
 		logger.Info(fmt.Sprintf("executeLaunch: created window in session=%s pane=%s", state.SessionName, paneID))
 	} else {
-		// Session does not exist — create a new session
 		if err := injector.CreateSession(state.SessionName, state.WorkDir); err != nil {
 			logger.Error(fmt.Sprintf("executeLaunch: CreateSession failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
-			deleteLaunchState(state.UUID)
+			helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to create session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
+			DeleteLaunchState(state.UUID)
 			return
 		}
 		panes, err := injector.ListPanes(state.SessionName)
 		if err != nil || len(panes) == 0 {
 			logger.Error(fmt.Sprintf("executeLaunch: ListPanes failed: session=%s err=%v", state.SessionName, err))
-			retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to list panes in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
-			deleteLaunchState(state.UUID)
+			helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to list panes in session %s: %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
+			DeleteLaunchState(state.UUID)
 			return
 		}
 		paneID = panes[0]
 		logger.Info(fmt.Sprintf("executeLaunch: created session=%s pane=%s", state.SessionName, paneID))
 	}
-
 	target := injector.TmuxTarget{PaneID: paneID}
 	cmd := state.Command
 	if cmd == "" {
 		cmd = cfg.ClaudeCommand
 	}
-	// Type command into the pane using set-buffer + paste + Enter
 	if err := injector.InjectText(target, cmd); err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: InjectText failed: pane=%s cmd=%s err=%v", paneID, cmd, err))
-		retrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to inject command to pane %s: %s", markdown.EscapeHTML(paneID), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
-		deleteLaunchState(state.UUID)
+		helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to inject command to pane %s: %s", markdown.EscapeHTML(paneID), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
+		DeleteLaunchState(state.UUID)
 		return
 	}
-	// Wait for CLI TUI to load, then handle startup dialogs (CC trust / Codex continue)
 	go func() {
 		time.Sleep(5 * time.Second)
 		content, err := injector.CapturePane(target)
@@ -273,21 +258,18 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 			injector.SendKeys(target, "Enter")
 		}
 	}()
-
 	msg := fmt.Sprintf("🚀 CC launched\n📦 %s\n📟 %s\n📂 %s\n💻 %s", markdown.EscapeHTML(state.SessionName), markdown.EscapeHTML(paneID), markdown.EscapeHTML(state.WorkDir), markdown.EscapeHTML(cmd))
-	retrySend(bot, &tele.Chat{ID: chatID}, msg, launchSendOpts(state)...)
+	helpers.RetrySend(bot, &tele.Chat{ID: chatID}, msg, launchSendOpts(state)...)
 	logger.Info(fmt.Sprintf("executeLaunch: done session=%s pane=%s workdir=%s cmd=%s", state.SessionName, paneID, state.WorkDir, cmd))
-
-	// If an agent name was requested, wait for SessionStart hook to register the session, then set the name
 	if state.AgentName != "" {
 		agentName := state.AgentName
 		pane := paneID
 		go func() {
 			for i := 0; i < 30; i++ {
 				time.Sleep(1 * time.Second)
-				sid, found := sessionState.findByTarget(pane)
+				sid, found := bs.SessionState.FindByTarget(pane)
 				if found {
-					sessionState.setName(sid, agentName)
+					bs.SessionState.SetName(sid, agentName)
 					logger.Info(fmt.Sprintf("executeLaunch: agent name auto-set: session=%s name=%s", sid, agentName))
 					return
 				}
@@ -295,31 +277,31 @@ func executeLaunch(bot *tele.Bot, chatID int64, state *LaunchState) {
 			logger.Error(fmt.Sprintf("executeLaunch: failed to auto-set agent name: pane=%s name=%s (timeout)", pane, agentName))
 		}()
 	}
-
 	state.Step = "done"
-	deleteLaunchState(state.UUID)
-	launchPending.Delete(state.MsgID)
+	DeleteLaunchState(state.UUID)
+	bs.LaunchPending.Delete(state.MsgID)
 }
 
-// resumeLaunchFlow restores a launch flow after a crash/restart.
-func resumeLaunchFlow(bot *tele.Bot, state *LaunchState) {
+// ResumeLaunchFlow restores a launch flow after a crash/restart.
+func ResumeLaunchFlow(bs *types.BotState, state *LaunchState) {
+	bot := bs.Bot
 	switch state.Step {
 	case "session":
-		askSessionName(bot, state.ChatID, state)
+		AskSessionName(bs, bot, state.ChatID, state)
 	case "workdir":
-		askWorkDir(bot, state.ChatID, state)
+		AskWorkDir(bs, bot, state.ChatID, state)
 	case "launching":
-		go executeLaunch(bot, state.ChatID, state)
+		go ExecuteLaunch(bs, bot, state.ChatID, state)
 	case "done":
-		deleteLaunchState(state.UUID)
+		DeleteLaunchState(state.UUID)
 	default:
 		logger.Error(fmt.Sprintf("resumeLaunchFlow: unknown step=%s uuid=%s", state.Step, state.UUID))
-		deleteLaunchState(state.UUID)
+		DeleteLaunchState(state.UUID)
 	}
 }
 
-// scanLaunchDir scans pending launch states on bot startup and resumes them.
-func scanLaunchDir(bot *tele.Bot) {
+// ScanLaunchDir scans pending launch states on bot startup and resumes them.
+func ScanLaunchDir(bs *types.BotState) {
 	dir := launchDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -349,12 +331,12 @@ func scanLaunchDir(bot *tele.Bot) {
 			continue
 		}
 		logger.Info(fmt.Sprintf("scanLaunchDir: resuming launch uuid=%s step=%s", state.UUID, state.Step))
-		resumeLaunchFlow(bot, &state)
+		ResumeLaunchFlow(bs, &state)
 	}
 }
 
-// listSubDirs returns sorted subdirectory names under dirPath.
-func listSubDirs(dirPath string, showHidden bool) ([]string, error) {
+// ListSubDirs returns a sorted list of subdirectory names in dirPath, optionally including hidden ones.
+func ListSubDirs(dirPath string, showHidden bool) ([]string, error) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return nil, err
@@ -376,7 +358,6 @@ func listSubDirs(dirPath string, showHidden bool) ([]string, error) {
 
 const dirsPerPage = 16
 
-// buildDirKeyboard builds a paged inline keyboard for directory browsing.
 func buildDirKeyboard(dirs []string, page int, showHidden bool) *tele.ReplyMarkup {
 	sel := &tele.ReplyMarkup{}
 	var rows []tele.Row
@@ -427,14 +408,14 @@ func buildDirKeyboard(dirs []string, page int, showHidden bool) *tele.ReplyMarku
 	return sel
 }
 
-// refreshDirBrowser edits the existing TG message to show updated directory listing.
-func refreshDirBrowser(bot *tele.Bot, msg *tele.Message, state *LaunchState) {
-	dirs, err := listSubDirs(state.BrowsePath, state.ShowHidden)
+// RefreshDirBrowser edits the existing TG message to show updated directory listing.
+func RefreshDirBrowser(bot *tele.Bot, msg *tele.Message, state *LaunchState) {
+	dirs, err := ListSubDirs(state.BrowsePath, state.ShowHidden)
 	if err != nil {
 		dirs = []string{}
 	}
 	kb := buildDirKeyboard(dirs, state.DirPage, state.ShowHidden)
 	text := fmt.Sprintf("📂 Select working directory\nCurrent: %s\n(%d subdirectories)\n\n💡 Click 📁 to enter a folder, ✅ to select current directory, or reply with an absolute path.", markdown.EscapeHTML(state.BrowsePath), len(dirs))
-	retryEdit(bot, msg, text, kb, tele.ModeHTML)
+	helpers.RetryEdit(bot, msg, text, kb, tele.ModeHTML)
 	writeLaunchState(state)
 }
