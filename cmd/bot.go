@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -192,49 +193,53 @@ func runBot(cmd *cobra.Command, args []string) {
 		StopCooldown:    stores.NewStopCooldownStore(),
 		SessionWatch:    stores.NewSessionWatchStore(),
 		ToolUseMsgs:     stores.NewToolUseMsgStore(),
+		CommandStats:    stores.NewCommandStatsStore(configDir),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
-	// Build command list for Telegram menu
-	var commands []tele.Command
-	// Bot's own commands
-	commands = append(commands,
-		tele.Command{Text: "bot_start", Description: "Show welcome message"},
-		tele.Command{Text: "bot_pair", Description: "Pair this chat with the bot"},
-		tele.Command{Text: "bot_status", Description: "Check bot and pairing status"},
-		tele.Command{Text: "bot_perm_default", Description: "Switch to default mode"},
-		tele.Command{Text: "bot_perm_plan", Description: "Switch to plan mode"},
-		tele.Command{Text: "bot_perm_auto", Description: "Switch to auto-edit mode"},
-		tele.Command{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
-		tele.Command{Text: "bot_perm_status", Description: "Show current pane content"},
-		tele.Command{Text: "bot_capture", Description: "Capture tmux pane content"},
-		tele.Command{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
-		tele.Command{Text: "stop", Description: "Send Escape to interrupt Claude"},
-		tele.Command{Text: "bot_routes", Description: "Show route bindings"},
-		tele.Command{Text: "bot_bind", Description: "Bind agent name to this chat/topic"},
-		tele.Command{Text: "bot_unbind", Description: "Unbind an agent name route"},
-		tele.Command{Text: "bot_name", Description: "Set agent name for a session"},
-		tele.Command{Text: "bot_names", Description: "List and name active sessions"},
-		tele.Command{Text: "bot_cwd", Description: "Configure CWD source (tmux/payload)"},
-		tele.Command{Text: "resume", Description: "Resume a previous Claude Code session"},
-		tele.Command{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
-		tele.Command{Text: "bot_tools", Description: "Configure which tools send notifications"},
-		tele.Command{Text: "bot_new", Description: "Launch new Claude Code session"},
-		tele.Command{Text: "bot_usage", Description: "Show CC usage limits"},
-		tele.Command{Text: "bot_merge", Description: "Merge multiple messages before sending"},
-		tele.Command{Text: "bot_voice", Description: "Voice transcription settings"},
-		tele.Command{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
-		tele.Command{Text: "bot_mailbox", Description: "Bind/unbind mailbox group"},
-		tele.Command{Text: "cu", Description: "Check for CC version updates"},
-		tele.Command{Text: "check_update", Description: "Check for CC version updates"},
-	)
-	// CC built-in commands
-	for name, desc := range stores.CCBuiltinCommands {
-		commands = append(commands, tele.Command{Text: name, Description: desc})
+	if err := bs.CommandStats.LoadFromDisk(); err != nil {
+		logger.Error(fmt.Sprintf("Failed to load command stats: %v", err))
 	}
-	// CC custom commands
+	// Define base bot commands in registration order (used as tiebreak and default).
+	// New entries for /t, /reload, /r, /u, /p are included here.
+	baseBotCommands := []tele.Command{
+		{Text: "bot_start", Description: "Show welcome message"},
+		{Text: "bot_pair", Description: "Pair this chat with the bot"},
+		{Text: "bot_status", Description: "Check bot and pairing status"},
+		{Text: "bot_perm_default", Description: "Switch to default mode"},
+		{Text: "bot_perm_plan", Description: "Switch to plan mode"},
+		{Text: "bot_perm_auto", Description: "Switch to auto-edit mode"},
+		{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
+		{Text: "bot_perm_status", Description: "Show current pane content"},
+		{Text: "bot_capture", Description: "Capture tmux pane content"},
+		{Text: "p", Description: "Capture tmux pane content"},
+		{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
+		{Text: "stop", Description: "Send Escape to interrupt Claude"},
+		{Text: "t", Description: "Send Escape to interrupt Claude"},
+		{Text: "reload", Description: "Reload CC session (exit and resume)"},
+		{Text: "r", Description: "Reload CC session (exit and resume)"},
+		{Text: "bot_routes", Description: "Show route bindings"},
+		{Text: "bot_bind", Description: "Bind agent name to this chat/topic"},
+		{Text: "bot_unbind", Description: "Unbind an agent name route"},
+		{Text: "bot_name", Description: "Set agent name for a session"},
+		{Text: "bot_names", Description: "List and name active sessions"},
+		{Text: "bot_cwd", Description: "Configure CWD source (tmux/payload)"},
+		{Text: "resume", Description: "Resume a previous Claude Code session"},
+		{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
+		{Text: "bot_tools", Description: "Configure which tools send notifications"},
+		{Text: "bot_new", Description: "Launch new Claude Code session"},
+		{Text: "bot_usage", Description: "Show CC usage limits"},
+		{Text: "u", Description: "Show CC usage limits"},
+		{Text: "bot_merge", Description: "Merge multiple messages before sending"},
+		{Text: "bot_voice", Description: "Voice transcription settings"},
+		{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
+		{Text: "bot_mailbox", Description: "Bind/unbind mailbox group"},
+		{Text: "cu", Description: "Check for CC version updates"},
+		{Text: "check_update", Description: "Check for CC version updates"},
+	}
+	pinnedCommands := []string{"u", "t", "r", "p"}
 	customCmds := handlers.ScanCustomCommands()
-	for name, cmd := range customCmds {
-		commands = append(commands, tele.Command{Text: name, Description: cmd.Desc})
+	buildCommands := func() []tele.Command {
+		return buildSortedCommands(baseBotCommands, pinnedCommands, bs.CommandStats.GetAll(), customCmds)
 	}
 	// Register known slash commands for markdown renderer
 	cmds := make(map[string]bool)
@@ -245,7 +250,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		cmds[c] = true
 	}
 	markdown.SlashCommands = cmds
-	bot.SetCommands(commands)
+	bot.SetCommands(buildCommands())
 	// Register all Telegram handlers
 	handlers.Register(bs)
 	// Scan pending directory to rebuild in-memory state after restart
@@ -278,6 +283,26 @@ func runBot(cmd *cobra.Command, args []string) {
 	}
 	srv := &http.Server{Addr: addr, Handler: handler}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	// Periodic ticker: re-sort TG command menu based on usage stats when there are new counts
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !bs.CommandStats.IsDirty() {
+					continue
+				}
+				if err := bs.CommandStats.SaveToDisk(); err != nil {
+					logger.Error(fmt.Sprintf("Failed to save command stats: %v", err))
+				}
+				bot.SetCommands(buildCommands())
+				logger.Info("Command menu re-sorted based on usage stats")
+			}
+		}
+	}()
 	defer stop()
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
@@ -334,4 +359,50 @@ func runBot(cmd *cobra.Command, args []string) {
 	}
 	logger.Info(fmt.Sprintf("Starting tg-cli bot... version=%s binary_md5=%s", Version, binaryMD5))
 	bot.Start()
+}
+
+// buildSortedCommands assembles the TG command menu with pinned entries first,
+// then base commands sorted by usage count (desc, tiebreak by original registration order),
+// then CC built-in commands, then CC custom commands.
+func buildSortedCommands(base []tele.Command, pinned []string, counts map[string]int, customCmds map[string]stores.CustomCmd) []tele.Command {
+	baseIndex := make(map[string]int, len(base))
+	for i, cmd := range base {
+		baseIndex[cmd.Text] = i
+	}
+	used := make(map[string]bool)
+	var result []tele.Command
+	for _, name := range pinned {
+		if i, ok := baseIndex[name]; ok && !used[name] {
+			result = append(result, base[i])
+			used[name] = true
+		}
+	}
+	type rankEntry struct {
+		cmd   tele.Command
+		count int
+		index int
+	}
+	var remaining []rankEntry
+	for i, cmd := range base {
+		if used[cmd.Text] {
+			continue
+		}
+		remaining = append(remaining, rankEntry{cmd: cmd, count: counts[cmd.Text], index: i})
+	}
+	sort.SliceStable(remaining, func(a, b int) bool {
+		if remaining[a].count != remaining[b].count {
+			return remaining[a].count > remaining[b].count
+		}
+		return remaining[a].index < remaining[b].index
+	})
+	for _, r := range remaining {
+		result = append(result, r.cmd)
+	}
+	for name, desc := range stores.CCBuiltinCommands {
+		result = append(result, tele.Command{Text: name, Description: desc})
+	}
+	for name, cmd := range customCmds {
+		result = append(result, tele.Command{Text: name, Description: cmd.Desc})
+	}
+	return result
 }

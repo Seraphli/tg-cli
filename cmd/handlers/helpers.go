@@ -299,6 +299,29 @@ func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 	return nil
 }
 
+// handleReloadCommand handles /reload command by exiting and restarting CC in the same tmux pane.
+// Reuses doUpgradeSession since the underlying "exit and re-enter" flow is identical to the version upgrade path.
+func handleReloadCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
+	tmuxTarget := injector.FormatTarget(target)
+	if helpers.IsSessionRunning(tmuxTarget) {
+		return c.Reply("⚠️ Session is busy. Wait for idle before reloading.")
+	}
+	paneLabel := notify.FormatPaneID(tmuxTarget)
+	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), fmt.Sprintf("🔄 Reloading CC...\n📟 %s", paneLabel), tele.ModeHTML)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := doUpgradeSession(bs, tmuxTarget); err != nil {
+			logger.Error(fmt.Sprintf("handleReloadCommand: doUpgradeSession failed: %v", err))
+			helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("❌ Reload failed: %s\n📟 %s", err.Error(), paneLabel), tele.ModeHTML)
+			return
+		}
+		helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("✅ CC reloaded\n📟 %s", paneLabel), tele.ModeHTML)
+	}()
+	return nil
+}
+
 // handleUsageCommand handles /bot_usage.
 func handleUsageCommand(bs *types.BotState, c tele.Context) error {
 	sel := &tele.ReplyMarkup{}

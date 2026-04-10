@@ -189,6 +189,20 @@ func Register(bs *types.BotState) {
 			return next(c)
 		}
 	})
+	// Track command usage for menu auto-sorting (runs after logging middleware)
+	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
+		return func(c tele.Context) error {
+			if msg := c.Message(); msg != nil && strings.HasPrefix(msg.Text, "/") {
+				cmdPart := strings.SplitN(msg.Text, " ", 2)[0]
+				cmdPart = strings.SplitN(cmdPart, "@", 2)[0]
+				cmdName := strings.TrimPrefix(cmdPart, "/")
+				if cmdName != "" {
+					bs.CommandStats.Record(cmdName)
+				}
+			}
+			return next(c)
+		}
+	})
 	bot.Handle(tele.OnMigration, func(c tele.Context) error {
 		from, to := c.Migration()
 		logger.Info(fmt.Sprintf("Chat migration detected: %d → %d", from, to))
@@ -818,14 +832,16 @@ func Register(bs *types.BotState) {
 		return StartLaunchFlow(bs, c, sessionName, workDir, command)
 	})
 
-	bot.Handle("/bot_usage", func(c tele.Context) error {
+	usageHandler := func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("❌ Not paired.")
 		}
 		return handleUsageCommand(bs, c)
-	})
+	}
+	bot.Handle("/bot_usage", usageHandler)
+	bot.Handle("/u", usageHandler)
 
 	checkUpdateHandler := func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)

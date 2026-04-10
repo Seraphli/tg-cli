@@ -384,8 +384,12 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
 				isCmd := strings.HasPrefix(c.Message().Text, "/bot_perm_") ||
 					c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
+					c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") ||
 					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
-					c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@")
+					c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") ||
+					c.Message().Text == "/t" || strings.HasPrefix(c.Message().Text, "/t@") ||
+					c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
+					c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@")
 				if isCmd {
 					_, target, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 					if err != nil {
@@ -397,8 +401,13 @@ func RegisterMessageHandlers(bs *types.BotState) {
 					if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
 						return handlePermCommand(c, target)
 					}
-					if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
+					if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
+						c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") {
 						return handleCaptureCommand(bs, c, target)
+					}
+					if c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
+						c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@") {
+						return handleReloadCommand(bs, c, target)
 					}
 					return handleEscapeCommand(c, target)
 				}
@@ -411,7 +420,8 @@ func RegisterMessageHandlers(bs *types.BotState) {
 				}
 				return handlePermCommand(c, target)
 			}
-			if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") {
+			if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
+				c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") {
 				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
@@ -419,12 +429,21 @@ func RegisterMessageHandlers(bs *types.BotState) {
 				return handleCaptureCommand(bs, c, target)
 			}
 			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
-				c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") {
+				c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") ||
+				c.Message().Text == "/t" || strings.HasPrefix(c.Message().Text, "/t@") {
 				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
 				return handleEscapeCommand(c, target)
+			}
+			if c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
+				c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@") {
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+				if err != nil {
+					return c.Reply("❌ No tmux session info found.")
+				}
+				return handleReloadCommand(bs, c, target)
 			}
 		}
 		return processUserInput(bs, c, bot, c.Message().Text, false, voicePrefix)
