@@ -190,10 +190,25 @@ func getSessionPort() int {
 	return 12500
 }
 
-// tryResolveSessionSelf is like resolveSessionSelf but returns "" on failure instead of exiting.
-func tryResolveSessionSelf(port int) string {
+// buildTmuxTargetFromEnv composes the long-format tmux target (pane@socket_path)
+// from TMUX_PANE and TMUX environment variables. Returns "" if TMUX_PANE is unset.
+func buildTmuxTargetFromEnv() string {
 	pane := os.Getenv("TMUX_PANE")
 	if pane == "" {
+		return ""
+	}
+	tmuxEnv := os.Getenv("TMUX")
+	if tmuxEnv != "" {
+		parts := strings.SplitN(tmuxEnv, ",", 2)
+		return pane + "@" + parts[0]
+	}
+	return pane
+}
+
+// tryResolveSessionSelf is like resolveSessionSelf but returns "" on failure instead of exiting.
+func tryResolveSessionSelf(port int) string {
+	target := buildTmuxTargetFromEnv()
+	if target == "" {
 		return ""
 	}
 	url := buildAPIURL(sessionHost, port, "/session/list")
@@ -212,10 +227,8 @@ func tryResolveSessionSelf(port int) string {
 	if err := json.Unmarshal(body, &result); err != nil {
 		return ""
 	}
-	normalizedPane := strings.TrimPrefix(pane, "%")
 	for _, s := range result.Sessions {
-		target := strings.TrimPrefix(s.Target, "%")
-		if target == normalizedPane || s.Target == pane {
+		if s.Target == target {
 			return s.Name
 		}
 	}
@@ -224,8 +237,8 @@ func tryResolveSessionSelf(port int) string {
 
 // resolveSessionSelf queries /session/list and finds the agent name for the current TMUX_PANE.
 func resolveSessionSelf(port int) string {
-	pane := os.Getenv("TMUX_PANE")
-	if pane == "" {
+	target := buildTmuxTargetFromEnv()
+	if target == "" {
 		fmt.Fprintln(os.Stderr, "Error: --self requires TMUX_PANE environment variable")
 		os.Exit(1)
 	}
@@ -247,15 +260,12 @@ func resolveSessionSelf(port int) string {
 		fmt.Fprintf(os.Stderr, "Error: failed to parse session list: %v\n", err)
 		os.Exit(1)
 	}
-	// Normalize pane ID for comparison (strip leading % if present)
-	normalizedPane := strings.TrimPrefix(pane, "%")
 	for _, s := range result.Sessions {
-		target := strings.TrimPrefix(s.Target, "%")
-		if target == normalizedPane || s.Target == pane {
+		if s.Target == target {
 			return s.Name
 		}
 	}
-	fmt.Fprintf(os.Stderr, "Error: no session found for pane %s\n", pane)
+	fmt.Fprintf(os.Stderr, "Error: no session found for target %s\n", target)
 	os.Exit(1)
 	return ""
 }
@@ -400,9 +410,13 @@ func runSessionSend(cmd *cobra.Command, args []string) {
 	if from == "" && sessionSelf {
 		from = resolveSessionSelf(port)
 	}
-	// Auto-detect sender from TMUX_PANE if from is still empty (best-effort, don't exit on failure)
+	// Auto-detect sender from TMUX_PANE if from is still empty (best-effort)
 	if from == "" && os.Getenv("TMUX_PANE") != "" {
 		from = tryResolveSessionSelf(port)
+	}
+	if from == "" {
+		fmt.Fprintln(os.Stderr, "Error: cannot resolve sender; provide --from or run from a registered session")
+		os.Exit(1)
 	}
 	body := map[string]interface{}{
 		"name": name,
@@ -665,22 +679,20 @@ func runSessionName(cmd *cobra.Command, args []string) {
 	}
 	var sessionID, currentName string
 	if sessionSelf {
-		pane := os.Getenv("TMUX_PANE")
-		if pane == "" {
+		target := buildTmuxTargetFromEnv()
+		if target == "" {
 			fmt.Fprintln(os.Stderr, "Error: --self requires TMUX_PANE environment variable")
 			os.Exit(1)
 		}
-		normalizedPane := strings.TrimPrefix(pane, "%")
 		for _, s := range listResult.Sessions {
-			target := strings.TrimPrefix(s.Target, "%")
-			if target == normalizedPane || s.Target == pane {
+			if s.Target == target {
 				sessionID = s.ID
 				currentName = s.Name
 				break
 			}
 		}
 		if sessionID == "" {
-			fmt.Fprintf(os.Stderr, "Error: no session found for pane %s\n", pane)
+			fmt.Fprintf(os.Stderr, "Error: no session found for target %s\n", target)
 			os.Exit(1)
 		}
 	} else if sessionName != "" {

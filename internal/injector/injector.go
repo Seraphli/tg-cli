@@ -63,6 +63,18 @@ func globalTmuxCmd(args ...string) *exec.Cmd {
 	return exec.Command("tmux", args...)
 }
 
+// TmuxCmd is the exported wrapper for tmuxCmd, used by external packages
+// to build tmux commands targeting a specific pane with the correct server socket.
+func TmuxCmd(target TmuxTarget, args ...string) *exec.Cmd {
+	return tmuxCmd(target, args...)
+}
+
+// GlobalTmuxCmd is the exported wrapper for globalTmuxCmd, used by external packages
+// to build tmux commands without a target pane (server-level operations).
+func GlobalTmuxCmd(args ...string) *exec.Cmd {
+	return globalTmuxCmd(args...)
+}
+
 // SessionExists checks if the tmux pane still exists.
 func SessionExists(target TmuxTarget) bool {
 	cmd := tmuxCmd(target, "has-session", "-t", target.PaneID)

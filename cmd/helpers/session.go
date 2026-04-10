@@ -135,6 +135,40 @@ func DoCancelPerm(
 	return uuid
 }
 
+// IsRouteToolNotifyOff checks if the resolved route for a tmux target has ToolNotifyOff=true.
+func IsRouteToolNotifyOff(ss *stores.SessionStateStore, tmuxTarget string) bool {
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		return false
+	}
+	info := ss.FindInfoByTarget(tmuxTarget)
+	if info == nil {
+		return false
+	}
+	if info.Name != "" {
+		if route, ok := creds.NameRouteMap[info.Name]; ok {
+			return route.ToolNotifyOff
+		}
+	}
+	sid, found := ss.FindByTarget(tmuxTarget)
+	if found {
+		if route, ok := creds.NameRouteMap[sid]; ok {
+			return route.ToolNotifyOff
+		}
+	}
+	return false
+}
+
+// GetPrivateChat returns the default private chat.
+func GetPrivateChat() (*tele.Chat, string, int) {
+	chatIDStr := pairing.GetDefaultChatID()
+	if chatIDStr == "" {
+		return nil, "", 0
+	}
+	chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
+	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
+}
+
 // DoDecidePerm resolves a PermissionRequest: resolve + writePendingAnswer + edit + recordPending.
 func DoDecidePerm(
 	bot *tele.Bot,

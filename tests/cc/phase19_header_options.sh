@@ -9,30 +9,81 @@ echo "--- Header options test (session send --no-header, cron inject header, --s
 ensure_infrastructure
 
 # =============================================
-# Test 1: session send --no-header
+# Test 1: session send header behavior
 # =============================================
 
-# 1a: Send WITH header (default) — should have TG notification
-LOG_BEFORE_H=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_with" > /dev/null 2>&1 || true
+# Extract short pane_id and fake TMUX env for simulating "from within e2e-cli pane"
+SHORT_PANE="${E2E_PANE%@*}"
+SOCK_PATH="${E2E_PANE#*@}"
+FAKE_TMUX="${SOCK_PATH},1234,0"
+
+# 1a: auto-resolve from via TMUX_PANE/TMUX env → inject header with resolved sender
+LOG_BEFORE_1A=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+env TMUX_PANE="$SHORT_PANE" TMUX="$FAKE_TMUX" \
+  ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_auto" > /dev/null 2>&1 || true
 sleep 2
-if tail -n +"$((LOG_BEFORE_H + 1))" "$LOG_FILE" | grep -q "Session send notification:"; then
-  pass "session send: TG notification sent (with header)"
+NEW_1A=$(tail -n +"$((LOG_BEFORE_1A + 1))" "$LOG_FILE")
+if echo "$NEW_1A" | grep -q 'Session send via API:.*from=e2e-cli.*header_test_auto.*injectText=.*💬 Message from agent \[e2e-cli\]'; then
+  pass "session send: auto-resolved from + header injected"
 else
-  fail "session send: TG notification missing (with header)"
+  fail "session send: auto-resolve or header injection missing"
+fi
+if echo "$NEW_1A" | grep -q 'Session send notification:.*from=e2e-cli.*header_test_auto'; then
+  pass "session send: TG notification log includes auto-resolved from"
+else
+  fail "session send: TG notification missing or missing from (auto-resolved)"
 fi
 
-# 1b: Send WITHOUT header (--no-header) — TG notification should still be sent
-LOG_BEFORE_NH=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
-sleep 2
-if tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send via API:.*header_test_noheader"; then
-  pass "session send --no-header: API log recorded"
+wait_for_idle
+
+# 1b: no TMUX_PANE and no --from → command must error out, no inject logged
+LOG_BEFORE_1B=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+set +e
+STDERR_1B=$(env -u TMUX_PANE -u TMUX ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_noresolve" 2>&1 >/dev/null)
+EXIT_1B=$?
+set -e
+if [ "$EXIT_1B" -ne 0 ] && echo "$STDERR_1B" | grep -q "cannot resolve sender"; then
+  pass "session send: rejects anonymous send without from"
 else
-  fail "session send --no-header: API log not found"
+  fail "session send: unexpectedly accepted anonymous send (exit=$EXIT_1B stderr=$STDERR_1B)"
 fi
-if tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send notification:"; then
-  pass "session send --no-header: TG notification still sent"
+NEW_1B=$(tail -n +"$((LOG_BEFORE_1B + 1))" "$LOG_FILE")
+if echo "$NEW_1B" | grep -q 'Session send via API:.*header_test_noresolve'; then
+  fail "session send: anonymous text reached bot log (inject should be blocked)"
+else
+  pass "session send: anonymous text not logged (inject blocked)"
+fi
+
+# 1c: explicit --from → header uses explicit sender
+LOG_BEFORE_1C=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_explicit" > /dev/null 2>&1 || true
+sleep 2
+NEW_1C=$(tail -n +"$((LOG_BEFORE_1C + 1))" "$LOG_FILE")
+if echo "$NEW_1C" | grep -q 'Session send via API:.*from=manual-sender.*header_test_explicit.*injectText=.*💬 Message from agent \[manual-sender\]'; then
+  pass "session send --from: explicit sender used in inject header"
+else
+  fail "session send --from: explicit sender not reflected in inject header"
+fi
+if echo "$NEW_1C" | grep -q 'Session send notification:.*from=manual-sender.*header_test_explicit'; then
+  pass "session send --from: TG notification log includes from"
+else
+  fail "session send --from: TG notification log missing from"
+fi
+
+wait_for_idle
+
+# 1d: explicit --from + --no-header → inject text has no header prefix
+LOG_BEFORE_1D=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
+sleep 2
+NEW_1D=$(tail -n +"$((LOG_BEFORE_1D + 1))" "$LOG_FILE")
+if echo "$NEW_1D" | grep -q 'Session send via API:.*noHeader=true.*header_test_noheader.*injectText="header_test_noheader"'; then
+  pass "session send --no-header: inject has no header prefix"
+else
+  fail "session send --no-header: inject has header prefix or log missing"
+fi
+if echo "$NEW_1D" | grep -q 'Session send notification:.*from=manual-sender.*header_test_noheader'; then
+  pass "session send --no-header: TG notification still sent with from"
 else
   fail "session send --no-header: TG notification missing"
 fi

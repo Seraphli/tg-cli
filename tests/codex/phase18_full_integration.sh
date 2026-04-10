@@ -52,7 +52,7 @@ fi
 LOG_BEFORE_SEND=$(wc -l < "$LOG_FILE")
 echo "  [codex/integ] Sending simple task to $CODEX_AGENT..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
-  --name "$CODEX_AGENT" --port "$TEST_PORT" \
+  --name "$CODEX_AGENT" --port "$TEST_PORT" --from e2e-test \
   --text "Say exactly: codex_integration_ok" > /dev/null 2>&1
 pane_log "[codex/integ] after session send"
 
@@ -86,7 +86,7 @@ WATCH_PID=$!
 sleep 2
 echo "  [codex/integ] Sending simple task to trigger Stop for watch..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
-  --name "$CODEX_AGENT" --port "$TEST_PORT" \
+  --name "$CODEX_AGENT" --port "$TEST_PORT" --from e2e-test \
   --text "Say exactly: watch_test_ok" > /dev/null 2>&1
 
 ELAPSED=0

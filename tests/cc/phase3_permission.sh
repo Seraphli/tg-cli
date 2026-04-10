@@ -14,7 +14,7 @@ TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[permission] BEFORE permission prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "Answer this question first in 2 sentences: what does the bash redirect operator '>' do when used with echo? After answering, run this exact bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[permission] AFTER sending permission prompt"
 
 # Wait for permission request in bot log
@@ -43,19 +43,22 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   # Typing continuity: inject → PreToolUse (text generation before tool call)
   check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase3"
 
-  # Verify Update notification sent BEFORE PermissionRequest
+  # Verify Update notification sent BEFORE PermissionRequest (tolerant to Claude skipping intermediate text)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")
   UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
   PERM_LINE=$(awk '/Permission request sent/{print NR; exit}' <<< "$NEW_LOGS")
-  if [ -n "$UPDATE_LINE" ] && [ -n "$PERM_LINE" ]; then
+  if [ -z "$PERM_LINE" ]; then
+    fail "Permission request log line not found"
+  elif [ -n "$UPDATE_LINE" ]; then
     if [ "$UPDATE_LINE" -lt "$PERM_LINE" ]; then
       pass "Update sent BEFORE PermissionRequest (line $UPDATE_LINE < $PERM_LINE)"
     else
       fail "Update sent AFTER PermissionRequest (line $UPDATE_LINE >= $PERM_LINE)"
     fi
+  elif [[ "$NEW_LOGS" == *"PreToolUse Update skipped"* ]]; then
+    pass "PreToolUse Update path exercised (skipped: no new assistant text — vacuous pass)"
   else
-    [ -z "$UPDATE_LINE" ] && fail "PreToolUse intermediate notification not found before PermissionRequest"
-    [ -z "$PERM_LINE" ] && fail "Permission request log line not found"
+    fail "Neither PreToolUse Update sent nor skipped log found — code path not exercised"
   fi
 
   # Approve via API endpoint

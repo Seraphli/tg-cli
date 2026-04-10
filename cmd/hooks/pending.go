@@ -22,7 +22,7 @@ import (
 type Callbacks struct {
 	ResolveChat              func(bs *types.BotState, tmuxTarget string) (*tele.Chat, string, int)
 	ProcessTranscriptUpdates func(bs *types.BotState, sessionID, transcriptPath string, isQuestion ...bool) string
-	SendEventNotification    func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int)
+	SendEventNotification    func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int
 	TypingLog                func(format string, args ...interface{})
 	FlushInjectQueue         func(bs *types.BotState, tmuxTarget string)
 	CheckSessionVersion      func(bs *types.BotState, tmuxTarget string)
@@ -152,6 +152,8 @@ func ProcessPendingRequest(bs *types.BotState, cb Callbacks, uuid string) {
 			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 			cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updateBody, "", agentName, topicID)
 			logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", uuid, chatIDInt))
+		} else {
+			logger.Info(fmt.Sprintf("PreToolUse Update skipped: uuid=%s reason=no_new_assistant_text", uuid))
 		}
 	}
 	if p.ToolName == "AskUserQuestion" {

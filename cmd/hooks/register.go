@@ -3,7 +3,6 @@ package hooks
 import (
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
@@ -63,7 +63,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			// Skip temp usage sessions
 			if p.TmuxTarget != "" {
 				if target, err := injector.ParseTarget(p.TmuxTarget); err == nil {
-					sNameBytes, _ := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{session_name}").Output()
+					sNameBytes, _ := injector.TmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{session_name}").Output()
 					if strings.HasPrefix(strings.TrimSpace(string(sNameBytes)), "tg-cli-usage-") {
 						break
 					}
@@ -76,6 +76,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			var body string
 			if p.Source == "resume" && p.TranscriptPath != "" {
 				body = helpers.ReadLastAssistantText(p.TranscriptPath, 500)
+				if body != "" {
+					body = markdown.RenderTelegramHTML(body)
+				}
 			}
 			text := notify.BuildNotificationText(notify.NotificationData{
 				Event: "SessionStart", Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, Body: body,
@@ -146,11 +149,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			}
 			// Kill tmux pane if this session was exited via /session/exit API
 			if _, ok := bs.PendingExitKill.LoadAndDelete(p.TmuxTarget); ok {
-				paneID := notify.FormatPaneID(p.TmuxTarget)
-				if err := exec.Command("tmux", "kill-pane", "-t", paneID).Run(); err != nil {
-					logger.Error(fmt.Sprintf("SessionEnd kill-pane failed: target=%s err=%v", paneID, err))
+				target, parseErr := injector.ParseTarget(p.TmuxTarget)
+				if parseErr != nil {
+					logger.Error(fmt.Sprintf("SessionEnd kill-pane parse failed: target=%s err=%v", p.TmuxTarget, parseErr))
+				} else if err := injector.TmuxCmd(target, "kill-pane", "-t", target.PaneID).Run(); err != nil {
+					logger.Error(fmt.Sprintf("SessionEnd kill-pane failed: target=%s err=%v", p.TmuxTarget, err))
 				} else {
-					logger.Info(fmt.Sprintf("SessionEnd kill-pane: target=%s (exit API)", paneID))
+					logger.Info(fmt.Sprintf("SessionEnd kill-pane: target=%s (exit API)", p.TmuxTarget))
 				}
 			}
 		case "UserPromptSubmit":
@@ -165,8 +170,6 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			}
 			if p.TmuxTarget != "" {
 				cb.TypingLog("state: event=UserPromptSubmit target=%s", p.TmuxTarget)
-				bs.ReactionTracker.PromotePending(bs.Bot, p.TmuxTarget)
-				logger.Debug(fmt.Sprintf("Promoted pending reactions for tmux target: %s", p.TmuxTarget))
 				bs.InjectConfirm.Confirm(p.TmuxTarget)
 			}
 		case "Stop":
@@ -247,35 +250,91 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				body := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
 				if body != "" {
 					cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+				} else {
+					logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 				}
 			}
 			// Send tool detail notification if configured
 			toolCfg, _ := config.LoadAppConfig()
-			if chat != nil && helpers.ShouldNotifyTool(p.ToolName, toolCfg.ToolNotifyEnabled, toolCfg.ToolNotifyList) {
+			if helpers.ShouldNotifyTool(p.ToolName, toolCfg.ToolNotifyEnabled, toolCfg.ToolNotifyList) {
 				toolText := notify.BuildToolNotifyText(p.ToolName, p.ToolInput, cwdForRoute)
 				if toolText != "" {
-					cb.SendEventNotification(bs, chat, chatID, p.SessionID, "ToolUse", p.Project, cwdForRoute, p.TmuxTarget, toolText, p.ToolName, hookAgentName, hookTopicID)
+					toolChat, toolChatID, toolTopicID := chat, chatID, hookTopicID
+					if chat != nil && helpers.IsRouteToolNotifyOff(bs.SessionState, p.TmuxTarget) {
+						toolChat, toolChatID, toolTopicID = helpers.GetPrivateChat()
+					}
+					if toolChat != nil {
+						msgID := cb.SendEventNotification(bs, toolChat, toolChatID, p.SessionID, "ToolUse", p.Project, cwdForRoute, p.TmuxTarget, toolText, p.ToolName, hookAgentName, toolTopicID)
+						if p.ToolUseID != "" && msgID > 0 {
+							bs.ToolUseMsgs.Store(p.ToolUseID, &stores.ToolUseMsgEntry{MsgID: msgID, ChatID: toolChat.ID, TopicID: toolTopicID, Body: toolText})
+						}
+					}
 				}
 			}
 		case "PostToolUse":
-			// Codex-specific: tool execution completed
-			if chat != nil && p.ToolName != "" {
-				// Send optional tool completion notification (similar to ToolUse notify)
-				cfg, cfgErr := config.LoadAppConfig()
-				if cfgErr != nil {
-					break
-				}
-				if cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled {
-					shouldNotify := false
-					for _, t := range cfg.ToolNotifyList {
-						if strings.EqualFold(t, p.ToolName) {
-							shouldNotify = true
-							break
-						}
-					}
-					if shouldNotify {
-						logger.Info(fmt.Sprintf("PostToolUse notification: tool=%s target=%s", p.ToolName, p.TmuxTarget))
-					}
+			if p.ToolUseID == "" {
+				break
+			}
+			entry, ok := bs.ToolUseMsgs.Get(p.ToolUseID)
+			if !ok {
+				logger.Debug(fmt.Sprintf("PostToolUse: no stored msg for tool_use_id=%s", p.ToolUseID))
+				break
+			}
+			bs.ToolUseMsgs.Delete(p.ToolUseID)
+			resultText := notify.BuildToolResultText(p.ToolName, p.ToolResponse)
+			combinedBody := entry.Body + "\n\n" + resultText
+			postBackend := "cc"
+			if p.Backend != "" {
+				postBackend = p.Backend
+			}
+			nd := notify.NotificationData{
+				Event: "ToolUse", Project: p.Project, CWD: cwdForRoute,
+				TmuxTarget: p.TmuxTarget, ToolName: p.ToolName,
+				AgentName: hookAgentName, Backend: postBackend,
+				CLICommand: helpers.GetPaneCLICommand(p.TmuxTarget),
+				ContextUsedPct: -1,
+			}
+			if usedPct, usedTokens, windowSize, ctxOk := helpers.ReadContextUsage(p.SessionID); ctxOk {
+				nd.ContextUsedPct = usedPct
+				nd.ContextUsedTokens = usedTokens
+				nd.ContextWindowSize = windowSize
+			}
+			postCfg, _ := config.LoadAppConfig()
+			paginationMax := 4000
+			if postCfg.PaginationMaxRunes > 0 {
+				paginationMax = postCfg.PaginationMaxRunes
+			}
+			headerLen := notify.HeaderLen(nd)
+			maxBodyRunes := paginationMax - headerLen - 100
+			chunks := helpers.SplitBody(combinedBody, maxBodyRunes)
+			editChat := &tele.Chat{ID: entry.ChatID}
+			editMsg := &tele.Message{ID: entry.MsgID, Chat: editChat}
+			if len(chunks) <= 1 {
+				nd.Body = combinedBody
+				fullText := notify.BuildNotificationText(nd)
+				helpers.RetryEdit(bs.Bot, editMsg, fullText, tele.ModeHTML)
+			} else {
+				nd.Body = chunks[0]
+				nd.Page = 1
+				nd.TotalPages = len(chunks)
+				fullText := notify.BuildNotificationText(nd)
+				kb := helpers.BuildPageKeyboard(1, len(chunks))
+				helpers.RetryEdit(bs.Bot, editMsg, fullText, kb, tele.ModeHTML)
+				bs.Pages.Store(entry.MsgID, p.SessionID, &stores.PageEntry{
+					Chunks: chunks, Event: "ToolUse", Project: p.Project,
+					CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, ChatID: entry.ChatID,
+				})
+			}
+			logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d", entry.MsgID, p.ToolName, p.ToolUseID, len(resultText)))
+			// Confirm InjectConfirm for AskUserQuestion answer verification
+			if p.ToolName == "AskUserQuestion" && p.TmuxTarget != "" {
+				bs.InjectConfirm.Confirm(p.TmuxTarget)
+			}
+			// Attempt to flush inject queue during tool execution
+			if p.ToolName != "AskUserQuestion" && p.TmuxTarget != "" {
+				if bs.InjectQueue.HasItems(p.TmuxTarget) {
+					logger.Info(fmt.Sprintf("PostToolUse: flushing inject queue for target=%s", p.TmuxTarget))
+					cb.FlushInjectQueue(bs, p.TmuxTarget)
 				}
 			}
 		case "PermissionRequest":

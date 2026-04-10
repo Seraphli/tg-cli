@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
@@ -146,29 +147,41 @@ func CheckSessionAlive(tmuxTarget string, cleanDead func(string)) bool {
 
 // SafeInjectTextParams holds all parameters for SafeInjectText to avoid a large arg list.
 type SafeInjectTextParams struct {
-	Bot             *tele.Bot
-	ToolNotifs      *stores.ToolNotifyStore
-	PendingFiles    *stores.PendingFileStore
-	PendingPerms    *stores.PendingPermStore
-	InjectQueue     *stores.InjectQueueStore
-	InjectConfirm   *stores.InjectConfirmStore
-	StopCooldown    *stores.StopCooldownStore
-	ReactionTracker *stores.ReactionTrackerStore
-	SessionState    *stores.SessionStateStore
-	ResolveChat     func(string) (*tele.Chat, string, int)
-	FormatPaneID    func(string) string
+	Bot              *tele.Bot
+	ToolNotifs       *stores.ToolNotifyStore
+	PendingFiles     *stores.PendingFileStore
+	PendingPerms     *stores.PendingPermStore
+	InjectQueue      *stores.InjectQueueStore
+	InjectConfirm    *stores.InjectConfirmStore
+	StopCooldown     *stores.StopCooldownStore
+	ReactionTracker  *stores.ReactionTrackerStore
+	SessionState     *stores.SessionStateStore
+	HookSessionLocks *sync.Map
+	ResolveChat      func(string) (*tele.Chat, string, int)
+	FormatPaneID     func(string) string
+	Force            bool // Skip busy check — used by flushInjectQueue
 }
 
 // SafeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
 // If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
 func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, submit ...bool) error {
+	// Acquire per-session lock to serialize with hook processing
+	// Lock covers state check + injection only; released before CapturePane and confirmation wait
+	var sessionMu *sync.Mutex
+	if p.HookSessionLocks != nil && p.SessionState != nil {
+		if sid, found := p.SessionState.FindByTarget(tmuxTarget); found && sid != "" {
+			v, _ := p.HookSessionLocks.LoadOrStore(sid, &sync.Mutex{})
+			sessionMu = v.(*sync.Mutex)
+			sessionMu.Lock()
+		}
+	}
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
 		return err
 	}
 	// PRE-INJECT: check if there's a pending AskUserQuestion
 	_, _, hasAskQ := p.ToolNotifs.FindByTmuxTarget(tmuxTarget)
-	if IsSessionRunning(tmuxTarget) && !hasAskQ {
+	if !p.Force && IsSessionRunning(tmuxTarget) && !hasAskQ {
 		chat, chatIDStr, topicID := p.ResolveChat(tmuxTarget)
 		chatIDInt := int64(0)
 		for _, c := range chatIDStr {
@@ -197,6 +210,7 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 				}
 			}
 		}
+		if sessionMu != nil { sessionMu.Unlock() }
 		return nil
 	}
 	// Answer pending AskUserQuestion with the text
@@ -230,9 +244,20 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 			logger.Error(fmt.Sprintf("safeInjectText: failed to write answer: %v", writeErr))
 		}
 		p.ToolNotifs.MarkResolved(msgID)
+		if sessionMu != nil { sessionMu.Unlock() }
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
 		RetryEdit(p.Bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "✅ Custom reply"), tele.ModeHTML)
 		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, TruncateStr(text, 200)))
+		// Wait for PostToolUse to confirm CC received the answer
+		ch := p.InjectConfirm.Register(tmuxTarget)
+		select {
+		case <-ch:
+			p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
+			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer confirmed via PostToolUse, target=%s", tmuxTarget))
+		case <-time.After(30 * time.Second):
+			p.InjectConfirm.Cancel(tmuxTarget)
+			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer not confirmed (PostToolUse timeout), target=%s", tmuxTarget))
+		}
 		return nil
 	}
 	// PermissionRequest pending — queue instead of injecting
@@ -265,28 +290,69 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 				}
 			}
 		}
+		if sessionMu != nil { sessionMu.Unlock() }
 		return nil
 	}
+	logger.Info(fmt.Sprintf("safeInjectText: direct inject path, target=%s text=%s", tmuxTarget, TruncateStr(text, 200)))
 	// Wait for Stop event cooldown before injecting
 	p.StopCooldown.WaitIfNeeded(tmuxTarget, 3*time.Second)
 	shouldSubmit := len(submit) == 0 || submit[0]
 	ch := p.InjectConfirm.Register(tmuxTarget)
 	if err := injector.InjectText(target, text, shouldSubmit); err != nil {
 		p.InjectConfirm.Cancel(tmuxTarget)
+		if sessionMu != nil { sessionMu.Unlock() }
 		return err
+	}
+	// Release lock after injection — CapturePane and confirmation wait don't need it
+	if sessionMu != nil { sessionMu.Unlock() }
+	// CapturePane verification — match injected text in ❯ prompt line (input area)
+	// Retry up to 3 times × 500ms
+	snippet := text
+	if len(snippet) > 50 {
+		snippet = snippet[:50]
+	}
+	captureConfirmed := false
+	for attempt := 0; attempt < 3; attempt++ {
+		time.Sleep(500 * time.Millisecond)
+		captureContent, captureErr := injector.CapturePane(target)
+		if captureErr != nil {
+			continue
+		}
+		for _, line := range strings.Split(captureContent, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if idx := strings.Index(trimmed, "❯"); idx != -1 {
+				after := trimmed[idx+len("❯"):]
+				after = strings.TrimLeft(after, " \xc2\xa0")
+				if after != "" && strings.Contains(after, snippet) {
+					captureConfirmed = true
+					break
+				}
+			}
+		}
+		if captureConfirmed {
+			break
+		}
+	}
+	confirmed := captureConfirmed
+	if !confirmed && shouldSubmit {
+		select {
+		case <-ch:
+			confirmed = true
+		case <-time.After(10 * time.Second):
+			p.InjectConfirm.Cancel(tmuxTarget)
+			logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
+		}
+	}
+	if confirmed {
+		p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
+		logger.Info(fmt.Sprintf("safeInjectText: inject confirmed, target=%s capturePane=%v", tmuxTarget, captureConfirmed))
+	} else {
+		logger.Info(fmt.Sprintf("safeInjectText: inject not confirmed, target=%s", tmuxTarget))
 	}
 	if !shouldSubmit {
 		p.InjectConfirm.Cancel(tmuxTarget)
-		return nil
 	}
-	select {
-	case <-ch:
-		return nil
-	case <-time.After(10 * time.Second):
-		p.InjectConfirm.Cancel(tmuxTarget)
-		logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
-		return nil
-	}
+	return nil
 }
 
 // RebuildInMemoryState reconstructs in-memory maps from a status=sent pending file.

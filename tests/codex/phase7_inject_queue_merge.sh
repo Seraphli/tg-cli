@@ -62,9 +62,9 @@ if [ "$CC_BUSY" != true ]; then
 fi
 
 # Step 2: Send 2 messages while CLI is busy
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --text "$MARKER_A" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_A" 2>&1 || true
 sleep 1
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --text "$MARKER_B" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_B" 2>&1 || true
 
 # Step 3: Verify both messages were queued
 sleep 2

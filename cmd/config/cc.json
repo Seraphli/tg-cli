@@ -5,6 +5,7 @@
     "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5}]}],
     "PermissionRequest": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
     "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
+    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5}]}],
     "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 5, "async": true}]}]
   },
   "permissions": {

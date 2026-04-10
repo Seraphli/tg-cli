@@ -41,7 +41,7 @@ echo "  Waiting for CC to start processing..."
 ELAPSED=0
 CC_BUSY=false
 while [ $ELAPSED -lt 30 ]; do
-  PANE_TITLE=$($TMUX_TEST display-message -p -t "$E2E_PANE" '#{pane_title}' 2>/dev/null || echo "")
+  PANE_TITLE=$($TMUX_TEST display-message -p -t "${E2E_PANE%@*}" '#{pane_title}' 2>/dev/null || echo "")
   # CC is busy if pane title does NOT start with ✳
   if [ -n "$PANE_TITLE" ] && ! echo "$PANE_TITLE" | grep -q '^✳'; then
     CC_BUSY=true
@@ -61,9 +61,9 @@ if [ "$CC_BUSY" != true ]; then
 fi
 
 # Step 2: Send 2 messages while CC is busy
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --text "$MARKER_A" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_A" 2>&1 || true
 sleep 1
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --text "$MARKER_B" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_B" 2>&1 || true
 
 # Step 3: Verify both messages were queued
 sleep 2

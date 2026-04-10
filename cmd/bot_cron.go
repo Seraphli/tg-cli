@@ -16,6 +16,7 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -171,7 +172,23 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		}
 		injectText = fmt.Sprintf("---\n⏰ Cron: %s\n---\n%s", headerName, job.Prompt)
 	}
-	if err := safeInjectText(bs, info.TmuxTarget, injectText); err != nil {
+	p := helpers.SafeInjectTextParams{
+		Bot:              bs.Bot,
+		ToolNotifs:       bs.ToolNotifs,
+		PendingFiles:     bs.PendingFiles,
+		PendingPerms:     bs.PendingPerms,
+		InjectQueue:      bs.InjectQueue,
+		InjectConfirm:    bs.InjectConfirm,
+		StopCooldown:     bs.StopCooldown,
+		ReactionTracker:  bs.ReactionTracker,
+		SessionState:     bs.SessionState,
+		HookSessionLocks: &bs.HookSessionLocks,
+		ResolveChat: func(t string) (*tele.Chat, string, int) {
+			return resolveChat(bs, t)
+		},
+		FormatPaneID: notify.FormatPaneID,
+	}
+	if err := helpers.SafeInjectText(p, info.TmuxTarget, injectText); err != nil {
 		logger.Error(fmt.Sprintf("Cron inject job: inject failed: %v", err))
 		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.TmuxTarget)
 		return

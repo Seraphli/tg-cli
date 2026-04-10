@@ -115,11 +115,8 @@ func buildHeader(firstLine string, h HeaderInfo) []string {
 	return lines
 }
 
-// FormatPaneID extracts the pane ID from a tmux target string (strips the /tmp/... suffix after '@').
+// FormatPaneID returns the full tmux target string as-is.
 func FormatPaneID(tmuxTarget string) string {
-	if idx := strings.Index(tmuxTarget, "@"); idx != -1 {
-		return tmuxTarget[:idx]
-	}
 	return tmuxTarget
 }
 
@@ -331,14 +328,124 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 		if query, ok := fields["query"]; ok {
 			fmt.Fprintf(&b, "🔍 %s", esc(query))
 		}
+	case "AskUserQuestion":
+		questions, _ := fields["questions"].([]interface{})
+		for qi, q := range questions {
+			qMap, _ := q.(map[string]interface{})
+			if qMap == nil {
+				continue
+			}
+			if qi > 0 {
+				b.WriteString("\n\n")
+			}
+			header, _ := qMap["header"].(string)
+			question, _ := qMap["question"].(string)
+			if header != "" {
+				fmt.Fprintf(&b, "❓ %s\n", esc(header))
+			}
+			if question != "" {
+				b.WriteString(esc(question))
+			}
+			options, _ := qMap["options"].([]interface{})
+			for oi, o := range options {
+				oMap, _ := o.(map[string]interface{})
+				if oMap == nil {
+					continue
+				}
+				label, _ := oMap["label"].(string)
+				desc, _ := oMap["description"].(string)
+				if desc != "" {
+					fmt.Fprintf(&b, "\n%d. %s — %s", oi+1, esc(label), esc(desc))
+				} else {
+					fmt.Fprintf(&b, "\n%d. %s", oi+1, esc(label))
+				}
+			}
+		}
 	default:
-		// Unknown tool: key: value fallback
+		// Unknown tool: key: value fallback; complex types use JSON
 		for k, v := range fields {
-			fmt.Fprintf(&b, "%s: %s\n", k, esc(v))
+			switch v.(type) {
+			case string, float64, bool:
+				fmt.Fprintf(&b, "%s: %s\n", k, esc(v))
+			default:
+				jsonBytes, err := json.MarshalIndent(v, "", "  ")
+				if err == nil {
+					fmt.Fprintf(&b, "%s:\n<pre>%s</pre>\n", k, markdown.EscapeHTML(string(jsonBytes)))
+				} else {
+					fmt.Fprintf(&b, "%s: %s\n", k, esc(v))
+				}
+			}
 		}
 	}
 	result := b.String()
 	return result
+}
+
+// BuildToolResultText formats a tool result for appending to PostToolUse notifications.
+// Bash results show stdout and stderr separately; other tools show all fields.
+func BuildToolResultText(toolName string, toolResponse json.RawMessage) string {
+	if len(toolResponse) == 0 {
+		return "✅ Done"
+	}
+	var strResult string
+	if err := json.Unmarshal(toolResponse, &strResult); err == nil {
+		return "✅ Result:\n<pre>" + markdown.EscapeHTML(strResult) + "</pre>"
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(toolResponse, &fields); err == nil {
+		if toolName == "Bash" {
+			var b strings.Builder
+			b.WriteString("✅ Result:\n")
+			if stdout, ok := fields["stdout"]; ok {
+				s := fmt.Sprintf("%v", stdout)
+				if s != "" {
+					fmt.Fprintf(&b, "<pre>%s</pre>", markdown.EscapeHTML(s))
+				}
+			}
+			if stderr, ok := fields["stderr"]; ok {
+				s := fmt.Sprintf("%v", stderr)
+				if s != "" {
+					fmt.Fprintf(&b, "\nstderr:\n<pre>%s</pre>", markdown.EscapeHTML(s))
+				}
+			}
+			result := b.String()
+			if result == "✅ Result:\n" {
+				return "✅ Done"
+			}
+			return result
+		}
+		if toolName == "AskUserQuestion" {
+			var b strings.Builder
+			b.WriteString("✅ Result:\n")
+			if answers, ok := fields["answers"].(map[string]interface{}); ok {
+				for q, a := range answers {
+					fmt.Fprintf(&b, "%s → %s\n", markdown.EscapeHTML(fmt.Sprintf("%v", q)), markdown.EscapeHTML(fmt.Sprintf("%v", a)))
+				}
+			}
+			result := b.String()
+			if result == "✅ Result:\n" {
+				return "✅ Done"
+			}
+			return result
+		}
+		var b strings.Builder
+		b.WriteString("✅ Result:\n")
+		for k, v := range fields {
+			switch v.(type) {
+			case string, float64, bool:
+				fmt.Fprintf(&b, "%s: %s\n", k, markdown.EscapeHTML(fmt.Sprintf("%v", v)))
+			default:
+				jsonBytes, err := json.MarshalIndent(v, "", "  ")
+				if err == nil {
+					fmt.Fprintf(&b, "%s:\n<pre>%s</pre>\n", k, markdown.EscapeHTML(string(jsonBytes)))
+				} else {
+					fmt.Fprintf(&b, "%s: %s\n", k, markdown.EscapeHTML(fmt.Sprintf("%v", v)))
+				}
+			}
+		}
+		return b.String()
+	}
+	return "✅ Result:\n<pre>" + markdown.EscapeHTML(string(toolResponse)) + "</pre>"
 }
 
 func BuildQuestionText(data QuestionData) string {

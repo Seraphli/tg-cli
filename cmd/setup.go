@@ -17,7 +17,11 @@ import (
 
 // availableTools is the list of tools that can trigger TG notifications.
 var availableTools = []string{
-	"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch",
+	"Edit", "Write", "Bash", "Read", "Glob", "Grep",
+	"Agent", "WebFetch", "WebSearch", "MCP", "Skill",
+	"TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop", "TaskOutput",
+	"NotebookEdit", "EnterPlanMode", "ExitPlanMode",
+	"EnterWorktree", "ExitWorktree", "Other",
 }
 
 //go:embed config/cc.json
@@ -456,12 +460,14 @@ func configureToolNotifications() {
 	if len(availableTools)%3 != 0 {
 		fmt.Println()
 	}
-	// Show current selection
-	if len(appCfg.ToolNotifyList) > 0 {
-		fmt.Printf("Current: %s\n", strings.Join(appCfg.ToolNotifyList, ", "))
-	} else {
-		fmt.Println("Current: (none)")
+	// Default to all tools if no selection configured
+	if len(appCfg.ToolNotifyList) == 0 {
+		appCfg.ToolNotifyList = append([]string{}, availableTools...)
+		for _, t := range availableTools {
+			currentSet[t] = true
+		}
 	}
+	fmt.Printf("Current: %s\n", strings.Join(appCfg.ToolNotifyList, ", "))
 	fmt.Print("Enter numbers (comma-separated), * for all, or press Enter to keep current: ")
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
@@ -469,6 +475,9 @@ func configureToolNotifications() {
 	}
 	input := strings.TrimSpace(scanner.Text())
 	if input == "" {
+		if err := config.SaveAppConfig(appCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to save app config: %v\n", err)
+		}
 		return
 	}
 	var selected []string

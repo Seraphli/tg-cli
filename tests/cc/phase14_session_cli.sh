@@ -39,7 +39,7 @@ fi
 
 # Test session send — inject and verify in bot log (API-based, works for both CC and Codex)
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "e2e_session_send_test_marker" > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "e2e_session_send_test_marker" > /dev/null 2>&1 || true
 sleep 2
 if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"; then
   pass "session send: message injected and logged"

@@ -6,7 +6,7 @@ source "${CC_COMMON_DIR}/../e2e_common.sh"
 start_claude() {
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$E2E_SESSION"
-  E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}')
+  E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
     "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"
@@ -15,7 +15,7 @@ start_claude() {
   echo "Waiting for Claude to start..."
   sleep 5
   pane_log "[start_claude] after 5s sleep, before trust check"
-  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$E2E_PANE" -p -S - 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" Down
     sleep 1

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
-	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
@@ -66,8 +64,9 @@ func processTranscriptUpdates(bs *BotState, sessionID, transcriptPath string, is
 	return strings.Join(newTexts, "\n\n")
 }
 
-func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) {
+func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int {
 	b := bs.Bot
+	var sentMsgID int
 	backend := "cc"
 	if info := bs.SessionState.FindInfoByTarget(tmuxTarget); info != nil && info.Backend != "" {
 		backend = info.Backend
@@ -138,10 +137,13 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 	if len(chunks) <= 1 {
 		nd.Body = body
 		text := notify.BuildNotificationText(nd)
-		_, err := helpers.RetrySend(b, chat, text, sendOpts...)
+		sent, err := helpers.RetrySend(b, chat, text, sendOpts...)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, helpers.TruncateStr(text, 500)))
 		} else {
+			if sent != nil {
+				sentMsgID = sent.ID
+			}
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), helpers.TruncateStr(body, 200)))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
@@ -156,6 +158,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		if err != nil {
 			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, helpers.TruncateStr(text, 500)))
 		} else {
+			sentMsgID = sent.ID
 			bs.Pages.Store(sent.ID, sessionID, &stores.PageEntry{
 				Chunks:     chunks,
 				Event:      event,
@@ -184,11 +187,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 			logger.Info(fmt.Sprintf("Table image %d sent to chat %s for event %s", i+1, chatID, event))
 		}
 	}
-}
-
-// recordPending records a message for later ✍ reaction when UserPromptSubmit fires.
-func recordPending(bs *BotState, tmuxTarget string, chatID int64, msgID int) {
-	bs.ReactionTracker.RecordPending(tmuxTarget, chatID, msgID)
+	return sentMsgID
 }
 
 var typingLogWriter io.Writer
@@ -283,38 +282,6 @@ func resolveChat(bs *BotState, tmuxTarget string) (*tele.Chat, string, int) {
 	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
 }
 
-// handleStalePending checks if a pending entry is stale (hook dead or file missing).
-// Returns true if stale (cleanup done), false if still alive.
-func handleStalePending(bs *BotState, msgID int, uuid string) bool {
-	path := filepath.Join(helpers.PendingDir(), uuid+".json")
-	pf, err := helpers.ReadPendingFile(path)
-	if err != nil {
-		cleanupPendingState(bs, msgID, uuid, "file missing")
-		return true
-	}
-	if pf.Status == "sent" && !helpers.IsHookAlive(pf.HookPID) {
-		os.Remove(path)
-		cleanupPendingState(bs, msgID, uuid, fmt.Sprintf("hook dead (pid=%d)", pf.HookPID))
-		return true
-	}
-	return false
-}
-
-// cleanupPendingState cleans up bot memory state and freezes TG buttons.
-func cleanupPendingState(bs *BotState, msgID int, uuid string, reason string) {
-	if entry, ok := bs.ToolNotifs.Get(msgID); ok && !entry.Resolved {
-		bs.ToolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		helpers.RetryEdit(bs.Bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
-	}
-	if _, ok := bs.PendingPerms.GetTarget(msgID); ok {
-		bs.PendingPerms.Resolve(msgID, stores.PermDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
-	}
-	bs.PendingFiles.Remove(msgID)
-	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
-}
-
-
 // cleanStaleRoutes is a no-op. Routes are permanent — never delete NameRouteMap entries automatically.
 // Users manage routes via /bot_bind and /bot_unbind.
 func cleanStaleRoutes(bs *BotState) {
@@ -357,173 +324,50 @@ func flushInjectQueue(bs *BotState, tmuxTarget string) {
 	msgContent := "──────\n" + strings.Join(texts, "\n") + "\n──────"
 	// Inject the merged text in a goroutine to avoid blocking the hook handler
 	go func(target, text, id, msgList string, itemCount int, notifyID int, hasNotifyMsg bool, chat *tele.Chat, topicID int) {
-		time.Sleep(3 * time.Second)
-		// Ensure hook state is idle before injecting (Stop already set it, but be explicit)
-		bs.HookRunning.SetIdle(target)
-		typingLog("state: event=flushInjectQueue target=%s state=idle", target)
-		// Register confirmation channel BEFORE inject to avoid race with UserPromptSubmit
-		ch := bs.InjectConfirm.Register(target)
-		if err := safeInjectText(bs, target, text); err != nil {
+		// Wait for Stop hook to finish (CC returns to idle after hook exits)
+		bs.StopCooldown.WaitIfNeeded(target, 1500*time.Millisecond)
+		p := helpers.SafeInjectTextParams{
+			Bot:              bs.Bot,
+			ToolNotifs:       bs.ToolNotifs,
+			PendingFiles:     bs.PendingFiles,
+			PendingPerms:     bs.PendingPerms,
+			InjectQueue:      bs.InjectQueue,
+			InjectConfirm:    bs.InjectConfirm,
+			StopCooldown:     bs.StopCooldown,
+			ReactionTracker:  bs.ReactionTracker,
+			SessionState:     bs.SessionState,
+			HookSessionLocks: &bs.HookSessionLocks,
+			ResolveChat: func(t string) (*tele.Chat, string, int) {
+				return resolveChat(bs, t)
+			},
+			FormatPaneID: notify.FormatPaneID,
+			Force:        true,
+		}
+		if err := helpers.SafeInjectText(p, target, text); err != nil {
 			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] inject failed: target=%s err=%v", id, target, err))
-			bs.InjectConfirm.Cancel(target)
 			if hasNotifyMsg && chat != nil {
 				editMsg := &tele.Message{ID: notifyID, Chat: chat}
 				helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("❌ Inject failed [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
 			}
 			return
 		}
-		// Wait for UserPromptSubmit confirmation
-		select {
-		case <-ch:
-			logger.Info(fmt.Sprintf("flushInjectQueue: [%s] inject confirmed: target=%s", id, target))
-			// Update TG notification to show success
-			if hasNotifyMsg && chat != nil {
-				editMsg := &tele.Message{ID: notifyID, Chat: chat}
-				helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("✅ Injected [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
-			}
-		case <-time.After(30 * time.Second):
-			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] inject verification timeout: target=%s", id, target))
-			bs.InjectConfirm.Cancel(target)
-			// Still mark as injected (text was sent), but warn about no confirmation
-			if hasNotifyMsg && chat != nil {
-				editMsg := &tele.Message{ID: notifyID, Chat: chat}
-				helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("⚠️ Injected [%s] (%d) — no confirmation\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
-			}
+		// SafeInjectText handles confirmation internally (CapturePane/PostToolUse)
+		logger.Info(fmt.Sprintf("flushInjectQueue: [%s] inject completed: target=%s", id, target))
+		if hasNotifyMsg && chat != nil {
+			editMsg := &tele.Message{ID: notifyID, Chat: chat}
+			helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("✅ Injected [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
 		}
 	}(tmuxTarget, merged, injectID, msgContent, len(items), notifyMsgID, hasNotify, chat, topicID)
-}
-
-// safeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
-// If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
-func safeInjectText(bs *BotState, tmuxTarget string, text string, submit ...bool) error {
-	target, err := injector.ParseTarget(tmuxTarget)
-	if err != nil {
-		return err
-	}
-	// PRE-INJECT: check if CC is busy (hook-based + pane title fallback). If busy, queue and return.
-	if helpers.IsSessionRunning(tmuxTarget) {
-		// Check if there's a pending AskUserQuestion — if so, answer it directly (don't queue)
-		if _, _, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxTarget); ok {
-			// Fall through to AskUserQuestion handling below
-		} else {
-			chat, chatIDStr, topicID := resolveChat(bs, tmuxTarget)
-			chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
-			bs.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
-			count := bs.InjectQueue.ItemCount(tmuxTarget)
-			logger.Info(fmt.Sprintf("safeInjectText: CC busy, queued for target=%s count=%d text=%s", tmuxTarget, count, strings.ReplaceAll(text, "\n", "\\n")))
-			if chat != nil {
-				// Show all queued messages with inject ID and delimiters
-				allTexts := bs.InjectQueue.GetTexts(tmuxTarget)
-				queueID := bs.InjectQueue.GetInjectID(tmuxTarget)
-				notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, notify.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
-				var sendOpts []interface{}
-				if topicID > 0 {
-					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-				}
-				if existingMsgID, ok := bs.InjectQueue.GetNotifyMsg(tmuxTarget); ok {
-					editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
-					helpers.RetryEdit(bs.Bot, editMsg, notifyText)
-				} else {
-					sent, _ := helpers.RetrySend(bs.Bot, chat, notifyText, sendOpts...)
-					if sent != nil {
-						bs.InjectQueue.SetNotifyMsg(tmuxTarget, sent.ID)
-					}
-				}
-			}
-			return nil
-		}
-	}
-	// Answer pending AskUserQuestion with the text (same as normal custom reply)
-	for {
-		msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxTarget)
-		if !ok {
-			break
-		}
-		uuid, uuidOk := bs.PendingFiles.Get(msgID)
-		if !uuidOk {
-			bs.ToolNotifs.MarkResolved(msgID)
-			continue
-		}
-		if handleStalePending(bs, msgID, uuid) {
-			continue
-		}
-		path := filepath.Join(helpers.PendingDir(), uuid+".json")
-		pf, pfErr := helpers.ReadPendingFile(path)
-		if pfErr != nil {
-			bs.ToolNotifs.MarkResolved(msgID)
-			continue
-		}
-		answers := make(map[string]string)
-		if len(entry.Questions) > 0 {
-			answers[entry.Questions[0].QuestionText] = text
-		}
-		ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
-		if writeErr := helpers.WritePendingAnswer(uuid, ccOutput); writeErr != nil {
-			logger.Error(fmt.Sprintf("safeInjectText: failed to write answer: %v", writeErr))
-		}
-		bs.ToolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		helpers.RetryEdit(bs.Bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Custom reply"), tele.ModeHTML)
-		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-		return nil
-	}
-	// PermissionRequest pending — queue instead of injecting
-	if _, ok := bs.PendingPerms.FindByTmuxTarget(tmuxTarget); ok {
-		chat, chatIDStr, topicID := resolveChat(bs, tmuxTarget)
-		chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
-		bs.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
-		count := bs.InjectQueue.ItemCount(tmuxTarget)
-		logger.Info(fmt.Sprintf("safeInjectText: PermissionRequest pending, queued for target=%s count=%d text=%s", tmuxTarget, count, helpers.TruncateStr(text, 200)))
-		if chat != nil {
-			allTexts := bs.InjectQueue.GetTexts(tmuxTarget)
-			queueID := bs.InjectQueue.GetInjectID(tmuxTarget)
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, notify.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
-			var sendOpts []interface{}
-			if topicID > 0 {
-				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-			}
-			if existingMsgID, ok := bs.InjectQueue.GetNotifyMsg(tmuxTarget); ok {
-				editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
-				helpers.RetryEdit(bs.Bot, editMsg, notifyText)
-			} else {
-				sent, _ := helpers.RetrySend(bs.Bot, chat, notifyText, sendOpts...)
-				if sent != nil {
-					bs.InjectQueue.SetNotifyMsg(tmuxTarget, sent.ID)
-				}
-			}
-		}
-		return nil
-	}
-	// Wait for Stop event cooldown before injecting
-	bs.StopCooldown.WaitIfNeeded(tmuxTarget, 3*time.Second)
-	shouldSubmit := len(submit) == 0 || submit[0]
-	ch := bs.InjectConfirm.Register(tmuxTarget)
-	if err := injector.InjectText(target, text, shouldSubmit); err != nil {
-		bs.InjectConfirm.Cancel(tmuxTarget)
-		return err
-	}
-	if !shouldSubmit {
-		bs.InjectConfirm.Cancel(tmuxTarget)
-		return nil
-	}
-	select {
-	case <-ch:
-		return nil
-	case <-time.After(10 * time.Second):
-		bs.InjectConfirm.Cancel(tmuxTarget)
-		logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
-		return nil
-	}
 }
 
 // checkSessionVersion checks a single session for CC version updates.
 func checkSessionVersion(bs *BotState, tmuxTarget string) {
 	time.Sleep(2 * time.Second)
-	sessionID, found := bs.SessionState.FindByTarget(tmuxTarget)
+	_, found := bs.SessionState.FindByTarget(tmuxTarget)
 	if !found {
 		return
 	}
-	current := helpers.ReadSessionCCVersion(sessionID)
+	current := helpers.ReadSessionCCVersion(tmuxTarget)
 	if current == "" {
 		return
 	}

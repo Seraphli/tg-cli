@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,7 +34,13 @@ type BindMenuContext struct {
 	TopicID int
 }
 
-var builtinTools = []string{"Edit", "Write", "Bash", "Read", "Glob", "Grep", "Agent", "WebFetch", "WebSearch", "MCP"}
+var builtinTools = []string{
+	"Edit", "Write", "Bash", "Read", "Glob", "Grep",
+	"Agent", "WebFetch", "WebSearch", "MCP", "Skill",
+	"TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop", "TaskOutput",
+	"NotebookEdit", "EnterPlanMode", "ExitPlanMode",
+	"EnterWorktree", "ExitWorktree", "Other",
+}
 
 // buildToolsMenu builds an inline keyboard for tool notification selection.
 func buildToolsMenu(selected []string) *tele.ReplyMarkup {
@@ -355,9 +360,11 @@ func Register(bs *types.BotState) {
 			cwd = info.CWD
 		} else {
 			// Fallback: get CWD directly from tmux pane
-			out, err := exec.Command("tmux", "display-message", "-p", "-t", tmuxStr, "#{pane_current_path}").Output()
-			if err == nil {
-				cwd = strings.TrimSpace(string(out))
+			if target, parseErr := injector.ParseTarget(tmuxStr); parseErr == nil {
+				out, err := injector.TmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_current_path}").Output()
+				if err == nil {
+					cwd = strings.TrimSpace(string(out))
+				}
 			}
 			logger.Debug(fmt.Sprintf("/resume: tmux fallback cwd=%s", cwd))
 		}
@@ -776,6 +783,22 @@ func Register(bs *types.BotState) {
 	})
 
 	bot.Handle("/bot_tools", func(c tele.Context) error {
+		if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+			creds, _ := config.LoadCredentials()
+			for key, route := range creds.NameRouteMap {
+				if route.ChatID == c.Chat().ID {
+					label := "✅ Tool Notify: ON"
+					if route.ToolNotifyOff {
+						label = "⬜ Tool Notify: OFF"
+					}
+					menu := &tele.ReplyMarkup{}
+					btn := menu.Data(label, "tools_route_toggle", key)
+					menu.Inline(menu.Row(btn))
+					return c.Reply("🔧 Tool notification for this group:", menu)
+				}
+			}
+			return c.Reply("❌ No route found for this group.")
+		}
 		cfg, err := config.LoadAppConfig()
 		if err != nil {
 			return c.Reply("❌ Failed to load config")

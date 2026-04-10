@@ -15,7 +15,7 @@ TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[ask_user] BEFORE sending AskUserQuestion prompt"
 
 # Send prompt that should trigger AskUserQuestion
-inject_prompt "First write a brief paragraph explaining what you are about to do, then ask me a question using AskUserQuestion tool with header 'Test Header' and two options: 'Option A' with description 'First option desc', 'Option B' with description 'Second option desc'. Question: 'Which option?'"
+inject_prompt "Answer this question first in 2 sentences: what is the purpose of asking users structured multiple-choice questions in a CLI tool? After answering, use the AskUserQuestion tool to ask me a question with header 'Test Header' and two options: 'Option A' with description 'First option desc', 'Option B' with description 'Second option desc'. Question: 'Which option?'"
 
 pane_log "[ask_user] AFTER sending prompt"
 
@@ -43,21 +43,42 @@ pane_log "[ask_user] AFTER hook notification (idle)"
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
 
+  # Verify AskUserQuestion ToolUse notification format (from BuildToolNotifyText AskUserQuestion case)
+  AQ_TOOLUSE_TEXT=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -A20 "TG message sent \[ToolUse\] full_text" | head -20 || true)
+  if [ -n "$AQ_TOOLUSE_TEXT" ]; then
+    if echo "$AQ_TOOLUSE_TEXT" | grep "❓" > /dev/null 2>&1; then
+      pass "AskUserQuestion ToolUse notification has ❓ format"
+    else
+      fail "AskUserQuestion ToolUse notification missing ❓ format"
+    fi
+    if echo "$AQ_TOOLUSE_TEXT" | grep "map\[" > /dev/null 2>&1; then
+      fail "AskUserQuestion ToolUse notification contains raw Go map[] format"
+    else
+      pass "AskUserQuestion ToolUse notification does not contain raw map[] format"
+    fi
+  else
+    fail "AskUserQuestion ToolUse full_text not found in log"
+  fi
+
   # Typing continuity: inject → PreToolUse (text generation before AskUserQuestion)
   check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
 
-  # Verify Update notification sent BEFORE AskUserQuestion
+  # Verify Update notification sent BEFORE AskUserQuestion (tolerant to Claude skipping intermediate text)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
   UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
   AQ_LINE=$(awk '/AskUserQuestion sent/{print NR; exit}' <<< "$NEW_LOGS")
-  if [ -n "$UPDATE_LINE" ] && [ -n "$AQ_LINE" ]; then
+  if [ -z "$AQ_LINE" ]; then
+    fail "AskUserQuestion sent log line not found"
+  elif [ -n "$UPDATE_LINE" ]; then
     if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
       pass "Update notification sent BEFORE AskUserQuestion (line $UPDATE_LINE < $AQ_LINE)"
     else
       fail "Update sent AFTER AskUserQuestion"
     fi
+  elif [[ "$NEW_LOGS" == *"PreToolUse Update skipped"* ]]; then
+    pass "PreToolUse Update path exercised (skipped: no new assistant text — vacuous pass)"
   else
-    [ -z "$UPDATE_LINE" ] && fail "PreToolUse Update not found before AskUserQuestion"
+    fail "Neither PreToolUse Update sent nor skipped log found — code path not exercised"
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
@@ -134,6 +155,15 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       pass "Stop notification log contains actual body content"
     else
       fail "Stop notification log missing body content"
+    fi
+
+    # Verify PostToolUse result format for AskUserQuestion (→ format instead of raw map)
+    AQ_POST_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "PostToolUse: updated msg_id=" || true)
+    if [ -n "$AQ_POST_LOG" ]; then
+      pass "PostToolUse updated AskUserQuestion ToolUse message"
+    else
+      # PostToolUse may not fire if AskUserQuestion ToolUse notification was not sent (e.g. not in toolNotifyList)
+      fail "PostToolUse update not detected for AskUserQuestion"
     fi
 
     # Extract transcript path from bot log (CC uses snake_case: transcript_path)

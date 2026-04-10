@@ -58,7 +58,7 @@ RECV_PID=$!
 # Step 3: Send message to CC asking it to send mailbox
 echo "  [integ] Sending message to $INTEG_AGENT..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
-  --name "$INTEG_AGENT" --port "$TEST_PORT" \
+  --name "$INTEG_AGENT" --port "$TEST_PORT" --from e2e-test \
   --text "Run this exact command: tg-cli mailbox send --from $INTEG_AGENT --to $E2E_SESSION --subject 'E2E Integration' --text 'e2e_integration_marker_22' --port $TEST_PORT" > /dev/null 2>&1
 pane_log "[integ] after session send"
 
@@ -121,7 +121,7 @@ WATCH_PID=$!
 sleep 2
 echo "  [integ] Sending simple task to trigger Stop..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
-  --name "$INTEG_AGENT" --port "$TEST_PORT" \
+  --name "$INTEG_AGENT" --port "$TEST_PORT" --from e2e-test \
   --text "Say exactly: watch_test_ok" > /dev/null 2>&1
 
 # Wait for watch to return

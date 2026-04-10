@@ -313,13 +313,17 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if req.From == "" {
+			http.Error(w, "from required", http.StatusBadRequest)
+			return
+		}
 		info := bs.SessionState.FindByName(req.Name)
 		if info == nil {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
 		injectText := req.Text
-		if req.From != "" && !req.NoHeader {
+		if !req.NoHeader {
 			injectText = fmt.Sprintf("---\n💬 Message from agent [%s]\n---\n%s", req.From, req.Text)
 		}
 		p := buildSafeInjectParams(bs)
@@ -327,14 +331,11 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s text=%s", req.Name, info.TmuxTarget, req.From, helpers.TruncateStr(req.Text, 200)))
+		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s noHeader=%t text=%s injectText=%q", req.Name, info.TmuxTarget, req.From, req.NoHeader, helpers.TruncateStr(req.Text, 200), helpers.TruncateStr(injectText, 300)))
 		// Send TG notification to the target session's chat
 		chat, _, topicID := helpers.ResolveChat(bs.SessionState, info.TmuxTarget)
 		if chat != nil {
-			fromLine := ""
-			if req.From != "" {
-				fromLine = fmt.Sprintf("📤 From: %s\n", req.From)
-			}
+			fromLine := fmt.Sprintf("📤 From: %s\n", req.From)
 			header := "💬 CLI Send"
 			if req.NoHeader {
 				header = "📨 CLI Send (silent)"
@@ -350,7 +351,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			} else {
 				helpers.RetrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
 			}
-			logger.Info(fmt.Sprintf("Session send notification: target=%s text=%s", req.Name, helpers.TruncateStr(req.Text, 200)))
+			logger.Info(fmt.Sprintf("Session send notification: target=%s from=%s text=%s", req.Name, req.From, helpers.TruncateStr(req.Text, 200)))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))

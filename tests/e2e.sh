@@ -80,11 +80,17 @@ build_phase_list() {
   echo "${phases[@]}"
 }
 
-# Find a specific phase across all subdirectories
+# Find a specific phase across subdirectories (backend-specific dirs searched first)
 find_phase() {
   local num="$1"
   local matched=""
-  for dir in common cc codex; do
+  local dirs
+  case "$BACKEND" in
+    cc) dirs="cc common" ;;
+    codex) dirs="codex common" ;;
+    *) dirs="common cc codex" ;;
+  esac
+  for dir in $dirs; do
     matched=$(ls "$SCRIPT_DIR/$dir/phase${num}_"*.sh 2>/dev/null | head -1 || true)
     [ -n "$matched" ] && echo "$matched" && return
   done
@@ -155,14 +161,14 @@ fi
 # Final report
 echo ""
 echo "=== E2E Test Report ==="
-TOTAL_PASS=$(grep "^PASS|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l)
-TOTAL_FAIL=$(grep "^FAIL|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l)
+TOTAL_PASS=$(grep "^PASS|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
+TOTAL_FAIL=$(grep "^FAIL|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
 echo "  Passed: $TOTAL_PASS"
 echo "  Failed: $TOTAL_FAIL"
 echo ""
 if [ "$TOTAL_FAIL" -gt 0 ]; then
   echo "Failed tests:"
-  grep "^FAIL|" "$E2E_RESULTS_FILE" | sed 's/^FAIL|/  - /'
+  grep "^FAIL|" "$E2E_RESULTS_FILE" | sed 's/^FAIL|/  - /' || true
   echo ""
   echo "E2E test FAILED"
   exit 1

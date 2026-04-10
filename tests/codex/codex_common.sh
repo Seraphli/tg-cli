@@ -8,7 +8,7 @@ start_codex() {
   rm -f "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$E2E_SESSION"
-  E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}')
+  E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
     "CODEX_HOME=$CODEX_HOME codex --yolo --enable codex_hooks"
@@ -18,7 +18,7 @@ start_codex() {
   local elapsed=0
   local dialog_handled=false
   while [ $elapsed -lt 60 ]; do
-    PANE_CONTENT=$($TMUX_TEST capture-pane -t "$E2E_PANE" -p -S - 2>/dev/null || true)
+    PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
     if [ "$dialog_handled" = false ] && echo "$PANE_CONTENT" | grep -qi "trust\|continue\|Press enter"; then
       $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
       dialog_handled=true
@@ -28,7 +28,7 @@ start_codex() {
       continue
     fi
     local title
-    title=$($TMUX_TEST display-message -t "$E2E_PANE" -p '#{pane_title}' 2>/dev/null || true)
+    title=$($TMUX_TEST display-message -t "${E2E_PANE%@*}" -p '#{pane_title}' 2>/dev/null || true)
     local expected_title
     expected_title=$(basename "$(pwd)")
     if [ "$title" = "$expected_title" ]; then

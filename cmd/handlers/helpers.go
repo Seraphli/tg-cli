@@ -23,15 +23,16 @@ import (
 // safeInjectText is a convenience wrapper that builds SafeInjectTextParams from BotState.
 func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
 	p := helpers.SafeInjectTextParams{
-		Bot:             bs.Bot,
-		ToolNotifs:      bs.ToolNotifs,
-		PendingFiles:    bs.PendingFiles,
-		PendingPerms:    bs.PendingPerms,
-		InjectQueue:     bs.InjectQueue,
-		InjectConfirm:   bs.InjectConfirm,
-		StopCooldown:    bs.StopCooldown,
-		ReactionTracker: bs.ReactionTracker,
-		SessionState:    bs.SessionState,
+		Bot:              bs.Bot,
+		ToolNotifs:       bs.ToolNotifs,
+		PendingFiles:     bs.PendingFiles,
+		PendingPerms:     bs.PendingPerms,
+		InjectQueue:      bs.InjectQueue,
+		InjectConfirm:    bs.InjectConfirm,
+		StopCooldown:     bs.StopCooldown,
+		ReactionTracker:  bs.ReactionTracker,
+		SessionState:     bs.SessionState,
+		HookSessionLocks: &bs.HookSessionLocks,
 		ResolveChat: func(target string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, target)
 		},
@@ -248,7 +249,7 @@ func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 		mu.Lock()
 		defer mu.Unlock()
 	}
-	pidOut, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
+	pidOut, err := injector.TmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
 	if err != nil {
 		return fmt.Errorf("get pane pid: %w", err)
 	}
@@ -353,14 +354,14 @@ func handleUsageCommandTmux(bs *types.BotState, c tele.Context, existingMsg *tel
 	}
 	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
 	configDir := config.GetConfigDir()
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
+	cmd := injector.GlobalTmuxCmd("new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
 	if err := cmd.Run(); err != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
 		helpers.RetryEdit(bot, msg, "❌ Failed to create temp session", tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
-	defer exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	defer injector.GlobalTmuxCmd("kill-session", "-t", sessionName).Run()
 	target, _ := injector.ParseTarget(sessionName)
 	logger.Info(fmt.Sprintf("handleUsageCommand: starting claude session=%s", sessionName))
 	injector.SendKeys(target, "claude", "Enter")

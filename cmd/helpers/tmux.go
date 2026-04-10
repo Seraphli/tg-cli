@@ -15,11 +15,7 @@ func GetPaneCWD(tmuxTarget string) string {
 	if err != nil {
 		return ""
 	}
-	args := []string{"display-message", "-t", target.PaneID, "-p", "#{pane_current_path}"}
-	if injector.ServerName != "" {
-		args = append([]string{"-L", injector.ServerName}, args...)
-	}
-	out, err := exec.Command("tmux", args...).Output()
+	out, err := injector.TmuxCmd(target, "display-message", "-t", target.PaneID, "-p", "#{pane_current_path}").Output()
 	if err != nil {
 		return ""
 	}
@@ -58,7 +54,7 @@ func GetPaneCLICommand(tmuxTarget string) string {
 	if err != nil {
 		return ""
 	}
-	pidOut, err := exec.Command("tmux", "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
+	pidOut, err := injector.TmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_pid}").Output()
 	if err != nil {
 		return ""
 	}
@@ -76,7 +72,11 @@ func GetPaneCLICommand(tmuxTarget string) string {
 // GetPaneLabel returns a human-readable label (session:window.pane) for the given tmux target.
 func GetPaneLabel(tmuxTarget string, formatPaneID func(string) string) string {
 	paneID := formatPaneID(tmuxTarget)
-	out, err := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{session_name}:#{window_name}.#{pane_index}").Output()
+	target, parseErr := injector.ParseTarget(tmuxTarget)
+	if parseErr != nil {
+		return paneID
+	}
+	out, err := injector.TmuxCmd(target, "display-message", "-t", target.PaneID, "-p", "#{session_name}:#{window_name}.#{pane_index}").Output()
 	if err != nil {
 		return paneID
 	}

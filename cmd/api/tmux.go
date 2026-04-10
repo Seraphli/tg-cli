@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -20,7 +19,7 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 	bot := bs.Bot
 	creds := bs.Creds
 	mux.HandleFunc("/tmux/list", func(w http.ResponseWriter, r *http.Request) {
-		out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+		out, err := injector.GlobalTmuxCmd("list-panes", "-a", "-F",
 			"#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_current_path} #{pane_pid} #{pane_current_command}").Output()
 		type paneEntry struct {
 			Target      string `json:"target"`
@@ -96,7 +95,7 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		formatted := injector.FormatTarget(target)
-		if err := exec.Command("tmux", "kill-pane", "-t", notify.FormatPaneID(formatted)).Run(); err != nil {
+		if err := injector.TmuxCmd(target, "kill-pane", "-t", target.PaneID).Run(); err != nil {
 			logger.Error(fmt.Sprintf("tmux kill-pane failed: target=%s err=%v", formatted, err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

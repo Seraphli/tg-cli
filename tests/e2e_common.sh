@@ -246,7 +246,7 @@ MINEOF
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
   local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"
-  echo "{\"toolNotifyList\":[\"Bash\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
+  echo "{\"toolNotifyList\":[\"Bash\",\"AskUserQuestion\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
 
@@ -254,8 +254,7 @@ cleanup_sessions() {
   local exit_code=$?
   echo ""
   echo "Cleaning up..."
-  rm -rf "$TEST_CLAUDE_CONFIG_DIR" 2>/dev/null || true
-  rm -rf "$CODEX_HOME" 2>/dev/null || true
+  # Preserve config dirs for post-failure analysis (setup_hooks cleans at start of next run)
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   sleep 2
   $TMUX_TEST kill-session -t "=$BOT_SESSION" 2>/dev/null || true

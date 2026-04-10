@@ -27,6 +27,7 @@ type BotState struct {
 	HookRunning     *stores.HookRunningStateStore
 	StopCooldown    *stores.StopCooldownStore
 	SessionWatch    *stores.SessionWatchStore
+	ToolUseMsgs     *stores.ToolUseMsgStore
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map

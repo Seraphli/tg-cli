@@ -156,14 +156,11 @@ func runCronAdd(cmd *cobra.Command, args []string) {
 	// Resolve tmux target from current session if --self flag is set
 	tmuxTarget := ""
 	if cronSelf {
-		pane := os.Getenv("TMUX_PANE")
-		tmux := os.Getenv("TMUX")
-		if pane == "" {
+		tmuxTarget = buildTmuxTargetFromEnv()
+		if tmuxTarget == "" {
 			fmt.Fprintln(os.Stderr, "Error: TMUX_PANE not set, are you inside a tmux session?")
 			os.Exit(1)
 		}
-		_ = tmux
-		tmuxTarget = pane
 	}
 	port := getCronPort()
 	reqBody := struct {

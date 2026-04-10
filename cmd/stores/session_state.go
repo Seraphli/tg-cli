@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
-	"github.com/Seraphli/tg-cli/internal/notify"
 )
 
 // SessionInfo holds the tmux target, working directory, project dir, and agent name for a CC session.
@@ -198,12 +198,14 @@ func (s *SessionStateStore) All() map[string]SessionInfo {
 }
 
 // FindByTarget returns the session ID for a given tmux target.
+// Matching strips any "@socket_path" suffix from both sides so short-format
+// queries (e.g. "%5") can match long-format stored targets (e.g. "%5@/tmp/tmux-1000/default").
 func (s *SessionStateStore) FindByTarget(target string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	normalized := notify.FormatPaneID(target)
+	normalized := stripSocketPath(target)
 	for sid, info := range s.sessions {
-		if notify.FormatPaneID(info.TmuxTarget) == normalized {
+		if stripSocketPath(info.TmuxTarget) == normalized {
 			return sid, true
 		}
 	}
@@ -211,12 +213,14 @@ func (s *SessionStateStore) FindByTarget(target string) (string, bool) {
 }
 
 // FindInfoByTarget returns a pointer to the SessionInfo for a given tmux target.
+// Matching strips any "@socket_path" suffix from both sides so short-format
+// queries can match long-format stored targets.
 func (s *SessionStateStore) FindInfoByTarget(target string) *SessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	normalized := notify.FormatPaneID(target)
+	normalized := stripSocketPath(target)
 	for _, info := range s.sessions {
-		if notify.FormatPaneID(info.TmuxTarget) == normalized {
+		if stripSocketPath(info.TmuxTarget) == normalized {
 			cp := info
 			return &cp
 		}
@@ -289,4 +293,15 @@ func (s *SessionStateStore) FindInfoByID(sessionID string) *SessionInfo {
 	}
 	cp := info
 	return &cp
+}
+
+// stripSocketPath removes the "@socket_path" suffix from a tmux target,
+// returning just the bare pane ID portion. Used by FindByTarget /
+// FindInfoByTarget to match short-format queries against long-format
+// stored targets (hook-originated sessions store the full pane@socket form).
+func stripSocketPath(target string) string {
+	if idx := strings.Index(target, "@"); idx >= 0 {
+		return target[:idx]
+	}
+	return target
 }

@@ -20,7 +20,7 @@ while [ $ELAPSED -lt 30 ]; do
   sleep 1
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   sleep 2
-  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$E2E_PANE" -p 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -q "$SENTINEL"; then
     echo "  Shell is ready (sentinel detected)."
     break
@@ -42,7 +42,7 @@ ELAPSED_CC=0
 CC_STARTED=false
 while [ $ELAPSED_CC -lt 30 ]; do
   sleep 2
-  PANE_CONTENT=$($TMUX_TEST capture-pane -t "$E2E_PANE" -p 2>/dev/null || true)
+  PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p 2>/dev/null || true)
   if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" Down
     sleep 1

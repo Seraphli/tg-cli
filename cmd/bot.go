@@ -191,6 +191,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		HookRunning:     stores.NewHookRunningStateStore(),
 		StopCooldown:    stores.NewStopCooldownStore(),
 		SessionWatch:    stores.NewSessionWatchStore(),
+		ToolUseMsgs:     stores.NewToolUseMsgStore(),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	// Build command list for Telegram menu

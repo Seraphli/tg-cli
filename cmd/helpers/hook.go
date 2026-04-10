@@ -22,6 +22,8 @@ type HookPayload struct {
 	AgentID              string          `json:"agent_id"`
 	AgentType            string          `json:"agent_type"`
 	Backend              string          `json:"backend"`
+	ToolUseID            string          `json:"tool_use_id"`
+	ToolResponse         json.RawMessage `json:"tool_response"`
 }
 
 // ParseHookPayload reads and parses the hook payload from an HTTP request body.

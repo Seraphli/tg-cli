@@ -112,3 +112,33 @@ fi
 # Wait for CC to finish the turn
 wait_for_idle
 pane_log "[tool_notify] AFTER CC idle"
+
+# Verify PostToolUse message update occurred (Bash tool call above should trigger it)
+if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "PostToolUse: updated msg_id="; then
+  pass "PostToolUse message update detected in bot log"
+else
+  # Not a hard failure — PostToolUse only fires if tool is in toolNotifyList and msg was sent
+  fail "PostToolUse message update not detected in bot log"
+fi
+
+# Verify PostToolUse result has content (not empty)
+POST_RESULT_LEN=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -o "result_len=[0-9]*" | head -1 | cut -d= -f2)
+if [ -n "$POST_RESULT_LEN" ] && [ "$POST_RESULT_LEN" -gt 0 ] 2>/dev/null; then
+  pass "PostToolUse result has content (result_len=$POST_RESULT_LEN)"
+else
+  fail "PostToolUse result empty or not found (result_len=$POST_RESULT_LEN)"
+fi
+
+# Verify builtinTools expansion includes Skill and Other (static code check)
+if grep -q '"Skill"' cmd/handlers/register.go && grep -q '"Other"' cmd/handlers/register.go; then
+  pass "builtinTools includes Skill and Other"
+else
+  fail "builtinTools missing Skill or Other in cmd/handlers/register.go"
+fi
+
+# Verify safeInjectText decision path logging exists in bot log (inject_prompt above triggers it)
+if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "safeInjectText:"; then
+  pass "safeInjectText decision path logging detected"
+else
+  fail "safeInjectText decision path logging not detected in bot log"
+fi

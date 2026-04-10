@@ -438,6 +438,36 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		return c.Respond(&tele.CallbackResponse{Text: action})
 	})
 
+	bot.Handle(&tele.Btn{Unique: "tools_route_toggle"}, func(c tele.Context) error {
+		key := c.Callback().Data
+		creds, err := config.LoadCredentials()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		route, ok := creds.NameRouteMap[key]
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Route not found"})
+		}
+		route.ToolNotifyOff = !route.ToolNotifyOff
+		creds.NameRouteMap[key] = route
+		if err := config.SaveCredentials(creds); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		label := "✅ Tool Notify: ON"
+		if route.ToolNotifyOff {
+			label = "⬜ Tool Notify: OFF"
+		}
+		menu := &tele.ReplyMarkup{}
+		btn := menu.Data(label, "tools_route_toggle", key)
+		menu.Inline(menu.Row(btn))
+		c.Bot().Edit(c.Message(), "🔧 Tool notification for this group:", menu)
+		status := "ON"
+		if route.ToolNotifyOff {
+			status = "OFF"
+		}
+		return c.Respond(&tele.CallbackResponse{Text: "Tool notify: " + status})
+	})
+
 	bot.Handle(&tele.InlineButton{Unique: "merge_submit"}, func(c tele.Context) error {
 		chatID := c.Message().Chat.ID
 		key := stores.MergeKey(chatID)

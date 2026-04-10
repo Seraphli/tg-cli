@@ -10,8 +10,9 @@ import (
 )
 
 type NameRoute struct {
-	ChatID  int64 `json:"chatId"`
-	TopicID int   `json:"topicId,omitempty"`
+	ChatID        int64 `json:"chatId"`
+	TopicID       int   `json:"topicId,omitempty"`
+	ToolNotifyOff bool  `json:"toolNotifyOff,omitempty"`
 }
 
 type Credentials struct {

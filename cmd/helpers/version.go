@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
@@ -70,19 +72,30 @@ func ReadContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	return pct, int(used), int(effectiveLimit), true
 }
 
-// ReadSessionCCVersion reads the CC version from the tg-cli context file for a session.
-func ReadSessionCCVersion(sessionID string) string {
-	path := filepath.Join(os.TempDir(), "tg-cli", "context", sessionID+".json")
-	data, err := os.ReadFile(path)
+// ReadSessionCCVersion reads the CC current version from the tmux pane.
+// CC TUI shows "current: X.Y.Z · latest: A.B.C" near the bottom when update is available.
+// Returns empty if not found.
+func ReadSessionCCVersion(tmuxTarget string) string {
+	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
 		return ""
 	}
-	var ctx map[string]interface{}
-	if err := json.Unmarshal(data, &ctx); err != nil {
+	content, err := injector.CapturePane(target)
+	if err != nil {
 		return ""
 	}
-	v, _ := ctx["cc_version"].(string)
-	return v
+	lines := strings.Split(content, "\n")
+	checkLines := lines
+	if len(lines) > 5 {
+		checkLines = lines[len(lines)-5:]
+	}
+	re := regexp.MustCompile(`current:\s*([\d.]+)`)
+	for _, line := range checkLines {
+		if m := re.FindStringSubmatch(line); len(m) == 2 {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 // GetInstalledCCVersion returns the version of the installed CC binary.
@@ -306,18 +319,37 @@ func readAll(r interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	}
 }
 
+// knownTools is the set of named tool categories. Tools not in this set are classified as "Other".
+var knownTools = map[string]bool{
+	"Edit": true, "Write": true, "Bash": true, "Read": true,
+	"Glob": true, "Grep": true, "Agent": true, "WebFetch": true,
+	"WebSearch": true, "MCP": true, "Skill": true,
+	"TaskCreate": true, "TaskUpdate": true, "TaskGet": true,
+	"TaskList": true, "TaskStop": true, "TaskOutput": true,
+	"NotebookEdit": true, "EnterPlanMode": true, "ExitPlanMode": true,
+	"EnterWorktree": true, "ExitWorktree": true,
+}
+
 // ShouldNotifyTool checks if the user has configured notifications for the given tool name.
 func ShouldNotifyTool(toolName string, toolNotifyEnabled *bool, toolNotifyList []string) bool {
 	if toolNotifyEnabled != nil && !*toolNotifyEnabled {
 		return false
 	}
-	// Check MCP tools against "MCP" toggle
+	displayName := toolName
 	if strings.HasPrefix(toolName, "mcp__") {
-		toolName = "MCP"
+		displayName = "MCP"
 	}
 	for _, t := range toolNotifyList {
-		if t == toolName {
+		if t == displayName {
 			return true
+		}
+	}
+	// Unknown tools fall through to "Other" category
+	if !knownTools[displayName] {
+		for _, t := range toolNotifyList {
+			if t == "Other" {
+				return true
+			}
 		}
 	}
 	return false
