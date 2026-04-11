@@ -46,8 +46,18 @@ pane_log "[codex/tool_notify] AFTER tool notification check"
 if [ "$TOOL_NOTIFY_FOUND" = true ]; then
   pass "Codex ToolUse notification sent for Bash tool call"
 
-  NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
-  if echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" | grep "🔧.*Bash" > /dev/null 2>&1; then
+  # Retry grep for the Debug full_text block — when the full E2E suite runs,
+  # tee/file-buffer delay can make the Debug line lag the Info line by 1-3s.
+  HEADER_FOUND=false
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
+    if echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" | grep "🔧.*Bash" > /dev/null 2>&1; then
+      HEADER_FOUND=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$HEADER_FOUND" = true ]; then
     pass "Codex ToolUse TG message contains '🔧 Bash' header"
   else
     fail "Codex ToolUse TG message does not contain '🔧 Bash' header"

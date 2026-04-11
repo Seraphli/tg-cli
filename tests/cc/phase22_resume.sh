@@ -87,6 +87,21 @@ while ! tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "SessionStart" > /dev/
   echo "  Waiting for SessionStart... ${ELAPSED}s / ${TIMEOUT}s"
 done
 pass "SessionStart after CC restart"
+# Bug 2 regression guard: SessionStart notification header must include 🖥 CLICommand line.
+# Before the fix, SessionStart built NotificationData without CLICommand; after the refactor
+# it calls sendEventNotification which populates it via GetPaneCLICommand.
+sleep 1
+SS_DEBUG=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -A 30 "TG message sent \[SessionStart\]" | head -40 || true)
+if echo "$SS_DEBUG" | grep -q "🖥"; then
+  pass "Bug 2 regression guard: SessionStart header contains 🖥 CLICommand line"
+else
+  fail "Bug 2: SessionStart header missing 🖥 CLICommand line. Log excerpt: $SS_DEBUG"
+fi
+if echo "$SS_DEBUG" | grep -qE '📊 Context:'; then
+  pass "Bug 2 regression guard: SessionStart header contains 📊 Context line"
+else
+  echo "  INFO: SessionStart header missing 📊 Context line (may be expected if no context data)"
+fi
 
 # Wait for CC to reach idle state (session registered)
 pane_log "[resume] AFTER CC restart"

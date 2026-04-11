@@ -160,12 +160,18 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		} else {
 			sentMsgID = sent.ID
 			bs.Pages.Store(sent.ID, sessionID, &stores.PageEntry{
-				Chunks:     chunks,
-				Event:      event,
-				Project:    project,
-				CWD:        cwd,
-				TmuxTarget: tmuxTarget,
-				ChatID:     chat.ID,
+				Chunks:            chunks,
+				Event:             event,
+				Project:           project,
+				CWD:               cwd,
+				TmuxTarget:        tmuxTarget,
+				ChatID:            chat.ID,
+				CLICommand:        nd.CLICommand,
+				AgentName:         nd.AgentName,
+				Backend:           nd.Backend,
+				ContextUsedPct:    nd.ContextUsedPct,
+				ContextUsedTokens: nd.ContextUsedTokens,
+				ContextWindowSize: nd.ContextWindowSize,
 			})
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), helpers.TruncateStr(body, 200)))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))

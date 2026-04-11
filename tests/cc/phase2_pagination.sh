@@ -79,10 +79,20 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
 
   # Verify bot logged the page turn (within this phase's log range)
   sleep 1
-  if tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE" | grep "Callback page turn" > /dev/null 2>&1; then
+  PAGE_TURN_LOG=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE" | grep "Callback page turn" | tail -1 || true)
+  if [ -n "$PAGE_TURN_LOG" ]; then
     pass "Bot logged callback page turn"
   else
     fail "Bot did not log callback page turn"
+  fi
+  # Bug 1 regression guard: rebuilt page must preserve cli / context_pct / agent fields.
+  # The enhanced callback log (cmd/api/pagination.go) emits all three fields pulled from PageEntry.
+  # If PageEntry extension breaks, these fields will be missing or empty and grep will fail.
+  # Numerical correctness of the restored values is covered by TestPageEntry_RoundtripExtendedFields.
+  if echo "$PAGE_TURN_LOG" | grep -qE 'cli="[^"]*" context_pct=-?[0-9]+ agent="[^"]*"'; then
+    pass "Bug 1 regression guard: callback log contains extended PageEntry fields"
+  else
+    fail "Bug 1: callback log missing extended PageEntry fields: $PAGE_TURN_LOG"
   fi
 elif [ "$PAGINATION_FOUND" = false ]; then
   echo "  Skipping page turn test (pagination was not triggered)"

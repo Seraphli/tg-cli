@@ -12,7 +12,6 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
-	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
@@ -75,21 +74,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			}
 			var body string
 			if p.Source == "resume" && p.TranscriptPath != "" {
-				body = helpers.ReadLastAssistantText(p.TranscriptPath, 500)
-				if body != "" {
-					body = markdown.RenderTelegramHTML(body)
-				}
+				body = helpers.ReadLastAssistantText(p.TranscriptPath)
 			}
-			text := notify.BuildNotificationText(notify.NotificationData{
-				Event: "SessionStart", Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, Body: body,
-				AgentName: hookAgentName,
-			})
-			var sessionStartOpts []interface{}
-			sessionStartOpts = append(sessionStartOpts, tele.ModeHTML)
-			if hookTopicID > 0 {
-				sessionStartOpts = append(sessionStartOpts, &tele.SendOptions{ThreadID: hookTopicID})
-			}
-			helpers.RetrySend(bs.Bot, chat, text, sessionStartOpts...)
+			cb.SendEventNotification(bs, chat, chatID, p.SessionID, "SessionStart", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
 			logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 			// Migrate route BEFORE Add() — Add() removes stale same-pane sessions
 			if p.TmuxTarget != "" && p.SessionID != "" {
@@ -323,6 +310,12 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				bs.Pages.Store(entry.MsgID, p.SessionID, &stores.PageEntry{
 					Chunks: chunks, Event: "ToolUse", Project: p.Project,
 					CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, ChatID: entry.ChatID,
+					CLICommand:        nd.CLICommand,
+					AgentName:         nd.AgentName,
+					Backend:           nd.Backend,
+					ContextUsedPct:    nd.ContextUsedPct,
+					ContextUsedTokens: nd.ContextUsedTokens,
+					ContextWindowSize: nd.ContextWindowSize,
 				})
 			}
 			logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d", entry.MsgID, p.ToolName, p.ToolUseID, len(resultText)))

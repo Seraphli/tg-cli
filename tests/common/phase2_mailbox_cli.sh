@@ -36,6 +36,22 @@ else
   fail "mailbox inbox: content not found: $INBOX_OUTPUT"
 fi
 
+# Round 1 Part 1: human-readable format must include 16-hex message ID.
+# Expected layout: "{prefix} {id} [{from}] {ts} {text}{attach}" (see ISSUES.md layout B).
+if echo "$INBOX_OUTPUT" | grep -qE '[0-9a-f]{16} \[e2e-sender\]'; then
+  pass "Round 1 Part 1: mailbox inbox human format contains 16-hex message ID"
+else
+  fail "Round 1 Part 1: message ID missing from human format: $INBOX_OUTPUT"
+fi
+
+# Round 1 Part 2: --json flag passthrough must emit valid JSON with 16-hex id fields.
+JSON_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --port "$TEST_PORT" --name e2e-receiver --json 2>&1) || true
+if echo "$JSON_OUTPUT" | jq -e '(.messages | length >= 1) and (.messages | all(.id | test("^[0-9a-f]{16}$")))' > /dev/null 2>&1; then
+  pass "Round 1 Part 2: mailbox inbox --json returns valid JSON with 16-hex .messages[].id"
+else
+  fail "Round 1 Part 2: --json output invalid or missing 16-hex id: $JSON_OUTPUT"
+fi
+
 # Verify bot log has mailbox operation
 if grep -q "Mailbox send:.*e2e-sender.*e2e-receiver.*E2E Subject" "$LOG_FILE" 2>/dev/null; then
   pass "mailbox send: operation logged with content"
@@ -55,6 +71,45 @@ if grep -q "trigger_receive_marker\|trigger-sender" /tmp/mailbox-receive-test.tx
   pass "mailbox receive: received message via long-poll"
 else
   pass "mailbox receive: long-poll timing dependent (non-critical)"
+fi
+
+# Bug 3A regression guard: long mailbox content (> old 3500 limit) must be accepted
+# by HTTP API without 400 rejection and stored with full content in the JSONL store.
+# Note: multi-chunk TG send verification is intentionally NOT asserted here because
+# in the E2E test environment (no mailboxChatId configured, no registered receiver
+# sessions for long-sender/long-receiver) none of the 3 TG send paths actually runs,
+# so no "Mailbox channel post / receiver notify / sender notify" log would be emitted.
+# Multi-chunk delivery correctness (no chunks[1..] drop, markdown rendering) is fully
+# covered by unit tests in cmd/bot_mailbox_test.go (TestBuildMailboxChunks_*).
+# Build a long markdown body with 5 segments × ~1000 chars + unique markers per segment.
+LONG_BODY=$(python3 -c "
+segs = []
+for i in range(5):
+    segs.append('**bold' + str(i) + '** ' + 'X' * 1000 + ' \`code' + str(i) + '\` |SEG' + chr(ord('A')+i) + '|')
+print('\n\n'.join(segs))
+")
+
+LONG_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" --from long-sender --to long-receiver --subject "**Long** Subject" --text "$LONG_BODY" 2>&1) || true
+if echo "$LONG_OUTPUT" | grep -q "Message sent.*id:"; then
+  pass "Bug 3A: long mailbox (>3500 chars) accepted by HTTP API"
+else
+  fail "Bug 3A: long mailbox rejected — 3500 limit not removed? output: $LONG_OUTPUT"
+fi
+
+sleep 1
+
+# Bug 3A check: inbox must show full text (storage unaffected by delivery chunking)
+INBOX_LONG=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --port "$TEST_PORT" --name long-receiver 2>&1) || true
+MISSING_SEGS=""
+for SEG in SEGA SEGB SEGC SEGD SEGE; do
+  if ! echo "$INBOX_LONG" | grep -q "|${SEG}|"; then
+    MISSING_SEGS="$MISSING_SEGS $SEG"
+  fi
+done
+if [ -z "$MISSING_SEGS" ]; then
+  pass "Bug 3A: all 5 segments present in inbox (no storage truncation)"
+else
+  fail "Bug 3A: inbox missing segments:$MISSING_SEGS"
 fi
 
 echo "  Mailbox CLI tests complete."

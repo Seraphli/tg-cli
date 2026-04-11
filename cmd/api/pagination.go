@@ -42,13 +42,19 @@ func registerPagination(mux *http.ServeMux, bs *types.BotState) {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
 		} else {
 			text = notify.BuildNotificationText(notify.NotificationData{
-				Event:      entry.Event,
-				Project:    entry.Project,
-				CWD:        entry.CWD,
-				Body:       entry.Chunks[pageNum-1],
-				TmuxTarget: entry.TmuxTarget,
-				Page:       pageNum,
-				TotalPages: len(entry.Chunks),
+				Event:             entry.Event,
+				Project:           entry.Project,
+				CWD:               entry.CWD,
+				Body:              entry.Chunks[pageNum-1],
+				TmuxTarget:        entry.TmuxTarget,
+				Page:              pageNum,
+				TotalPages:        len(entry.Chunks),
+				CLICommand:        entry.CLICommand,
+				AgentName:         entry.AgentName,
+				Backend:           entry.Backend,
+				ContextUsedPct:    entry.ContextUsedPct,
+				ContextUsedTokens: entry.ContextUsedTokens,
+				ContextWindowSize: entry.ContextWindowSize,
 			})
 		}
 		kb := helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
@@ -63,7 +69,7 @@ func registerPagination(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "edit failed: "+err.Error(), 500)
 			return
 		}
-		logger.Info(fmt.Sprintf("Callback page turn: msg_id=%d page=%d/%d", msgID, pageNum, len(entry.Chunks)))
+		logger.Info(fmt.Sprintf("Callback page turn: msg_id=%d page=%d/%d cli=%q context_pct=%d agent=%q", msgID, pageNum, len(entry.Chunks), entry.CLICommand, entry.ContextUsedPct, entry.AgentName))
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})

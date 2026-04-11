@@ -25,17 +25,18 @@ var MailboxCmd = &cobra.Command{
 }
 
 var (
-	mailboxTo          string
-	mailboxText        string
-	mailboxFrom        string
-	mailboxSelf        bool
-	mailboxName        string
-	mailboxPortFlag    int
-	mailboxHost        string
-	mailboxToken       string
-	mailboxSubject     string
-	mailboxFile        string
-	mailboxDownloadID  string
+	mailboxTo         string
+	mailboxText       string
+	mailboxFrom       string
+	mailboxSelf       bool
+	mailboxName       string
+	mailboxPortFlag   int
+	mailboxHost       string
+	mailboxToken      string
+	mailboxSubject    string
+	mailboxFile       string
+	mailboxDownloadID string
+	mailboxJSON       bool
 )
 
 var mailboxSendCmd = &cobra.Command{
@@ -81,6 +82,7 @@ func init() {
 	mailboxInboxCmd.Flags().BoolVar(&mailboxSelf, "self", false, "Auto-detect agent name from TMUX_PANE")
 	mailboxInboxCmd.Flags().StringVar(&mailboxName, "name", "", "Agent name to list inbox for")
 	mailboxInboxCmd.Flags().IntVar(&mailboxPortFlag, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	mailboxInboxCmd.Flags().BoolVar(&mailboxJSON, "json", false, "Output raw JSON from HTTP API instead of human-readable format")
 
 	mailboxDownloadCmd.Flags().StringVar(&mailboxDownloadID, "id", "", "Message ID")
 	mailboxDownloadCmd.Flags().IntVar(&mailboxPortFlag, "port", 0, "Bot HTTP port")
@@ -261,6 +263,10 @@ func runMailboxInbox(cmd *cobra.Command, args []string) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if mailboxJSON {
+		os.Stdout.Write(body)
+		return
+	}
 	var result struct {
 		Messages []struct {
 			ID        string    `json:"id"`
@@ -289,7 +295,7 @@ func runMailboxInbox(cmd *cobra.Command, args []string) {
 		if m.FileName != "" {
 			attach = " 📎" + m.FileName
 		}
-		fmt.Printf("%s[%s] %s %s%s\n", prefix, m.From, m.Timestamp.Format(time.RFC3339), m.Text, attach)
+		fmt.Printf("%s %s [%s] %s %s%s\n", prefix, m.ID, m.From, m.Timestamp.Format(time.RFC3339), m.Text, attach)
 	}
 }
 

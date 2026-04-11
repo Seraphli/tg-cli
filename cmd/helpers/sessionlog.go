@@ -121,12 +121,12 @@ func ReadLastMeaningfulEntry(path string, maxLen int) (string, string) {
 }
 
 // ReadLastAssistantText reads the last assistant text from a JSONL transcript file.
-func ReadLastAssistantText(path string, maxLen int) string {
+func ReadLastAssistantText(path string) string {
 	texts := ReadAssistantTexts(path)
 	if len(texts) == 0 {
 		return ""
 	}
-	return TruncateStr(texts[len(texts)-1], maxLen)
+	return texts[len(texts)-1]
 }
 
 // ReadFirstHumanPrompt reads the first human prompt text from a JSONL session file.

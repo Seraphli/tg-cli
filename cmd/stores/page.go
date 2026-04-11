@@ -48,14 +48,20 @@ var CCBuiltinCommands = map[string]string{
 
 // PageEntry holds the paginated content and metadata for a sent message.
 type PageEntry struct {
-	Chunks     []string
-	Event      string
-	Project    string
-	CWD        string
-	TmuxTarget string
-	PermRows   []tele.Row // non-nil for permission messages
-	RawMode    bool       // true = plain text, no HTML parse mode
-	ChatID     int64
+	Chunks            []string
+	Event             string
+	Project           string
+	CWD               string
+	TmuxTarget        string
+	PermRows          []tele.Row // non-nil for permission messages
+	RawMode           bool       // true = plain text, no HTML parse mode
+	ChatID            int64
+	CLICommand        string
+	AgentName         string
+	Backend           string
+	ContextUsedPct    int // -1 means no data
+	ContextUsedTokens int
+	ContextWindowSize int
 }
 
 // PageCacheStore stores paginated message entries indexed by Telegram message ID.

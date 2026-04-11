@@ -20,8 +20,86 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	tele "gopkg.in/telebot.v3"
 )
+
+// mailboxBodyMaxRunes is the fixed body budget per TG message for mailbox notifications.
+// Leaves ~1000 runes headroom for the header block (from/to/timestamp/id/status/subject).
+// Using a fixed value keeps send-time and edit-time chunk splits consistent.
+const mailboxBodyMaxRunes = 3000
+
+// buildMailboxChunks renders a mailbox notification into TG-ready message texts.
+// firstLine is the notification title (e.g. "📤 Mail Sent", "📥 Mail Received", or "").
+// subject and text are raw markdown; both are rendered to Telegram HTML.
+// status is the pre-escaped status line appended to the END of the LAST chunk
+// (e.g. "📫 Unread", "📭 Read — 2026-04-11 10:00"). Multi-chunk edit path only
+// edits the last message; single-chunk path includes status in the one message.
+// Returns one or more message texts; len > 1 means multi-message delivery with "📄 i/N" markers.
+func buildMailboxChunks(firstLine, from, to, timestamp, msgID, subject, text, status string) []string {
+	esc := markdown.EscapeHTML
+	renderedSubject := markdown.RenderTelegramHTML(subject)
+	renderedText := markdown.RenderTelegramHTML(text)
+	var headerParts []string
+	if firstLine != "" {
+		headerParts = append(headerParts, firstLine)
+	}
+	headerParts = append(headerParts,
+		"📤 From: "+esc(from),
+		"📥 To: "+esc(to),
+		"🕐 "+esc(timestamp),
+		"🆔 "+esc(msgID),
+		"━━━━━━━━━━",
+		"Subject: "+renderedSubject,
+		"━━━━━━━━━━",
+	)
+	header := strings.Join(headerParts, "\n") + "\n"
+	statusSuffix := ""
+	if status != "" {
+		statusSuffix = "\n━━━━━━━━━━\n" + status
+	}
+	chunks := helpers.SplitBody(renderedText, mailboxBodyMaxRunes)
+	if len(chunks) <= 1 {
+		body := ""
+		if len(chunks) == 1 {
+			body = chunks[0]
+		}
+		return []string{header + body + statusSuffix}
+	}
+	result := make([]string, 0, len(chunks))
+	for i, chunk := range chunks {
+		marker := fmt.Sprintf("📄 %d/%d", i+1, len(chunks))
+		var msg string
+		if i == 0 {
+			msg = header + marker + "\n" + chunk
+		} else {
+			msg = marker + "\n" + chunk
+		}
+		if i == len(chunks)-1 {
+			msg += statusSuffix
+		}
+		result = append(result, msg)
+	}
+	return result
+}
+
+// sendMailboxChunks sends a slice of pre-built chunks as separate TG messages.
+// Returns the full slice of sent messages (in send order) so callers can record
+// every chunk's msg ID — the channel-post caller stores them into mailboxMessage.TGMsgIDs
+// so editTGReadReceipt can edit the LAST chunk (which holds the status line at its end).
+// All messages are sent with tele.ModeHTML parse mode.
+func sendMailboxChunks(bot *tele.Bot, target tele.Recipient, chunks []string, extraOpts ...interface{}) ([]*tele.Message, error) {
+	sentMsgs := make([]*tele.Message, 0, len(chunks))
+	for _, chunk := range chunks {
+		opts := append([]interface{}{tele.ModeHTML}, extraOpts...)
+		sent, err := helpers.RetrySend(bot, target, chunk, opts...)
+		if err != nil {
+			return sentMsgs, err
+		}
+		sentMsgs = append(sentMsgs, sent)
+	}
+	return sentMsgs, nil
+}
 
 type mailboxMessage struct {
 	ID        string    `json:"id"`
@@ -33,7 +111,7 @@ type mailboxMessage struct {
 	FileID    string    `json:"file_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	Read      bool      `json:"read"`
-	TGMsgID   int       `json:"tg_msg_id,omitempty"`
+	TGMsgIDs  []int     `json:"tg_msg_ids,omitempty"`
 }
 
 type mailboxStore struct {
@@ -128,15 +206,14 @@ func (ms *mailboxStore) rotate(name string) {
 }
 
 // receiveAll reads all unread messages, moves them to read.jsonl, clears unread.jsonl,
-// and returns (messages, tgMsgIDs).
-func (ms *mailboxStore) receiveAll(name string) ([]mailboxMessage, []int) {
+// and returns the messages.
+func (ms *mailboxStore) receiveAll(name string) []mailboxMessage {
 	unreadPath := ms.unreadPath(name)
 	f, err := os.Open(unreadPath)
 	if err != nil {
-		return nil, nil
+		return nil
 	}
 	var messages []mailboxMessage
-	var tgMsgIDs []int
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
 	for scanner.Scan() {
@@ -150,13 +227,10 @@ func (ms *mailboxStore) receiveAll(name string) ([]mailboxMessage, []int) {
 		}
 		msg.Read = true
 		messages = append(messages, msg)
-		if msg.TGMsgID != 0 {
-			tgMsgIDs = append(tgMsgIDs, msg.TGMsgID)
-		}
 	}
 	f.Close()
 	if len(messages) == 0 {
-		return nil, nil
+		return nil
 	}
 	// Move messages to read.jsonl
 	for _, msg := range messages {
@@ -164,7 +238,7 @@ func (ms *mailboxStore) receiveAll(name string) ([]mailboxMessage, []int) {
 	}
 	// Truncate unread file
 	os.Truncate(unreadPath, 0)
-	return messages, tgMsgIDs
+	return messages
 }
 
 // hasUnread checks if there are any unread messages for the given agent.
@@ -180,7 +254,7 @@ func (ms *mailboxStore) receive(name string) chan []mailboxMessage {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	if ms.hasUnread(name) {
-		msgs, _ := ms.receiveAll(name)
+		msgs := ms.receiveAll(name)
 		if len(msgs) > 0 {
 			ch <- msgs
 			return ch
@@ -298,9 +372,6 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 		Timestamp: time.Now(),
 		Read:      false,
 	}
-	// Build formatted TG message
-	formatted := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📫 Unread",
-		from, to, msg.Timestamp.Format(time.RFC3339), id, subject, text)
 	// Post to TG mailbox channel if configured
 	creds, err := config.LoadCredentials()
 	if err == nil && bot != nil {
@@ -308,28 +379,42 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 			logger.Info("Mailbox channel not configured")
 		} else {
 			channel := &tele.Chat{ID: creds.MailboxChatID}
-			var tgMsg *tele.Message
+			timestampStr := msg.Timestamp.Format(time.RFC3339)
 			if fileData != nil {
-				caption := formatted
-				if len(caption) > 1024 {
-					caption = caption[:1024]
+				// Attachment path: plain-text caption with status at body end,
+				// truncated to TG 1024 char limit. Full content is in the attached file.
+				caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📫 Unread",
+					from, to, timestampStr, id, subject, text)
+				if runes := []rune(caption); len(runes) > 1024 {
+					caption = string(runes[:1024])
 				}
 				doc := &tele.Document{
 					File:     tele.FromReader(bytes.NewReader(fileData)),
 					FileName: fileName,
 					Caption:  caption,
 				}
-				tgMsg, err = bot.Send(channel, doc)
-			} else {
-				tgMsg, err = helpers.RetrySend(bot, channel, formatted)
-			}
-			if err != nil {
-				logger.Error(fmt.Sprintf("Mailbox TG send failed: %v", err))
-			} else if tgMsg != nil {
-				msg.TGMsgID = tgMsg.ID
-				if tgMsg.Document != nil {
-					msg.FileID = tgMsg.Document.FileID
+				tgMsg, sendErr := bot.Send(channel, doc)
+				if sendErr != nil {
+					logger.Error(fmt.Sprintf("Mailbox TG send failed: %v", sendErr))
+				} else if tgMsg != nil {
+					msg.TGMsgIDs = []int{tgMsg.ID}
+					if tgMsg.Document != nil {
+						msg.FileID = tgMsg.Document.FileID
+					}
 				}
+			} else {
+				chunks := buildMailboxChunks("", from, to, timestampStr, id, subject, text, "📫 Unread")
+				sentMsgs, sendErr := sendMailboxChunks(bot, channel, chunks)
+				if sendErr != nil {
+					logger.Error(fmt.Sprintf("Mailbox TG send failed: %v", sendErr))
+				}
+				if len(sentMsgs) > 0 {
+					msg.TGMsgIDs = make([]int, len(sentMsgs))
+					for i, m := range sentMsgs {
+						msg.TGMsgIDs[i] = m.ID
+					}
+				}
+				logger.Info(fmt.Sprintf("Mailbox channel post: id=%s chunks=%d sent=%d tg_msg_ids=%v", id, len(chunks), len(sentMsgs), msg.TGMsgIDs))
 			}
 		}
 	}
@@ -352,23 +437,30 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 	return id
 }
 
-// editTGReadReceipt edits a TG message to mark it as read.
+// editTGReadReceipt edits the LAST TG message of a mailbox notification to mark it as read.
+// status is appended to the end of the last chunk (at body bottom), so multi-chunk messages
+// only need the final message rewritten; earlier chunks contain no status and stay unchanged.
 func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
-	if msg.TGMsgID == 0 {
+	if len(msg.TGMsgIDs) == 0 {
 		return
 	}
 	readTime := time.Now().Format("2006-01-02 15:04")
-	newText := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📭 Read — %s",
-		msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, readTime)
-	editMsg := &tele.Message{ID: msg.TGMsgID, Chat: &tele.Chat{ID: chatID}}
+	status := "📭 Read — " + readTime
+	lastMsgID := msg.TGMsgIDs[len(msg.TGMsgIDs)-1]
+	editMsg := &tele.Message{ID: lastMsgID, Chat: &tele.Chat{ID: chatID}}
 	if msg.FileName != "" {
-		// Document messages use caption, not text. Caption limit is 1024 bytes.
-		if len(newText) > 1024 {
-			newText = newText[:1024]
+		// Attachment path: plain-text caption with status at body end, truncated to 1024.
+		caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n%s",
+			msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, status)
+		if runes := []rune(caption); len(runes) > 1024 {
+			caption = string(runes[:1024])
 		}
-		bot.EditCaption(editMsg, newText)
-	} else {
-		bot.Edit(editMsg, newText)
+		bot.EditCaption(editMsg, caption)
+		return
+	}
+	chunks := buildMailboxChunks("", msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, status)
+	if _, err := helpers.RetryEdit(bot, editMsg, chunks[len(chunks)-1], tele.ModeHTML); err != nil {
+		logger.Error(fmt.Sprintf("editTGReadReceipt failed: msg_id=%d err=%v", lastMsgID, err))
 	}
 }
 
@@ -391,17 +483,6 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "from, to, text are required"})
-			return
-		}
-		maxBody := 3500
-		totalLen := len(subject) + len(text)
-		if totalLen > maxBody {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":    false,
-				"error": fmt.Sprintf("content too long: subject+text=%d chars (max %d). Use --file for long content.", totalLen, maxBody),
-			})
 			return
 		}
 		var fileData []byte
@@ -429,18 +510,16 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 		if targetInfo != nil {
 			chat, _, topicID := resolveChat(bs, targetInfo.TmuxTarget)
 			if chat != nil {
-				receiverNotify := fmt.Sprintf("📥 Mail Received\n📤 From: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s",
-					from, time.Now().Format(time.RFC3339), msgID, subject, text)
+				timestampStr := time.Now().Format(time.RFC3339)
+				chunks := buildMailboxChunks("📥 Mail Received", from, to, timestampStr, msgID, subject, text, "")
 				var sendOpts []interface{}
 				if topicID > 0 {
 					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
 				}
-				chunks := helpers.SplitBody(receiverNotify, 4000)
-				if len(chunks) <= 1 {
-					helpers.RetrySend(bot, chat, receiverNotify, sendOpts...)
-				} else {
-					helpers.RetrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
+				if _, err := sendMailboxChunks(bot, chat, chunks, sendOpts...); err != nil {
+					logger.Error(fmt.Sprintf("Mailbox receiver notify failed: to=%s id=%s err=%v", to, msgID, err))
 				}
+				logger.Info(fmt.Sprintf("Mailbox receiver notify: to=%s id=%s chunks=%d", to, msgID, len(chunks)))
 			}
 		}
 		// Notify sender's chat
@@ -448,18 +527,16 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 		if fromInfo != nil {
 			fromChat, _, fromTopicID := resolveChat(bs, fromInfo.TmuxTarget)
 			if fromChat != nil {
-				senderNotify := fmt.Sprintf("📤 Mail Sent\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s",
-					to, time.Now().Format(time.RFC3339), msgID, subject, text)
+				timestampStr := time.Now().Format(time.RFC3339)
+				chunks := buildMailboxChunks("📤 Mail Sent", from, to, timestampStr, msgID, subject, text, "")
 				var senderOpts []interface{}
 				if fromTopicID > 0 {
 					senderOpts = append(senderOpts, &tele.SendOptions{ThreadID: fromTopicID})
 				}
-				chunks := helpers.SplitBody(senderNotify, 4000)
-				if len(chunks) <= 1 {
-					helpers.RetrySend(bot, fromChat, senderNotify, senderOpts...)
-				} else {
-					helpers.RetrySend(bot, fromChat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), senderOpts...)
+				if _, err := sendMailboxChunks(bot, fromChat, chunks, senderOpts...); err != nil {
+					logger.Error(fmt.Sprintf("Mailbox sender notify failed: from=%s id=%s err=%v", from, msgID, err))
 				}
+				logger.Info(fmt.Sprintf("Mailbox sender notify: from=%s id=%s chunks=%d", from, msgID, len(chunks)))
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
