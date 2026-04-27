@@ -261,27 +261,9 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if setupUninstallFlag {
 		fmt.Printf("Hooks uninstalled from %s\n", settingsPath)
 		fmt.Printf("Removed hooks for instance: %s\n", instanceDesc)
-		// Unregister MCP server
-		mcpRm := exec.Command("claude", "mcp", "remove", "tg-cli", "-s", "user")
-		if err := mcpRm.Run(); err != nil {
-			fmt.Printf("MCP unregistration skipped (claude CLI not found or failed): %v\n", err)
-		} else {
-			fmt.Println("MCP server unregistered.")
-		}
 	} else {
 		fmt.Printf("Hooks installed to %s\n", settingsPath)
 		fmt.Printf("Hook command: %s\n", hookCommand)
-		// Register MCP server
-		mcpArgs := []string{"mcp", "add", "--scope", "user", "--transport", "stdio", "tg-cli", "--", hookBin, "mcp"}
-		if config.ConfigDir != "" {
-			mcpArgs = append(mcpArgs, "--config-dir", config.ConfigDir)
-		}
-		mcpAdd := exec.Command("claude", mcpArgs...)
-		if err := mcpAdd.Run(); err != nil {
-			fmt.Printf("MCP registration skipped (claude CLI not found or failed): %v\n", err)
-		} else {
-			fmt.Println("MCP server registered.")
-		}
 	}
 	// Install skill docs
 	cmdDir := filepath.Join(home, ".claude", "commands", "tg-cli")

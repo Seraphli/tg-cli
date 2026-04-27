@@ -28,7 +28,7 @@ func main() {
 	rootCmd.AddCommand(cmd.ServiceCmd)
 	rootCmd.AddCommand(cmd.VoiceCmd)
 	rootCmd.AddCommand(cmd.StatuslineCmd)
-	rootCmd.AddCommand(cmd.McpCmd)
+	rootCmd.AddCommand(cmd.SendFileCmd)
 	rootCmd.AddCommand(cmd.CronCmd)
 	rootCmd.AddCommand(cmd.SessionCmd)
 	rootCmd.AddCommand(cmd.MailboxCmd)

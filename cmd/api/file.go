@@ -16,9 +16,9 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-func registerMCP(mux *http.ServeMux, bs *types.BotState) {
+func registerFile(mux *http.ServeMux, bs *types.BotState) {
 	bot := bs.Bot
-	mux.HandleFunc("/mcp/send-file", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/file/send", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			FilePath   string `json:"file_path"`
 			Caption    string `json:"caption"`
@@ -53,7 +53,7 @@ func registerMCP(mux *http.ServeMux, bs *types.BotState) {
 				if c, _, t := helpers.ResolveChat(bs.SessionState, cwdInfo.TmuxTarget); c != nil && pairing.GetDefaultChatID() != strconv.FormatInt(c.ID, 10) {
 					chat = c
 					topicID = t
-					logger.Info(fmt.Sprintf("[MCP] Route resolved via CWD fallback: cwd=%s → chat=%d topic=%d", req.CWD, c.ID, t))
+					logger.Info(fmt.Sprintf("[File] Route resolved via CWD fallback: cwd=%s → chat=%d topic=%d", req.CWD, c.ID, t))
 				}
 			}
 		}
@@ -82,7 +82,7 @@ func registerMCP(mux *http.ServeMux, bs *types.BotState) {
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})
 			return
 		}
-		logger.Info(fmt.Sprintf("[MCP] File sent: %s to chat %d (msg_id=%d)", filepath.Base(req.FilePath), chat.ID, msg.ID))
+		logger.Info(fmt.Sprintf("[File] File sent: %s to chat %d (msg_id=%d)", filepath.Base(req.FilePath), chat.ID, msg.ID))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": fmt.Sprintf("File sent: %s", filepath.Base(req.FilePath))})
 	})

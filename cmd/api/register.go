@@ -19,5 +19,5 @@ func Register(mux *http.ServeMux, bs *types.BotState) {
 	registerMerge(mux, bs)
 	registerCron(mux, bs)
 	registerTmux(mux, bs)
-	registerMCP(mux, bs)
+	registerFile(mux, bs)
 }

@@ -241,8 +241,6 @@ MINEOF
   echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install --port "$TEST_PORT" --settings "$TEST_SETTINGS" --skip-tmux
   # Add skipDangerousModePermissionPrompt to settings
   python3 -c "import json;f='$TEST_SETTINGS';d=json.load(open(f));d['skipDangerousModePermissionPrompt']=True;p=d.setdefault('permissions',{});a=p.setdefault('allow',[]);r='Read(//tmp/**)';a.append(r) if r not in a else None;json.dump(d,open(f,'w'),indent=2)"
-  # Register MCP in isolated config
-  CLAUDE_CONFIG_DIR="$TEST_CLAUDE_CONFIG_DIR" claude mcp add --transport stdio tg-cli -- "$(pwd)/tg-cli" --config-dir "$TEST_CONFIG_DIR" mcp --port "$TEST_PORT" 2>/dev/null || true
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
   local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"

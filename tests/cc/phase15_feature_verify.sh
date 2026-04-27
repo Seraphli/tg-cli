@@ -4,57 +4,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/cc_common.sh"
 
 echo ""
-echo "--- Feature verify: MCP send-file, stopCooldown, session/send API ---"
+echo "--- Feature verify: stopCooldown, session/send API ---"
 
 ensure_infrastructure
-
-# =============================================
-# Sub-test A: MCP send-file API with CWD field
-# =============================================
-
-TEST_FILE="/tmp/tg-cli-e2e-phase28-test.txt"
-echo "phase28 feature verify test - $(date)" > "$TEST_FILE"
-
-LOG_BEFORE_A=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-pane_log "[phase28-A] BEFORE MCP send-file"
-
-# POST to /mcp/send-file with empty tmux_target and cwd set to project root
-# This exercises the CWD fallback code path regardless of whether the fallback
-# actually changes the route (it may not if the session is already on default chat)
-MCP_RESP=$(curl -s -w "\n%{http_code}" -X POST \
-  "http://127.0.0.1:$TEST_PORT/mcp/send-file" \
-  -H "Content-Type: application/json" \
-  -d "{\"file_path\":\"$TEST_FILE\",\"caption\":\"phase28 E2E test\",\"tmux_target\":\"\",\"cwd\":\"$(pwd)\"}")
-MCP_CODE=$(echo "$MCP_RESP" | tail -1)
-MCP_BODY=$(echo "$MCP_RESP" | head -1)
-
-pane_log "[phase28-A] AFTER MCP send-file"
-
-if [ "$MCP_CODE" = "200" ] && echo "$MCP_BODY" | grep -q '"ok":true'; then
-  pass "MCP send-file: API returned 200 ok"
-else
-  fail "MCP send-file: API returned code=$MCP_CODE body=$MCP_BODY"
-fi
-
-# Check bot log for [MCP] File sent
-ELAPSED=0
-MCP_SENT=false
-while [ $ELAPSED -lt 30 ]; do
-  if tail -n +"$((LOG_BEFORE_A + 1))" "$LOG_FILE" | grep -q "\[MCP\] File sent.*phase28"; then
-    MCP_SENT=true
-    break
-  fi
-  sleep 1
-  ELAPSED=$((ELAPSED + 1))
-done
-
-if [ "$MCP_SENT" = true ]; then
-  pass "MCP send-file: [MCP] File sent logged"
-else
-  fail "MCP send-file: [MCP] File sent not found in log within 30s"
-fi
-
-rm -f "$TEST_FILE"
 
 # =============================================
 # Sub-test B: stopCooldown triggers after Stop event
