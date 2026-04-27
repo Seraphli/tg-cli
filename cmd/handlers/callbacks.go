@@ -241,7 +241,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if !checkSessionAlive(bs, injector.FormatTarget(*targetPtr)) {
 			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
 		}
-		if err := injector.InjectText(*targetPtr, "/resume "+sessionID); err != nil {
+		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, *targetPtr, "/resume "+sessionID); err != nil {
 			logger.Error(fmt.Sprintf("resume inject failed: target=%s session=%s err=%v", injector.FormatTarget(*targetPtr), sessionID, err))
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Injection failed"})
 		}

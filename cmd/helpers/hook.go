@@ -24,6 +24,7 @@ type HookPayload struct {
 	Backend              string          `json:"backend"`
 	ToolUseID            string          `json:"tool_use_id"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
+	Prompt               string          `json:"prompt"`
 }
 
 // ParseHookPayload reads and parses the hook payload from an HTTP request body.

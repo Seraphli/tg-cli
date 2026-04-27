@@ -150,7 +150,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			}
 			go func() {
 				time.Sleep(3 * time.Second)
-				injector.InjectText(t, text)
+				helpers.QueuedInject(bs.SessionEvents, bs.SessionState, t, text)
 			}()
 			logger.Info(fmt.Sprintf("Permission cancelled via group text API + delayed inject: target=%s text=%s", target, helpers.TruncateStr(text, 200)))
 			fmt.Fprintf(w, "cancelled+injected")
@@ -170,7 +170,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, "session disconnected", 410)
 				return
 			}
-			if err := injector.InjectText(t, text); err != nil {
+			if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, t, text); err != nil {
 				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
 				return
 			}
@@ -192,7 +192,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, "invalid target", 400)
 				return
 			}
-			if err := injector.InjectText(t, text); err != nil {
+			if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, t, text); err != nil {
 				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
 				return
 			}

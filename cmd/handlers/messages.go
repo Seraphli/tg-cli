@@ -204,15 +204,43 @@ func resolveReplyTarget(bs *types.BotState, replyText string) (injector.TmuxTarg
 // InjectMessage handles image + text injection to a target tmux pane.
 func InjectMessage(bs *types.BotState, tmuxTarget string, text string, imagePath string) error {
 	if imagePath != "" && text == "" {
-		return safeInjectText(bs, tmuxTarget, imagePath)
+		return safeInjectImageText(bs, tmuxTarget, imagePath)
 	}
 	if imagePath != "" {
-		if err := safeInjectText(bs, tmuxTarget, imagePath, false); err != nil {
+		if err := safeInjectImageText(bs, tmuxTarget, imagePath, false); err != nil {
 			return fmt.Errorf("image inject failed: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
+		target, parseErr := injector.ParseTarget(tmuxTarget)
+		if parseErr != nil {
+			return fmt.Errorf("parse target: %w", parseErr)
+		}
+		return injector.InjectTextAppend(target, "\n"+text)
 	}
 	return safeInjectText(bs, tmuxTarget, text)
+}
+
+// safeInjectImageText wraps SafeInjectText for image paths, using "[Image" as alt snippet.
+func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
+	p := helpers.SafeInjectTextParams{
+		Bot:              bs.Bot,
+		ToolNotifs:       bs.ToolNotifs,
+		PendingFiles:     bs.PendingFiles,
+		PendingPerms:     bs.PendingPerms,
+		InjectQueue:      bs.InjectQueue,
+		InjectConfirm:    bs.InjectConfirm,
+		StopCooldown:     bs.StopCooldown,
+		ReactionTracker:  bs.ReactionTracker,
+		SessionState:     bs.SessionState,
+		HookSessionLocks: &bs.HookSessionLocks,
+		SessionEvents:    bs.SessionEvents,
+		ResolveChat: func(target string) (*tele.Chat, string, int) {
+			return helpers.ResolveChat(bs.SessionState, target)
+		},
+		FormatPaneID: notify.FormatPaneID,
+		AltSnippet:   "[Image",
+	}
+	return helpers.SafeInjectText(p, tmuxTarget, text, submit...)
 }
 
 // processUserInput handles shared logic for OnText and OnVoice after routing.

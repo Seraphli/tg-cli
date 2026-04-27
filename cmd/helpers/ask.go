@@ -157,14 +157,63 @@ type SafeInjectTextParams struct {
 	ReactionTracker  *stores.ReactionTrackerStore
 	SessionState     *stores.SessionStateStore
 	HookSessionLocks *sync.Map
+	SessionEvents    *stores.SessionEventStore
 	ResolveChat      func(string) (*tele.Chat, string, int)
 	FormatPaneID     func(string) string
-	Force            bool // Skip busy check — used by flushInjectQueue
+	Force            bool   // Skip busy check — used by flushInjectQueue
+	AltSnippet       string // Alternative snippet for CapturePane (e.g. "[Image" for image inject)
+}
+
+// injectResult carries the outcome of safeInjectPhase1 to safeInjectPhase2.
+type injectResult struct {
+	err           error
+	ch            chan bool
+	confirmType   string // "askq", "prompt", ""
+	shouldSubmit  bool
+	captureTarget injector.TmuxTarget
+	snippet       string
+	altSnippet    string
 }
 
 // SafeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
 // If AskUserQuestion is pending, answers it with the text and returns. Otherwise injects text directly.
+// Phase1 runs inside Dispatch (state check + inject); phase2 runs outside (CapturePane + confirmation wait).
 func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, submit ...bool) error {
+	if p.SessionEvents != nil {
+		sid, _ := p.SessionState.FindByTarget(tmuxTarget)
+		if sid != "" {
+			saved := p.SessionEvents
+			p.SessionEvents = nil
+			var res injectResult
+			dispatchErr := saved.Dispatch(sid, "inject:safe", func() error {
+				res = safeInjectPhase1(p, tmuxTarget, text, submit...)
+				return nil
+			})
+			if dispatchErr != nil {
+				return dispatchErr
+			}
+			if res.err != nil {
+				return res.err
+			}
+			if res.confirmType != "" {
+				return safeInjectPhase2(p, tmuxTarget, res)
+			}
+			return nil
+		}
+	}
+	res := safeInjectPhase1(p, tmuxTarget, text, submit...)
+	if res.err != nil {
+		return res.err
+	}
+	if res.confirmType != "" {
+		return safeInjectPhase2(p, tmuxTarget, res)
+	}
+	return nil
+}
+
+// safeInjectPhase1 handles state check + inject/answer/queue.
+// Returns injectResult; confirmation wait and CapturePane are deferred to safeInjectPhase2.
+func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, submit ...bool) injectResult {
 	// Acquire per-session lock to serialize with hook processing
 	// Lock covers state check + injection only; released before CapturePane and confirmation wait
 	var sessionMu *sync.Mutex
@@ -177,7 +226,7 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 	}
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
-		return err
+		return injectResult{err: err}
 	}
 	// PRE-INJECT: check if there's a pending AskUserQuestion
 	_, _, hasAskQ := p.ToolNotifs.FindByTmuxTarget(tmuxTarget)
@@ -211,7 +260,7 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 			}
 		}
 		if sessionMu != nil { sessionMu.Unlock() }
-		return nil
+		return injectResult{}
 	}
 	// Answer pending AskUserQuestion with the text
 	for {
@@ -248,17 +297,9 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
 		RetryEdit(p.Bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "✅ Custom reply"), tele.ModeHTML)
 		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, TruncateStr(text, 200)))
-		// Wait for PostToolUse to confirm CC received the answer
-		ch := p.InjectConfirm.Register(tmuxTarget)
-		select {
-		case <-ch:
-			p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
-			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer confirmed via PostToolUse, target=%s", tmuxTarget))
-		case <-time.After(30 * time.Second):
-			p.InjectConfirm.Cancel(tmuxTarget)
-			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer not confirmed (PostToolUse timeout), target=%s", tmuxTarget))
-		}
-		return nil
+		// Register confirmation channel — wait happens in phase2
+		ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmAskAnswered, text)
+		return injectResult{ch: ch, confirmType: "askq"}
 	}
 	// PermissionRequest pending — queue instead of injecting
 	if _, ok := p.PendingPerms.FindByTmuxTarget(tmuxTarget); ok {
@@ -291,53 +332,132 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 			}
 		}
 		if sessionMu != nil { sessionMu.Unlock() }
-		return nil
+		return injectResult{}
 	}
 	logger.Info(fmt.Sprintf("safeInjectText: direct inject path, target=%s text=%s", tmuxTarget, TruncateStr(text, 200)))
 	// Wait for Stop event cooldown before injecting
 	p.StopCooldown.WaitIfNeeded(tmuxTarget, 3*time.Second)
 	shouldSubmit := len(submit) == 0 || submit[0]
-	ch := p.InjectConfirm.Register(tmuxTarget)
+	ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmUserPromptSubmit, text)
 	if err := injector.InjectText(target, text, shouldSubmit); err != nil {
 		p.InjectConfirm.Cancel(tmuxTarget)
 		if sessionMu != nil { sessionMu.Unlock() }
-		return err
+		return injectResult{err: err}
 	}
-	// Release lock after injection — CapturePane and confirmation wait don't need it
+	// Release lock after injection — CapturePane and confirmation wait happen in phase2
 	if sessionMu != nil { sessionMu.Unlock() }
-	// CapturePane verification — match injected text in ❯ prompt line (input area)
-	// Retry up to 3 times × 500ms
 	snippet := text
+	if idx := strings.Index(snippet, "\n"); idx >= 0 {
+		snippet = snippet[:idx]
+	}
 	if len(snippet) > 50 {
 		snippet = snippet[:50]
 	}
+	return injectResult{ch: ch, confirmType: "prompt", captureTarget: target, snippet: snippet, altSnippet: p.AltSnippet, shouldSubmit: shouldSubmit}
+}
+
+// safeInjectPhase2 handles CapturePane verification and confirmation wait.
+// Runs OUTSIDE Dispatch so hook handlers can deliver signals into the queue.
+func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResult) error {
+	if res.confirmType == "askq" {
+		select {
+		case ok := <-res.ch:
+			if ok {
+				p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
+				logger.Info(fmt.Sprintf("safeInjectText: AskQ answer confirmed via PostToolUse, target=%s", tmuxTarget))
+			} else {
+				logger.Info(fmt.Sprintf("safeInjectText: AskQ answer content mismatch, target=%s", tmuxTarget))
+			}
+		case <-time.After(30 * time.Second):
+			p.InjectConfirm.Cancel(tmuxTarget)
+			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer not confirmed (PostToolUse timeout), target=%s", tmuxTarget))
+		}
+		return nil
+	}
+	// confirmType == "prompt"
+	// CapturePane verification — scan bottom-up, distinguish idle/staged/submitted states
+	promptChars := []string{"❯"}
+	if p.SessionState != nil {
+		if info := p.SessionState.FindInfoByTarget(tmuxTarget); info != nil {
+			switch info.Backend {
+			case "codex":
+				promptChars = []string{"›"}
+			case "cc":
+				promptChars = []string{"❯"}
+			default:
+				promptChars = []string{"❯", "›"}
+			}
+		}
+	}
 	captureConfirmed := false
+	var lastCaptureContent string
+	var captureState string
 	for attempt := 0; attempt < 3; attempt++ {
 		time.Sleep(500 * time.Millisecond)
-		captureContent, captureErr := injector.CapturePane(target)
+		captureContent, captureErr := injector.CapturePane(res.captureTarget)
 		if captureErr != nil {
 			continue
 		}
-		for _, line := range strings.Split(captureContent, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if idx := strings.Index(trimmed, "❯"); idx != -1 {
-				after := trimmed[idx+len("❯"):]
-				after = strings.TrimLeft(after, " \xc2\xa0")
-				if after != "" && strings.Contains(after, snippet) {
-					captureConfirmed = true
+		lastCaptureContent = captureContent
+		lines := strings.Split(captureContent, "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := lines[i]
+			raw := strings.TrimRight(line, " \t")
+			idx := -1
+			pcLen := 0
+			for _, pc := range promptChars {
+				if j := strings.Index(raw, pc); j >= 0 {
+					idx = j
+					pcLen = len(pc)
 					break
 				}
 			}
+			if idx < 0 {
+				continue
+			}
+			after := raw[idx+pcLen:]
+			after = strings.TrimLeft(after, " \xc2\xa0")
+			matched := strings.Contains(after, res.snippet)
+			if !matched && res.altSnippet != "" {
+				matched = strings.Contains(after, res.altSnippet)
+			}
+			if after == "" || !matched {
+				continue
+			}
+			leading := raw[:idx]
+			if leading == "" {
+				captureState = "input"
+			} else if strings.TrimSpace(leading) == "" {
+				captureState = "staged"
+			} else {
+				captureState = "submitted"
+			}
+			captureConfirmed = true
+			break
 		}
 		if captureConfirmed {
 			break
 		}
 	}
+	if !captureConfirmed && lastCaptureContent != "" {
+		all := strings.Split(lastCaptureContent, "\n")
+		start := len(all) - 15
+		if start < 0 {
+			start = 0
+		}
+		logger.Debug(fmt.Sprintf("safeInjectText: capturePane MISS snippet=%q altSnippet=%q promptChars=%v pane_tail:\n%s",
+			res.snippet, res.altSnippet, promptChars, strings.Join(all[start:], "\n")))
+	}
+	logger.Debug(fmt.Sprintf("safeInjectText: capturePane=%v state=%s target=%s", captureConfirmed, captureState, tmuxTarget))
 	confirmed := captureConfirmed
-	if !confirmed && shouldSubmit {
+	if !confirmed && res.shouldSubmit {
 		select {
-		case <-ch:
-			confirmed = true
+		case ok := <-res.ch:
+			if ok {
+				confirmed = true
+			} else {
+				logger.Info(fmt.Sprintf("safeInjectText: UserPromptSubmit content mismatch, target=%s", tmuxTarget))
+			}
 		case <-time.After(10 * time.Second):
 			p.InjectConfirm.Cancel(tmuxTarget)
 			logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
@@ -348,8 +468,9 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 		logger.Info(fmt.Sprintf("safeInjectText: inject confirmed, target=%s capturePane=%v", tmuxTarget, captureConfirmed))
 	} else {
 		logger.Info(fmt.Sprintf("safeInjectText: inject not confirmed, target=%s", tmuxTarget))
+		return fmt.Errorf("inject not confirmed for target=%s", tmuxTarget)
 	}
-	if !shouldSubmit {
+	if !res.shouldSubmit {
 		p.InjectConfirm.Cancel(tmuxTarget)
 	}
 	return nil

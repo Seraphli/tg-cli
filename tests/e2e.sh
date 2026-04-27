@@ -51,6 +51,7 @@ run_phase() {
   local rc=0
   bash "$script" || rc=$?
   if [ $rc -ne 0 ]; then
+    pane_log "[$(basename "$script")] CRASH capture"
     fail "Phase $(basename "$script") crashed with exit code $rc"
   fi
 }

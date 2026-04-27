@@ -236,7 +236,7 @@ func ExecuteLaunch(bs *types.BotState, bot *tele.Bot, chatID int64, state *Launc
 	if cmd == "" {
 		cmd = cfg.ClaudeCommand
 	}
-	if err := injector.InjectText(target, cmd); err != nil {
+	if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, cmd); err != nil {
 		logger.Error(fmt.Sprintf("executeLaunch: InjectText failed: pane=%s cmd=%s err=%v", paneID, cmd, err))
 		helpers.RetrySend(bot, &tele.Chat{ID: chatID}, fmt.Sprintf("❌ Failed to inject command to pane %s: %s", markdown.EscapeHTML(paneID), markdown.EscapeHTML(err.Error())), launchSendOpts(state)...)
 		DeleteLaunchState(state.UUID)

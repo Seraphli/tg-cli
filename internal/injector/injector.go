@@ -121,6 +121,30 @@ func InjectText(target TmuxTarget, text string, submit ...bool) error {
 	return nil
 }
 
+func InjectTextAppend(target TmuxTarget, text string, submit ...bool) error {
+	mu := getInjectLock(target)
+	mu.Lock()
+	defer mu.Unlock()
+	text = NormalizeText(text)
+	if text == "" {
+		return fmt.Errorf("empty text after normalization")
+	}
+	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
+	if err := tmuxCmd(target, "set-buffer", "-b", bufName, "--", text).Run(); err != nil {
+		return fmt.Errorf("set-buffer failed: %w", err)
+	}
+	if err := tmuxCmd(target, "paste-buffer", "-t", target.PaneID, "-b", bufName, "-r", "-p").Run(); err != nil {
+		return fmt.Errorf("paste-buffer failed: %w", err)
+	}
+	time.Sleep(1000 * time.Millisecond)
+	if len(submit) == 0 || submit[0] {
+		if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
+			return fmt.Errorf("submit failed: %w", err)
+		}
+	}
+	return nil
+}
+
 // ParseTarget parses a tmux target string like "%3@/tmp/tmux-1000/default".
 func ParseTarget(s string) (TmuxTarget, error) {
 	if s == "" {

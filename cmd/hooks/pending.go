@@ -416,7 +416,20 @@ func pendingNotifyHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			return
 		}
 		logger.Info(fmt.Sprintf("Received pending notify: uuid=%s", uuid))
-		go ProcessPendingRequest(bs, cb, uuid)
+		path := filepath.Join(helpers.PendingDir(), uuid+".json")
+		pf, pfErr := helpers.ReadPendingFile(path)
+		var sessionID string
+		if pfErr == nil && len(pf.Payload) > 0 {
+			var peek struct {
+				SessionID string `json:"session_id"`
+			}
+			json.Unmarshal(pf.Payload, &peek)
+			sessionID = peek.SessionID
+		}
+		bs.SessionEvents.Dispatch(sessionID, "pending:"+uuid, func() error {
+			ProcessPendingRequest(bs, cb, uuid)
+			return nil
+		})
 		w.WriteHeader(200)
 	}
 }

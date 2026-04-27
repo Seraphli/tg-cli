@@ -266,7 +266,7 @@ func Register(bs *types.BotState) {
 						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 						return nil
 					}
-					if err := injector.InjectText(target, text); err != nil {
+					if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 					}
 					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
@@ -315,7 +315,7 @@ func Register(bs *types.BotState) {
 					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 					return nil
 				}
-				if err := injector.InjectText(target, text); err != nil {
+				if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
 				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
@@ -360,7 +360,7 @@ func Register(bs *types.BotState) {
 		}
 		// With payload: inject /resume <payload> directly
 		if payload != "" {
-			if err := injector.InjectText(target, "/resume "+payload); err != nil {
+			if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, "/resume "+payload); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 			}
 			recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)

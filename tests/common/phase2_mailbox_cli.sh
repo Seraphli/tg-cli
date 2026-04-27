@@ -5,6 +5,7 @@ source "$(dirname "$0")/../e2e_common.sh"
 
 echo ""
 echo "--- Mailbox CLI commands test ---"
+pane_log "[mailbox_cli] BEFORE test"
 
 # Test mailbox send with subject
 SEND_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" --from e2e-sender --to e2e-receiver --subject "E2E Subject Test" --text "E2E mailbox body content" 2>&1) || true
@@ -112,4 +113,5 @@ else
   fail "Bug 3A: inbox missing segments:$MISSING_SEGS"
 fi
 
+pane_log "[mailbox_cli] AFTER test"
 echo "  Mailbox CLI tests complete."

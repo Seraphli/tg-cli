@@ -33,6 +33,7 @@ func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit .
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
+		SessionEvents:    bs.SessionEvents,
 		ResolveChat: func(target string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, target)
 		},
@@ -292,7 +293,7 @@ func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 	bs.PendingUpgradeRestart.Delete(tmuxTarget)
 	time.Sleep(3 * time.Second)
 	logger.Info(fmt.Sprintf("doUpgradeSession: restarting CC with command=%s target=%s", claudeCmd, tmuxTarget))
-	if err := injector.InjectText(target, claudeCmd); err != nil {
+	if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, claudeCmd); err != nil {
 		return fmt.Errorf("inject restart command: %w", err)
 	}
 	bs.VersionNotified.Delete(tmuxTarget)

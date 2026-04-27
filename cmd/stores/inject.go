@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,48 +139,88 @@ func (iq *InjectQueueStore) Load() {
 	}
 }
 
-// InjectConfirmStore manages per-target channels for post-inject UserPromptSubmit confirmation.
+type InjectConfirmType int
+
+const (
+	ConfirmUserPromptSubmit InjectConfirmType = iota
+	ConfirmAskAnswered
+)
+
+type confirmEntry struct {
+	expectedType    InjectConfirmType
+	expectedSnippet string
+	ch              chan bool
+}
+
+// InjectConfirmStore manages per-target content-verified inject confirmation.
 type InjectConfirmStore struct {
-	mu       sync.Mutex
-	channels map[string]chan struct{}
+	mu      sync.Mutex
+	entries map[string]*confirmEntry
 }
 
 // NewInjectConfirmStore creates an empty InjectConfirmStore.
 func NewInjectConfirmStore() *InjectConfirmStore {
 	return &InjectConfirmStore{
-		channels: make(map[string]chan struct{}),
+		entries: make(map[string]*confirmEntry),
 	}
 }
 
-// Register creates a confirmation channel for the target and returns it.
-// The caller should select on this channel with a timeout.
-func (ic *InjectConfirmStore) Register(tmuxTarget string) chan struct{} {
+// Register creates a confirmation channel for the target with expected type and snippet.
+func (ic *InjectConfirmStore) Register(tmuxTarget string, expectedType InjectConfirmType, expectedSnippet string) chan bool {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
-	ch := make(chan struct{}, 1)
-	ic.channels[tmuxTarget] = ch
+	snippet := expectedSnippet
+	if len(snippet) > 50 {
+		snippet = snippet[:50]
+	}
+	ch := make(chan bool, 1)
+	ic.entries[tmuxTarget] = &confirmEntry{expectedType: expectedType, expectedSnippet: snippet, ch: ch}
 	return ch
 }
 
-// Confirm signals the confirmation channel for the target (if registered).
-func (ic *InjectConfirmStore) Confirm(tmuxTarget string) {
+// NotifyUserPromptSubmit signals confirmation for UserPromptSubmit events with content matching.
+func (ic *InjectConfirmStore) NotifyUserPromptSubmit(tmuxTarget, prompt string) {
 	ic.mu.Lock()
-	ch, ok := ic.channels[tmuxTarget]
-	if ok {
-		delete(ic.channels, tmuxTarget)
+	entry, ok := ic.entries[tmuxTarget]
+	if !ok || entry.expectedType != ConfirmUserPromptSubmit {
+		ic.mu.Unlock()
+		return
 	}
+	delete(ic.entries, tmuxTarget)
 	ic.mu.Unlock()
-	if ok {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
+	matched := strings.Contains(prompt, entry.expectedSnippet)
+	select {
+	case entry.ch <- matched:
+	default:
 	}
 }
 
-// Cancel removes the confirmation channel without signaling.
+// NotifyAskAnswered signals confirmation for AskUserQuestion answer events with content matching.
+func (ic *InjectConfirmStore) NotifyAskAnswered(tmuxTarget string, answers map[string]string) {
+	ic.mu.Lock()
+	entry, ok := ic.entries[tmuxTarget]
+	if !ok || entry.expectedType != ConfirmAskAnswered {
+		ic.mu.Unlock()
+		return
+	}
+	delete(ic.entries, tmuxTarget)
+	ic.mu.Unlock()
+	matched := false
+	for _, ans := range answers {
+		if strings.Contains(ans, entry.expectedSnippet) {
+			matched = true
+			break
+		}
+	}
+	select {
+	case entry.ch <- matched:
+	default:
+	}
+}
+
+// Cancel removes the confirmation entry without signaling.
 func (ic *InjectConfirmStore) Cancel(tmuxTarget string) {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
-	delete(ic.channels, tmuxTarget)
+	delete(ic.entries, tmuxTarget)
 }

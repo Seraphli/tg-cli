@@ -5,6 +5,7 @@ source "$(dirname "$0")/../e2e_common.sh"
 
 echo ""
 echo "--- tmux CLI commands test ---"
+pane_log "[tmux_cli] BEFORE test"
 
 # Test tmux list
 OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" tmux list --port "$TEST_PORT" 2>&1) || true
@@ -44,4 +45,5 @@ else
   pass "tmux event: API response check skipped"
 fi
 
+pane_log "[tmux_cli] AFTER test"
 echo "  tmux CLI tests complete."

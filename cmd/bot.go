@@ -62,8 +62,12 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 					if !paneRunning {
 						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
 						if bs.InjectQueue.HasItems(info.TmuxTarget) {
-							go flushInjectQueue(bs, info.TmuxTarget)
-						}
+						sid, _ := bs.SessionState.FindByTarget(info.TmuxTarget)
+						bs.SessionEvents.DispatchAsync(sid, "flush:ticker", func() error {
+							flushInjectQueue(bs, info.TmuxTarget)
+							return nil
+						})
+					}
 						return
 					}
 					// Check if this tick was cancelled (next tick arrived)
@@ -194,6 +198,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		SessionWatch:    stores.NewSessionWatchStore(),
 		ToolUseMsgs:     stores.NewToolUseMsgStore(),
 		CommandStats:    stores.NewCommandStatsStore(configDir),
+		SessionEvents:   stores.NewSessionEventStore(),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {

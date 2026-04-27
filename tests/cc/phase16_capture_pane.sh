@@ -7,6 +7,7 @@ echo ""
 echo "--- CapturePane test ---"
 
 ensure_infrastructure
+pane_log "[capture_pane] BEFORE test"
 
 # Test CapturePane via HTTP API endpoint
 ENCODED_PANE=$(printf '%s' "$E2E_PANE" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
@@ -17,3 +18,4 @@ if [ -n "$CAPTURE_RESP" ] && [ "$CAPTURE_RESP" != "null" ] && [ ${#CAPTURE_RESP}
 else
   fail "CapturePane: /capture API returned empty or error - response: $CAPTURE_RESP"
 fi
+pane_log "[capture_pane] AFTER test"

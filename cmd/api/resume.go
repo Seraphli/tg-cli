@@ -81,7 +81,7 @@ func registerResume(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "session not alive", 410)
 			return
 		}
-		if err := injector.InjectText(parsed, "/resume "+sessionID); err != nil {
+		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, parsed, "/resume "+sessionID); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}

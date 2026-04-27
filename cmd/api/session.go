@@ -412,7 +412,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 		}
 		// Store PendingExitKill BEFORE inject to avoid race with SessionEnd hook
 		bs.PendingExitKill.Store(target, true)
-		if err := injector.InjectText(t, "/exit"); err != nil {
+		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, t, "/exit"); err != nil {
 			bs.PendingExitKill.Delete(target)
 			http.Error(w, "inject failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -492,6 +492,8 @@ func buildSafeInjectParams(bs *types.BotState) helpers.SafeInjectTextParams {
 		StopCooldown:    bs.StopCooldown,
 		ReactionTracker: bs.ReactionTracker,
 		SessionState:    bs.SessionState,
+		HookSessionLocks: &bs.HookSessionLocks,
+		SessionEvents:    bs.SessionEvents,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, t)
 		},

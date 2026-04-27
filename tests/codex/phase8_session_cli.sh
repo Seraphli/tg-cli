@@ -6,6 +6,7 @@ source "${SCRIPT_DIR}/codex_common.sh"
 
 echo ""
 echo "--- Session CLI commands test ---"
+pane_log "[session_cli] BEFORE test"
 
 # Get session ID from API (always use current session, not stale file)
 SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
@@ -39,8 +40,10 @@ fi
 
 # Test session send — inject and verify in bot log (API-based, works for both CC and Codex)
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+pane_log "[session_cli] BEFORE session send"
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "e2e_session_send_test_marker" > /dev/null 2>&1 || true
 sleep 2
+pane_log "[session_cli] AFTER session send"
 if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"; then
   pass "session send: message injected and logged"
 else
@@ -53,10 +56,12 @@ else
   fail "session send: TG notification not found in log"
 fi
 
+pane_log "[session_cli] AFTER CLI tests"
 echo "  Session CLI tests complete."
 
 echo ""
 echo "--- Session log transcript tests ---"
+pane_log "[session_log] BEFORE transcript tests"
 
 # Test session log — verify actual content from earlier phases
 wait_for_idle $TIMEOUT
@@ -131,4 +136,5 @@ else
   fail "session log accuracy: messages missing valid types: $MSG_TYPES"
 fi
 
+pane_log "[session_log] AFTER transcript tests"
 echo "  Session log tests complete."

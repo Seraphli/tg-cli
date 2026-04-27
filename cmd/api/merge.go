@@ -65,7 +65,7 @@ func registerMerge(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		merged := strings.Join(buf.Items, "\n")
-		if err := injector.InjectText(target, merged); err != nil {
+		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, merged); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}

@@ -137,7 +137,9 @@ else
 fi
 
 # Verify safeInjectText decision path logging exists in bot log (inject_prompt above triggers it)
-if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "safeInjectText:"; then
+# Use grep -c instead of grep -q to avoid SIGPIPE under pipefail
+SAFE_INJECT_COUNT=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -c "safeInjectText:" || true)
+if [ "$SAFE_INJECT_COUNT" -gt 0 ]; then
   pass "safeInjectText decision path logging detected"
 else
   fail "safeInjectText decision path logging not detected in bot log"

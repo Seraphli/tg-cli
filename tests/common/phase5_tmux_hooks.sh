@@ -7,6 +7,7 @@ echo ""
 echo "--- Tmux hook registration and triggering test ---"
 
 ensure_infrastructure
+pane_log "[tmux_hooks] BEFORE test"
 
 TMUX_CONF_TEST="/tmp/tg-cli-e2e-tmux.conf"
 HOOK_TEST_SESSION="tg-cli-hook-test-$$"
@@ -111,6 +112,7 @@ fi
 # =============================================
 
 rm -f "$TMUX_CONF_TEST"
+pane_log "[tmux_hooks] AFTER test"
 # Re-install with --skip-tmux to restore clean state for subsequent phases
 echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install \
   --port "$TEST_PORT" \

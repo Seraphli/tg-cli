@@ -36,7 +36,7 @@ func registerInjection(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		logger.Info(fmt.Sprintf("Inject API: target=%s text=%s", injector.FormatTarget(target), helpers.TruncateStr(req.Text, 200)))
-		if err := injector.InjectText(target, req.Text); err != nil {
+		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, req.Text); err != nil {
 			logger.Error(fmt.Sprintf("Inject API failed: %v", err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

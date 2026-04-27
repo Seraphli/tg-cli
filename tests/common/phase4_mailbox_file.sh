@@ -7,6 +7,7 @@ echo ""
 echo "--- Mailbox file attachment read mark test ---"
 
 ensure_infrastructure
+pane_log "[mailbox_file] BEFORE test"
 
 # Create a test file
 TEST_FILE="/tmp/tg-cli-e2e-mailbox-test.txt"
@@ -56,6 +57,8 @@ if echo "$INBOX_OUTPUT" | grep -q "File test"; then
 else
   pass "mailbox file: attachment message processed (not in inbox)"
 fi
+
+pane_log "[mailbox_file] AFTER test"
 
 # Cleanup
 rm -f "$TEST_FILE"

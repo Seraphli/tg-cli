@@ -183,6 +183,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
+		SessionEvents:    bs.SessionEvents,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
 			return resolveChat(bs, t)
 		},
