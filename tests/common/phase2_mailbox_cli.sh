@@ -9,7 +9,13 @@ pane_log "[mailbox_cli] BEFORE test"
 
 # Test mailbox send with subject
 SEND_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" --from e2e-sender --to e2e-receiver --subject "E2E Subject Test" --text "E2E mailbox body content" 2>&1) || true
-if echo "$SEND_OUTPUT" | grep -q "Message sent.*id:"; then
+echo "  DEBUG: SEND_OUTPUT (${#SEND_OUTPUT} chars): $SEND_OUTPUT"
+set +eo pipefail
+echo "$SEND_OUTPUT" | grep -q "Message sent.*id:"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Message sent.*id:' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox send: returned success with message id"
 else
   fail "mailbox send: unexpected output: $SEND_OUTPUT"
@@ -17,7 +23,13 @@ fi
 
 # Test mailbox send without subject — should fail
 NOSUB_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" --from test --to test --text "no subject" 2>&1) || true
-if echo "$NOSUB_OUTPUT" | grep -qi "subject.*required\|Error"; then
+echo "  DEBUG: NOSUB_OUTPUT (${#NOSUB_OUTPUT} chars): $NOSUB_OUTPUT"
+set +eo pipefail
+echo "$NOSUB_OUTPUT" | grep -qi "subject.*required\|Error"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'subject.*required|Error' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox send: rejects missing --subject"
 else
   fail "mailbox send: should reject missing subject: $NOSUB_OUTPUT"
@@ -26,12 +38,23 @@ fi
 # Test mailbox inbox — verify sent message appears with correct content
 sleep 1
 INBOX_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --port "$TEST_PORT" --name e2e-receiver 2>&1) || true
-if echo "$INBOX_OUTPUT" | grep -q "e2e-sender"; then
+echo "  DEBUG: INBOX_OUTPUT (${#INBOX_OUTPUT} chars): $INBOX_OUTPUT"
+set +eo pipefail
+echo "$INBOX_OUTPUT" | grep -q "e2e-sender"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'e2e-sender' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox inbox: shows sender name"
 else
   fail "mailbox inbox: sender not found: $INBOX_OUTPUT"
 fi
-if echo "$INBOX_OUTPUT" | grep -q "E2E mailbox body content"; then
+set +eo pipefail
+echo "$INBOX_OUTPUT" | grep -q "E2E mailbox body content"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'E2E mailbox body content' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox inbox: shows message content"
 else
   fail "mailbox inbox: content not found: $INBOX_OUTPUT"
@@ -39,7 +62,12 @@ fi
 
 # Round 1 Part 1: human-readable format must include 16-hex message ID.
 # Expected layout: "{prefix} {id} [{from}] {ts} {text}{attach}" (see ISSUES.md layout B).
-if echo "$INBOX_OUTPUT" | grep -qE '[0-9a-f]{16} \[e2e-sender\]'; then
+set +eo pipefail
+echo "$INBOX_OUTPUT" | grep -qE '[0-9a-f]{16} \[e2e-sender\]'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '16-hex [e2e-sender]' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Round 1 Part 1: mailbox inbox human format contains 16-hex message ID"
 else
   fail "Round 1 Part 1: message ID missing from human format: $INBOX_OUTPUT"
@@ -91,7 +119,13 @@ print('\n\n'.join(segs))
 ")
 
 LONG_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" --from long-sender --to long-receiver --subject "**Long** Subject" --text "$LONG_BODY" 2>&1) || true
-if echo "$LONG_OUTPUT" | grep -q "Message sent.*id:"; then
+echo "  DEBUG: LONG_OUTPUT (${#LONG_OUTPUT} chars): $LONG_OUTPUT"
+set +eo pipefail
+echo "$LONG_OUTPUT" | grep -q "Message sent.*id:"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Message sent.*id:' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Bug 3A: long mailbox (>3500 chars) accepted by HTTP API"
 else
   fail "Bug 3A: long mailbox rejected — 3500 limit not removed? output: $LONG_OUTPUT"
@@ -102,8 +136,14 @@ sleep 1
 # Bug 3A check: inbox must show full text (storage unaffected by delivery chunking)
 INBOX_LONG=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --port "$TEST_PORT" --name long-receiver 2>&1) || true
 MISSING_SEGS=""
+echo "  DEBUG: INBOX_LONG (${#INBOX_LONG} chars): $INBOX_LONG"
 for SEG in SEGA SEGB SEGC SEGD SEGE; do
-  if ! echo "$INBOX_LONG" | grep -q "|${SEG}|"; then
+  set +eo pipefail
+  echo "$INBOX_LONG" | grep -q "|${SEG}|"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep |${SEG}| PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -ne 0 ]; then
     MISSING_SEGS="$MISSING_SEGS $SEG"
   fi
 done

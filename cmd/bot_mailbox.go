@@ -504,7 +504,7 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 			fileName = header.Filename
 		}
 		msgID := mailbox.send(bot, from, to, subject, text, fileData, fileName)
-		logger.Info(fmt.Sprintf("Mailbox send: from=%s to=%s subject=%s text=%s", from, to, subject, helpers.TruncateStr(text, 200)))
+		logger.Info(fmt.Sprintf("Mailbox send: from=%s to=%s subject=%s text=%s", from, to, subject, text))
 		// Send TG notification to target agent's chat
 		targetInfo := bs.SessionState.FindByName(to)
 		if targetInfo != nil {

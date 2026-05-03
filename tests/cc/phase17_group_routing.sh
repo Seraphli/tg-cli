@@ -37,6 +37,7 @@ BIND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "$BIND_PAYLOAD" \
   "http://127.0.0.1:$TEST_PORT/route/bind")
+echo "  DEBUG: BIND_RESP (${#BIND_RESP} chars): $BIND_RESP"
 BIND_CODE=$(echo "$BIND_RESP" | tail -1)
 if [ "$BIND_CODE" = "200" ]; then
   pass "/route/bind returned 200"
@@ -46,6 +47,7 @@ fi
 
 # Call GET /route/list and verify the binding
 LIST_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/route/list")
+echo "  DEBUG: LIST_RESP (${#LIST_RESP} chars): $LIST_RESP"
 if echo "$LIST_RESP" | jq -e ".name_routes[\"$AGENT_NAME\"].chatId == ($DEFAULT_CHAT_ID | tonumber)" > /dev/null 2>&1; then
   pass "/route/list contains bound route"
 else
@@ -95,6 +97,7 @@ UNBIND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   -H "Content-Type: application/json" \
   -d "$UNBIND_PAYLOAD" \
   "http://127.0.0.1:$TEST_PORT/route/unbind")
+echo "  DEBUG: UNBIND_RESP (${#UNBIND_RESP} chars): $UNBIND_RESP"
 UNBIND_CODE=$(echo "$UNBIND_RESP" | tail -1)
 if [ "$UNBIND_CODE" = "200" ]; then
   pass "/route/unbind returned 200"
@@ -104,6 +107,7 @@ fi
 
 # Verify routes is now empty
 LIST_RESP_AFTER=$(curl -s "http://127.0.0.1:$TEST_PORT/route/list")
+echo "  DEBUG: LIST_RESP_AFTER (${#LIST_RESP_AFTER} chars): $LIST_RESP_AFTER"
 ROUTE_COUNT=$(echo "$LIST_RESP_AFTER" | jq '.name_routes | length')
 if [ "$ROUTE_COUNT" = "0" ]; then
   pass "/route/list is empty after unbind"

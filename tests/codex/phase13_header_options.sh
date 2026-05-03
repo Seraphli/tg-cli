@@ -16,7 +16,12 @@ ensure_infrastructure
 LOG_BEFORE_H=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "header_test_with" > /dev/null 2>&1 || true
 sleep 2
-if tail -n +"$((LOG_BEFORE_H + 1))" "$LOG_FILE" | grep -q "Session send notification:"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_H + 1))" "$LOG_FILE" | grep -q "Session send notification:"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Session send notification:' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification sent (with header)"
 else
   fail "session send: TG notification missing (with header)"
@@ -26,12 +31,22 @@ fi
 LOG_BEFORE_NH=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
 sleep 2
-if tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send via API:.*header_test_noheader"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send via API:.*header_test_noheader"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Session send via API:.*header_test_noheader' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: API log recorded"
 else
   fail "session send --no-header: API log not found"
 fi
-if tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send notification:"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send notification:"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Session send notification:' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: TG notification still sent"
 else
   fail "session send --no-header: TG notification missing"
@@ -45,7 +60,13 @@ wait_for_idle
 
 # Run install with --skip-tmux and check stdout
 INSTALL_OUTPUT=$(echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install --port "$TEST_PORT" --settings "$TEST_CLAUDE_CONFIG_DIR/settings.json" --skip-tmux 2>&1) || true
-if echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"; then
+echo "  DEBUG: INSTALL_OUTPUT (${#INSTALL_OUTPUT} chars): $INSTALL_OUTPUT"
+set +eo pipefail
+echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'tmux hook registered' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   fail "--skip-tmux: tmux hooks were registered despite --skip-tmux"
 else
   pass "--skip-tmux: tmux hooks correctly skipped"
@@ -64,6 +85,7 @@ CRON_TOKEN="cron-header-test-$RANDOM"
 CRON_ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
   -H "Content-Type: application/json" \
   -d "{\"mode\":\"inject\",\"schedule\":\"1s\",\"prompt\":\"$CRON_TOKEN\",\"agent_name\":\"$SESSION_NAME\"}")
+echo "  DEBUG: CRON_ADD_RESP (${#CRON_ADD_RESP} chars): $CRON_ADD_RESP"
 CRON_JOB_ID=$(echo "$CRON_ADD_RESP" | jq -r '.id // ""')
 
 if [ -z "$CRON_JOB_ID" ]; then
@@ -73,7 +95,12 @@ else
   CRON_ELAPSED=0
   CRON_FIRED=false
   while [ $CRON_ELAPSED -lt 60 ]; do
-    if tail -n +"$((LOG_BEFORE_CRON + 1))" "$LOG_FILE" | grep -q "Cron inject job: injected to"; then
+    set +eo pipefail
+    tail -n +"$((LOG_BEFORE_CRON + 1))" "$LOG_FILE" | grep -q "Cron inject job: injected to"
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep 'Cron inject job: injected to' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
       CRON_FIRED=true
       break
     fi
@@ -87,7 +114,13 @@ else
 
     # Capture pane to verify header was injected
     PANE_CONTENT=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$E2E_PANE" | jq -sRr @uri)" | jq -r '.content // ""')
-    if echo "$PANE_CONTENT" | grep -q "Cron:"; then
+    echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
+    set +eo pipefail
+    echo "$PANE_CONTENT" | grep -q "Cron:"
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep 'Cron:' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
       pass "cron inject header: ⏰ Cron header found in pane"
     else
       fail "cron inject header: ⏰ Cron header NOT found in pane"

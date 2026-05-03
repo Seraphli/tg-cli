@@ -214,8 +214,17 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if err := config.SaveAppConfig(cfg); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
-		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("✅ CWD source set to: %s", source), tele.ModeHTML)
 		logger.Info(fmt.Sprintf("CWDSource updated to: %s", source))
+		if IsSettingsMenu(bs, c.Message().ID) {
+			sel := &tele.ReplyMarkup{}
+			btnTmux := sel.Data("📟 tmux", "cwd", "tmux")
+			btnPayload := sel.Data("📦 payload", "cwd", "payload")
+			sel.Inline(sel.Row(btnTmux, btnPayload))
+			appendBackButton(sel)
+			helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("🔧 CWD source: %s\n\n✅ Saved. Select source:", source), sel, tele.ModeHTML)
+		} else {
+			helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("✅ CWD source set to: %s", source), tele.ModeHTML)
+		}
 		return c.Respond(&tele.CallbackResponse{Text: "✅ Saved: " + source})
 	})
 
@@ -304,6 +313,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			topicStr = fmt.Sprintf(", topic=%d", ctx.TopicID)
 		}
 		logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, ctx.TopicID))
+		if IsSettingsMenu(bs, c.Message().ID) {
+			showSettingsRoutes(bot, bs, c.Message())
+			return c.Respond()
+		}
 		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", markdown.EscapeHTML(item.Label), ctx.ChatID, topicStr), tele.ModeHTML)
 		return c.Respond()
 	})
@@ -335,6 +348,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		delete(creds.NameRouteMap, name)
 		config.SaveCredentials(creds)
 		logger.Info(fmt.Sprintf("Route unbound (menu/name): name=%s", name))
+		if IsSettingsMenu(bs, c.Message().ID) {
+			showSettingsRoutes(bot, bs, c.Message())
+			return c.Respond()
+		}
 		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("✅ Unbound agent name route: %s", markdown.EscapeHTML(name)), tele.ModeHTML)
 		return c.Respond()
 	})
@@ -346,16 +363,27 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
 		}
 		action := c.Data()
-		enabled := action == "on"
-		cfg.ToolNotifyEnabled = &enabled
+		if action == "toggle" {
+			enabled := cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled
+			newEnabled := !enabled
+			cfg.ToolNotifyEnabled = &newEnabled
+		} else {
+			enabled := action == "on"
+			cfg.ToolNotifyEnabled = &enabled
+		}
 		if err := config.SaveAppConfig(cfg); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save config"})
 		}
+		resultEnabled := cfg.ToolNotifyEnabled != nil && *cfg.ToolNotifyEnabled
 		var statusText string
-		if enabled {
+		if resultEnabled {
 			statusText = "✅ ON"
 		} else {
 			statusText = "❌ OFF"
+		}
+		if IsSettingsMenu(bs, c.Message().ID) {
+			showSettingsToolNotify(bot, bs, c.Message())
+			return c.Respond(&tele.CallbackResponse{Text: "Saved: " + statusText})
 		}
 		menu := &tele.ReplyMarkup{}
 		btnOn := menu.Data("✅ ON", "verbose", "on")
@@ -390,6 +418,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		menu := buildToolsMenu(cfg.ToolNotifyList)
+		if IsSettingsMenu(bs, c.Message().ID) {
+			appendBackButton(menu)
+		}
 		c.Edit("🔧 Select tools for notifications:\n(Click to toggle)", menu)
 		var action string
 		if found {
@@ -430,6 +461,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		menu := buildToolsMenu(cfg.ToolNotifyList)
+		if IsSettingsMenu(bs, c.Message().ID) {
+			appendBackButton(menu)
+		}
 		c.Edit("🔧 Select tools for notifications:\n(Click to toggle)", menu)
 		action := "All ON"
 		if len(cfg.ToolNotifyList) == 0 {
@@ -453,6 +487,14 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if err := config.SaveCredentials(creds); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
+		status := "ON"
+		if route.ToolNotifyOff {
+			status = "OFF"
+		}
+		if IsSettingsMenu(bs, c.Message().ID) {
+			showSettingsToolNotify(bot, bs, c.Message())
+			return c.Respond(&tele.CallbackResponse{Text: "Tool notify: " + status})
+		}
 		label := "✅ Tool Notify: ON"
 		if route.ToolNotifyOff {
 			label = "⬜ Tool Notify: OFF"
@@ -461,10 +503,6 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		btn := menu.Data(label, "tools_route_toggle", key)
 		menu.Inline(menu.Row(btn))
 		c.Bot().Edit(c.Message(), "🔧 Tool notification for this group:", menu)
-		status := "ON"
-		if route.ToolNotifyOff {
-			status = "OFF"
-		}
 		return c.Respond(&tele.CallbackResponse{Text: "Tool notify: " + status})
 	})
 
@@ -632,6 +670,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			}
 			text := buildVoiceText(cfg)
 			menu := buildVoiceMenu(engine)
+			if IsSettingsMenu(bs, c.Message().ID) {
+				appendBackButton(menu)
+			}
 			c.Edit(text, menu)
 			logger.Info(fmt.Sprintf("Voice engine changed to: %s", engine))
 			return c.Respond(&tele.CallbackResponse{Text: "✅ Engine: " + engine})
@@ -652,6 +693,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			}
 			text := buildVoiceText(cfg)
 			menu := buildVoiceMenu(engine)
+			if IsSettingsMenu(bs, c.Message().ID) {
+				appendBackButton(menu)
+			}
 			c.Edit(text, menu)
 			logger.Info(fmt.Sprintf("Voice language changed to: %s", lang))
 			return c.Respond(&tele.CallbackResponse{Text: "✅ Language: " + lang})
@@ -701,6 +745,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			}
 			text := buildVoiceText(cfg)
 			menu := buildVoiceMenu(engine)
+			if IsSettingsMenu(bs, c.Message().ID) {
+				appendBackButton(menu)
+			}
 			c.Edit(text, menu)
 			logger.Info(fmt.Sprintf("Whisper model changed to: %s path=%s", selected.Name, modelPath))
 			return c.Respond(&tele.CallbackResponse{Text: "✅ Model: " + selected.Name})
@@ -715,6 +762,11 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			logger.Info(fmt.Sprintf("Cron job deleted via TG: id=%s", jobID[:8]))
 			jobs := bs.CronJobs.All()
 			if len(jobs) == 0 {
+				if IsSettingsMenu(bs, c.Message().ID) {
+					menu := &tele.ReplyMarkup{}
+					appendBackButton(menu)
+					return c.Edit("⏰ <b>Cron Jobs</b>\n\nNo cron jobs configured.", menu, tele.ModeHTML)
+				}
 				return c.Edit("📋 No cron jobs configured.")
 			}
 			var text strings.Builder
@@ -754,9 +806,15 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			chunks := helpers.SplitBody(fullText, 3900)
 			if len(chunks) <= 1 {
 				markup.Inline(rows...)
+				if IsSettingsMenu(bs, c.Message().ID) {
+					appendBackButton(markup)
+				}
 				return c.Edit(fullText, markup, tele.ModeHTML)
 			}
 			kb := helpers.BuildPageKeyboardWithExtra(1, len(chunks), rows)
+			if IsSettingsMenu(bs, c.Message().ID) {
+				appendBackButton(kb)
+			}
 			sent, err := helpers.RetrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
 			if err != nil {
 				return err
@@ -779,6 +837,13 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		logger.Info(fmt.Sprintf("Mailbox group bound: chat=%d", chatID))
+		if IsSettingsMenu(bs, c.Message().ID) {
+			menu := &tele.ReplyMarkup{}
+			menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
+			appendBackButton(menu)
+			c.Bot().Edit(c.Message(), fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: ✅ Bound as mailbox group\nChat ID: %d", chatID), menu, tele.ModeHTML)
+			return c.Respond(&tele.CallbackResponse{Text: "✅ Bound"})
+		}
 		c.Respond(&tele.CallbackResponse{Text: "✅ Bound"})
 		menu := &tele.ReplyMarkup{}
 		menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
@@ -795,11 +860,105 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		logger.Info("Mailbox group unbound")
+		if IsSettingsMenu(bs, c.Message().ID) {
+			chatID := c.Message().Chat.ID
+			menu := &tele.ReplyMarkup{}
+			menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
+			appendBackButton(menu)
+			c.Bot().Edit(c.Message(), fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: Not bound\nChat ID: %d", chatID), menu, tele.ModeHTML)
+			return c.Respond(&tele.CallbackResponse{Text: "Unbound"})
+		}
 		c.Respond(&tele.CallbackResponse{Text: "Unbound"})
 		chatID := c.Message().Chat.ID
 		menu := &tele.ReplyMarkup{}
 		menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
 		return c.Edit(fmt.Sprintf("📬 Mailbox Group\nStatus: Not bound\nChat ID: %d", chatID), menu)
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "settings"}, func(c tele.Context) error {
+		switch c.Data() {
+		case "main":
+			helpers.RetryEdit(bot, c.Message(), buildSettingsTopText(), buildSettingsTopMenu(), tele.ModeHTML)
+		case "voice":
+			showSettingsVoice(bot, bs, c.Message())
+		case "cwd":
+			showSettingsCwd(bot, bs, c.Message())
+		case "toolnotify":
+			showSettingsToolNotify(bot, bs, c.Message())
+		case "perm":
+			showSettingsPerm(bot, bs, c.Message())
+		case "routes":
+			showSettingsRoutes(bot, bs, c.Message())
+		case "mailbox":
+			showSettingsMailbox(bot, bs, c.Message())
+		case "status":
+			showSettingsStatus(bot, bs, c.Message())
+		case "cron":
+			showSettingsCron(bot, bs, c.Message())
+		}
+		return c.Respond()
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "settings_perm"}, func(c tele.Context) error {
+		action := c.Data()
+		val, ok := bs.SettingsMenuMsgs.Load(c.Message().ID)
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Session expired"})
+		}
+		tmuxStr, _ := val.(string)
+		target, err := injector.ParseTarget(tmuxStr)
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Invalid target"})
+		}
+		if action == "status" {
+			mode, _, err := helpers.DetectPermMode(target)
+			if err != nil {
+				return c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ %v", err)})
+			}
+			return c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("Current: %s", mode)})
+		}
+		finalMode, err := helpers.SwitchPermMode(target, action)
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("❌ %v", err)})
+		}
+		menu := buildPermSubMenu(finalMode)
+		bs.SettingsMenuMsgs.Store(c.Message().ID, tmuxStr)
+		appendBackButton(menu)
+		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("🔒 <b>Permission Mode</b>\n📟 %s\nCurrent: %s", notify.FormatPaneID(tmuxStr), finalMode), menu, tele.ModeHTML)
+		return c.Respond(&tele.CallbackResponse{Text: "✅ " + finalMode})
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "settings_bind"}, func(c tele.Context) error {
+		sessions := bs.SessionState.All()
+		if len(sessions) == 0 {
+			return c.Respond(&tele.CallbackResponse{Text: "No active sessions"})
+		}
+		chatID := c.Message().Chat.ID
+		topicID := c.Message().ThreadID
+		sel := &tele.ReplyMarkup{}
+		var rows []tele.Row
+		var items []BindMenuItem
+		idx := 1
+		for sid, info := range sessions {
+			key := sid
+			label := fmt.Sprintf("session:%s", sid[:8])
+			if info.Name != "" {
+				key = info.Name
+				label = info.Name
+			}
+			cwdStr := ""
+			if info.CWD != "" {
+				cwdStr = " " + notify.CompressPath(info.CWD)
+			}
+			items = append(items, BindMenuItem{Key: key, Label: label})
+			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🔗 %d: %s%s", idx, label, cwdStr), "bind_select", fmt.Sprintf("%d", idx))))
+			idx++
+		}
+		sel.Inline(rows...)
+		appendBackButton(sel)
+		bs.BindMenuItems.Store(c.Message().ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
+		helpers.RetryEdit(bot, c.Message(), "Select a session to bind to this group:", sel, tele.ModeHTML)
+		return c.Respond()
 	})
 
 	bot.Handle(&tele.Btn{Unique: "upgrade"}, func(c tele.Context) error {

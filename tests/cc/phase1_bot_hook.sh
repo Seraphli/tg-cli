@@ -65,7 +65,9 @@ else
 fi
 
 # Extract test session ID for resume test
+set +eo pipefail
 TEST_SID=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -oP 'Session tracked: \K[^ ]+' | head -1)
+set -eo pipefail
 if [ -n "$TEST_SID" ]; then
   echo "$TEST_SID" > /tmp/tg-cli-e2e-session-id.txt
   echo "  Test session ID saved: $TEST_SID"

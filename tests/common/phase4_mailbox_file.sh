@@ -21,11 +21,22 @@ SEND_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send \
   --file "$TEST_FILE" \
   --port "$TEST_PORT" 2>&1) || true
 
-if echo "$SEND_OUTPUT" | grep -qi "sent\|ok\|delivered"; then
+echo "  DEBUG: SEND_OUTPUT (${#SEND_OUTPUT} chars): $SEND_OUTPUT"
+set +eo pipefail
+echo "$SEND_OUTPUT" | grep -qi "sent\|ok\|delivered"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'sent|ok|delivered' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox file: send with attachment succeeded"
 else
   sleep 2
-  if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "Mailbox send:.*file" > /dev/null 2>&1; then
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "Mailbox send:.*file"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'Mailbox send:.*file' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     pass "mailbox file: send with attachment confirmed in log"
   else
     fail "mailbox file: send failed: $SEND_OUTPUT"
@@ -38,7 +49,13 @@ fi
 RECV_OUTPUT=$(timeout 10 ./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox receive \
   --name e2e-file-receiver --port "$TEST_PORT" 2>&1) || true
 
-if echo "$RECV_OUTPUT" | grep -qi "file test\|attachment\|Message with"; then
+echo "  DEBUG: RECV_OUTPUT (${#RECV_OUTPUT} chars): $RECV_OUTPUT"
+set +eo pipefail
+echo "$RECV_OUTPUT" | grep -qi "file test\|attachment\|Message with"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'file test|attachment|Message with' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox file: receive got message with attachment"
 else
   fail "mailbox file: receive did not get expected message: $RECV_OUTPUT"
@@ -48,8 +65,19 @@ fi
 INBOX_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox \
   --name e2e-file-receiver --port "$TEST_PORT" 2>&1) || true
 
-if echo "$INBOX_OUTPUT" | grep -q "File test"; then
-  if echo "$INBOX_OUTPUT" | grep "File test" | grep -q "^\*\|Unread"; then
+echo "  DEBUG: INBOX_OUTPUT (${#INBOX_OUTPUT} chars): $INBOX_OUTPUT"
+set +eo pipefail
+echo "$INBOX_OUTPUT" | grep -q "File test"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'File test' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
+  set +eo pipefail
+  echo "$INBOX_OUTPUT" | grep "File test" | grep -q "^\*\|Unread"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'File test...Unread' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[2]}" -eq 0 ]; then
     fail "mailbox file: attachment message still marked as unread after receive"
   else
     pass "mailbox file: attachment message marked as read after receive"

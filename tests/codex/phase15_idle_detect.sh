@@ -13,6 +13,7 @@ wait_for_idle
 
 # Check idle endpoint returns idle=True when Codex is settled
 IDLE_RESP=$(curl -sf "http://127.0.0.1:$TEST_PORT/session/idle" 2>/dev/null || echo "{}")
+echo "  DEBUG: IDLE_RESP (${#IDLE_RESP} chars): $IDLE_RESP"
 IDLE_STATE=$(echo "$IDLE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null || echo "False")
 if [ "$IDLE_STATE" = "True" ]; then
   pass "Codex idle detection: /session/idle returns idle=True when Codex is settled"

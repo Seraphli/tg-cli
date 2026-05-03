@@ -44,7 +44,13 @@ ELAPSED=0
 CC_BUSY=false
 while [ $ELAPSED -lt 30 ]; do
   IDLE_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/session/idle?target=$E2E_PANE" 2>/dev/null || echo "")
-  if echo "$IDLE_RESP" | grep -q '"idle":false'; then
+  echo "  DEBUG: IDLE_RESP (${#IDLE_RESP} chars): $IDLE_RESP"
+  set +eo pipefail
+  echo "$IDLE_RESP" | grep -q '"idle":false'
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep '\"idle\":false' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     CC_BUSY=true
     echo "  CLI is busy at t=$ELAPSED"
     break
@@ -71,10 +77,20 @@ sleep 2
 QUEUED_A=false
 QUEUED_B=false
 
-if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_A"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_A"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'CC busy, queued.*MARKER_A' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   QUEUED_A=true
 fi
-if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_B"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_B"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'CC busy, queued.*MARKER_B' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   QUEUED_B=true
 fi
 
@@ -91,7 +107,12 @@ echo "  Waiting for CLI to finish and flush queue..."
 ELAPSED=0
 MERGE_FOUND=false
 while [ $ELAPSED -lt 90 ]; do
-  if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "flushInjectQueue.*merging"; then
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "flushInjectQueue.*merging"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'flushInjectQueue.*merging' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     MERGE_FOUND=true
     break
   fi
@@ -103,7 +124,12 @@ if [ "$MERGE_FOUND" = true ]; then
   pass "inject queue: flush merged queued messages"
 
   MERGE_LINE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep "flushInjectQueue.*merging" | tail -1)
-  if echo "$MERGE_LINE" | grep -qE "items=[2-9]|items=[0-9][0-9]"; then
+  set +eo pipefail
+  echo "$MERGE_LINE" | grep -qE "items=[2-9]|items=[0-9][0-9]"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'items=...' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     pass "inject queue: merged 2+ items into single injection"
   else
     pass "inject queue: merge triggered (count may vary by timing)"

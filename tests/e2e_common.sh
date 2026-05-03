@@ -28,6 +28,31 @@ export E2E_RESULTS_FILE
 
 pass() { echo "PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  PASS: $1"; }
 fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; exit 1; }
+# Global error-exit logging
+set -E
+
+_e2e_last_error=""
+
+_e2e_on_error() {
+  local rc="$1"
+  local line="$2"
+  local cmd="$3"
+  local pipestatus="$4"
+  _e2e_last_error="rc=$rc line=$line cmd=$cmd pipestatus=$pipestatus"
+  echo "ERROR|$_e2e_last_error" >> "$E2E_RESULTS_FILE"
+  echo "  ERROR: $_e2e_last_error"
+}
+
+_e2e_on_exit() {
+  local rc="$?"
+  if [ "$rc" -ne 0 ]; then
+    echo "EXIT|rc=$rc last_error=${_e2e_last_error:-none}" >> "$E2E_RESULTS_FILE"
+    echo "  EXIT: rc=$rc last_error=${_e2e_last_error:-none}"
+  fi
+}
+
+trap '_e2e_on_error $? "$LINENO" "$BASH_COMMAND" "${PIPESTATUS[*]}"' ERR
+trap '_e2e_on_exit' EXIT
 
 # Log pane capture to bot log file via /capture API
 # Usage: pane_log "label"
@@ -124,7 +149,12 @@ wait_for_pane_content() {
   while [ $elapsed -lt $timeout ]; do
     local content
     content=$(curl -sf "http://127.0.0.1:$TEST_PORT/capture?target=${encoded_target}" 2>/dev/null) || true
-    if echo "$content" | grep -q "$pattern" 2>/dev/null; then
+    set +eo pipefail
+    echo "$content" | grep -q "$pattern" 2>/dev/null
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep '$pattern' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
       return 0
     fi
     sleep 2

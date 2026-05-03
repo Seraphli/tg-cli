@@ -25,7 +25,13 @@ ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
   -d '{"mode":"print","schedule":"1h","prompt":"echo hello cron","cwd":"/tmp"}')
 
 JOB_ID=$(echo "$ADD_RESP" | jq -r '.id // ""')
-if [ -n "$JOB_ID" ] && echo "$ADD_RESP" | grep -q '"ok":true'; then
+echo "  DEBUG: ADD_RESP (${#ADD_RESP} chars): $ADD_RESP"
+set +eo pipefail
+echo "$ADD_RESP" | grep -q '"ok":true'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
+if [ -n "$JOB_ID" ] && [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron add print job via API"
 else
   fail "Cron add print job via API - response: $ADD_RESP"
@@ -48,7 +54,13 @@ else
 fi
 
 # Verify job ID is in list
-if echo "$LIST_RESP" | grep -q "$JOB_ID"; then
+echo "  DEBUG: LIST_RESP (${#LIST_RESP} chars): $LIST_RESP"
+set +eo pipefail
+echo "$LIST_RESP" | grep -q "$JOB_ID"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'JOB_ID' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron list contains added job ID"
 else
   fail "Cron list does not contain job ID $JOB_ID"
@@ -60,7 +72,13 @@ REMOVE_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
   -H "Content-Type: application/json" \
   -d "{\"id\":\"$JOB_ID\"}")
 
-if echo "$REMOVE_RESP" | grep -q '"ok":true'; then
+echo "  DEBUG: REMOVE_RESP (${#REMOVE_RESP} chars): $REMOVE_RESP"
+set +eo pipefail
+echo "$REMOVE_RESP" | grep -q '"ok":true'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron remove job via API"
 else
   fail "Cron remove job via API - response: $REMOVE_RESP"
@@ -99,7 +117,13 @@ INJECT_ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
   -d '{"mode":"inject","schedule":"1h","prompt":"test inject prompt","agent_name":"nonexistent-agent-e2e"}')
 
 INJECT_JOB_ID=$(echo "$INJECT_ADD_RESP" | jq -r '.id // ""')
-if [ -n "$INJECT_JOB_ID" ] && echo "$INJECT_ADD_RESP" | grep -q '"ok":true'; then
+echo "  DEBUG: INJECT_ADD_RESP (${#INJECT_ADD_RESP} chars): $INJECT_ADD_RESP"
+set +eo pipefail
+echo "$INJECT_ADD_RESP" | grep -q '"ok":true'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
+if [ -n "$INJECT_JOB_ID" ] && [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron add inject job via API"
 else
   fail "Cron add inject job via API - response: $INJECT_ADD_RESP"
@@ -150,7 +174,13 @@ echo "  --- Cron CLI layer tests ---"
 
 # Test cron list via CLI
 CLI_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" cron list --port "$TEST_PORT" 2>&1) || true
-if echo "$CLI_OUTPUT" | grep -qi "job\|No cron\|id\|mode"; then
+echo "  DEBUG: CLI_OUTPUT (${#CLI_OUTPUT} chars): $CLI_OUTPUT"
+set +eo pipefail
+echo "$CLI_OUTPUT" | grep -qi "job\|No cron\|id\|mode"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'job|No cron|id|mode' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron CLI list: command executed"
 else
   fail "Cron CLI list: unexpected output: $CLI_OUTPUT"

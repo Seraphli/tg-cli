@@ -39,4 +39,5 @@ type BotState struct {
 	VersionNotified       sync.Map
 	UnbindMenuItems       sync.Map
 	BindMenuItems         sync.Map
+	SettingsMenuMsgs      sync.Map
 }

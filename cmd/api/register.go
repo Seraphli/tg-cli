@@ -20,4 +20,5 @@ func Register(mux *http.ServeMux, bs *types.BotState) {
 	registerCron(mux, bs)
 	registerTmux(mux, bs)
 	registerFile(mux, bs)
+	RegisterTestEndpoints(mux, bs)
 }

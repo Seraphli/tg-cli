@@ -102,6 +102,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   API_URL="http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$AQ_MSG_ID&tool=AskUserQuestion&question=0&option=1"
   echo "  API call: GET $API_URL"
   SELECT_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+  echo "  DEBUG: SELECT_RESP (${#SELECT_RESP} chars): $SELECT_RESP"
   SELECT_CODE=$(echo "$SELECT_RESP" | tail -1)
   if [ "$SELECT_CODE" = "200" ]; then
     pass "AskUserQuestion option selected via /tool/respond API"
@@ -117,7 +118,12 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   RESOLVE_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "AskUserQuestion responded\|AskUserQuestion option" | tail -1)
   if [ -n "$RESOLVE_LOG" ]; then
     pass "AskUserQuestion option selection logged"
-    if echo "$RESOLVE_LOG" | grep -q "answers=\|label="; then
+    set +eo pipefail
+    echo "$RESOLVE_LOG" | grep -q "answers=\|label="
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep 'answers=|label=' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
       SELECTED_LABEL=$(echo "$RESOLVE_LOG" | grep -oP '(answers|label)=\K\S+')
       pass "AskUserQuestion option log contains label=$SELECTED_LABEL"
     else
@@ -226,6 +232,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     API_URL="http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$FT_MSG_ID&tool=AskUserQuestion&action=text&value=my+custom+answer"
     echo "  API call: GET $API_URL"
     FT_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+    echo "  DEBUG: FT_RESP (${#FT_RESP} chars): $FT_RESP"
     FT_CODE=$(echo "$FT_RESP" | tail -1)
     if [ "$FT_CODE" = "200" ]; then
       pass "Free-text answer sent via /tool/respond API"
@@ -330,8 +337,9 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     API_URL="http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=group+direct+answer"
     echo "  API call: GET $API_URL"
     GT_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+    echo "  DEBUG: GT_RESP (${#GT_RESP} chars): $GT_RESP"
     GT_CODE=$(echo "$GT_RESP" | tail -1)
-    GT_BODY=$(echo "$GT_RESP" | head -1)
+    GT_BODY=${GT_RESP%%$'\n'*}
     if [ "$GT_CODE" = "200" ] && [ "$GT_BODY" = "resolved" ]; then
       pass "Group direct text resolved via /group/text API"
     else

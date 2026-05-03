@@ -78,6 +78,7 @@ else
   API_URL="http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$MQ_MSG_ID&tool=AskUserQuestion&question=0&option=0"
   echo "  API call: GET $API_URL"
   RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+  echo "  DEBUG: RESP (${#RESP} chars): $RESP"
   RESP_CODE=$(echo "$RESP" | tail -1)
   if [ "$RESP_CODE" = "200" ]; then
     pass "Q1 option selected via API (Alpha)"
@@ -132,6 +133,7 @@ else
   API_URL="http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$MQ_MSG_ID&tool=AskUserQuestion&action=submit"
   echo "  API call: GET $API_URL"
   SUBMIT_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+  echo "  DEBUG: SUBMIT_RESP (${#SUBMIT_RESP} chars): $SUBMIT_RESP"
   SUBMIT_CODE=$(echo "$SUBMIT_RESP" | tail -1)
   if [ "$SUBMIT_CODE" = "200" ]; then
     pass "Multi-question AskUserQuestion submitted via API"
@@ -182,6 +184,7 @@ else
         echo "$line" | jq -c 'select(.toolUseResult.answers != null) | .toolUseResult.answers' 2>/dev/null
       done | tail -1)
       if [ -n "$ALL_ANSWERS" ]; then
+        echo "  DEBUG: ALL_ANSWERS (${#ALL_ANSWERS} chars): $ALL_ANSWERS"
         Q1_ANS=$(echo "$ALL_ANSWERS" | jq -r '.["Which do you prefer?"] // empty' 2>/dev/null)
         Q2_ANS=$(echo "$ALL_ANSWERS" | jq -r '.["Pick colors"] // empty' 2>/dev/null)
         Q1_OK=false

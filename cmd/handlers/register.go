@@ -432,7 +432,7 @@ func Register(bs *types.BotState) {
 		return c.Reply(fmt.Sprintf("Pairing code: %s\n\nEnter this code in the bot terminal to approve.\n\nCode expires in 10 minutes.", code))
 	})
 
-	bot.Handle("/status", func(c tele.Context) error {
+	bot.Handle("/bot_status", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
@@ -447,48 +447,7 @@ func Register(bs *types.BotState) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
-		creds, _ := config.LoadCredentials()
-		sessions := bs.SessionState.All()
-		var sections []string
-		// Section 1: Agent routes (NameRouteMap)
-		if len(creds.NameRouteMap) > 0 {
-			var lines []string
-			lines = append(lines, "📋 Agent routes:")
-			for name, route := range creds.NameRouteMap {
-				chatName := fmt.Sprintf("%d", route.ChatID)
-				topicStr := ""
-				if ch, err := bot.ChatByID(route.ChatID); err == nil {
-					if ch.Title != "" {
-						chatName = fmt.Sprintf("%s (%d)", ch.Title, route.ChatID)
-					}
-					if ch.Type == tele.ChatSuperGroup {
-						if route.TopicID == 0 {
-							topicStr = ", topic=General"
-						} else {
-							topicStr = fmt.Sprintf(", topic=#%d", route.TopicID)
-						}
-					}
-				}
-				paneID := ""
-				if info := bs.SessionState.FindByName(name); info != nil {
-					paneID = " (" + notify.FormatPaneID(info.TmuxTarget) + ")"
-				}
-				lines = append(lines, fmt.Sprintf("  %s%s → %s%s", name, paneID, chatName, topicStr))
-			}
-			sections = append(sections, strings.Join(lines, "\n"))
-		}
-		// Section 2: Unnamed sessions
-		var unnamedLines []string
-		for _, info := range sessions {
-			if info.Name != "" {
-				continue
-			}
-			label := notify.FormatPaneID(info.TmuxTarget)
-			unnamedLines = append(unnamedLines, fmt.Sprintf("  %s → %s", label, notify.CompressPath(info.CWD)))
-		}
-		if len(unnamedLines) > 0 {
-			sections = append(sections, "📟 Unnamed sessions:\n"+strings.Join(unnamedLines, "\n"))
-		}
+		sections := buildRoutesSections(bot, bs)
 		if len(sections) == 0 {
 			return c.Reply("No active route bindings or sessions.")
 		}
@@ -770,10 +729,7 @@ func Register(bs *types.BotState) {
 		if current == "" {
 			current = "tmux"
 		}
-		sel := &tele.ReplyMarkup{}
-		btnTmux := sel.Data("📟 tmux CWD (current)", "cwd", "tmux")
-		btnPayload := sel.Data("📦 payload CWD", "cwd", "payload")
-		sel.Inline(sel.Row(btnTmux, btnPayload))
+		sel := buildCwdMenu()
 		return c.Reply(fmt.Sprintf("🔧 CWD source: %s\n\nSelect source for working directory:", current), sel)
 	})
 
@@ -886,7 +842,7 @@ func Register(bs *types.BotState) {
 		return handleVoiceCommand(c)
 	})
 
-	bot.Handle("/bot_merge", func(c tele.Context) error {
+	mergeHandler := func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
@@ -927,47 +883,18 @@ func Register(bs *types.BotState) {
 		bs.MergeBuffers.Start(key, c.Chat().ID, tmuxStr, sent.ID)
 		logger.Info(fmt.Sprintf("Merge started: chat=%d target=%s key=%s notify_msg=%d", c.Chat().ID, tmuxStr, key, sent.ID))
 		return nil
-	})
+	}
+	bot.Handle("/bot_merge", mergeHandler)
+	bot.Handle("/m", mergeHandler)
 
 	bot.Handle("/bot_cron", func(c tele.Context) error {
 		jobs := bs.CronJobs.All()
 		if len(jobs) == 0 {
 			return c.Reply("📋 No cron jobs configured.")
 		}
-		var text strings.Builder
-		text.WriteString("📋 <b>Cron Jobs</b>\n\n")
 		markup := &tele.ReplyMarkup{}
-		var rows []tele.Row
-		for _, j := range jobs {
-			modeIcon := "🖥️"
-			if j.Mode == "inject" {
-				modeIcon = "💉"
-			}
-			onceTag := ""
-			if j.Once {
-				onceTag = " [once]"
-			}
-			agentInfo := ""
-			if j.AgentName != "" {
-				agentInfo = fmt.Sprintf(" → %s", j.AgentName)
-			}
-			lastRunStr := "never"
-			if !j.LastRun.IsZero() {
-				lastRunStr = helpers.RelativeTime(j.LastRun)
-			}
-			nameStr := ""
-			if j.Name != "" {
-				nameStr = fmt.Sprintf(" <b>%s</b>", j.Name)
-			}
-			text.WriteString(fmt.Sprintf("%s <code>%s</code>%s%s%s\n📅 %s | Last: %s\n📝 %s\n\n",
-				modeIcon, j.ID[:8], nameStr, onceTag, agentInfo, j.Schedule, lastRunStr, j.Prompt))
-			btnLabel := "🗑 " + j.ID[:8]
-			if j.Name != "" {
-				btnLabel = "🗑 " + j.Name
-			}
-			rows = append(rows, markup.Row(markup.Data(btnLabel, "cron_delete", j.ID)))
-		}
-		fullText := text.String()
+		body, rows := buildCronContent(jobs, markup)
+		fullText := "📋 <b>Cron Jobs</b>\n\n" + body
 		chunks := helpers.SplitBody(fullText, 3900)
 		if len(chunks) <= 1 {
 			markup.Inline(rows...)
@@ -984,25 +911,24 @@ func Register(bs *types.BotState) {
 
 	bot.Handle("/bot_mailbox", func(c tele.Context) error {
 		creds, _ := config.LoadCredentials()
-		chatType := c.Chat().Type
-		if chatType == "group" || chatType == "supergroup" {
-			isBound := creds.MailboxChatID == c.Chat().ID
-			menu := &tele.ReplyMarkup{}
-			if isBound {
-				menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
-			} else {
-				menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
-			}
-			status := "Not bound"
-			if isBound {
-				status = "✅ Bound as mailbox group"
-			}
-			return c.Reply(fmt.Sprintf("📬 Mailbox Group\nStatus: %s\nChat ID: %d", status, c.Chat().ID), menu)
+		text, menu := buildMailboxContent(c.Chat().Type, c.Chat().ID, creds)
+		return c.Reply(text, menu, tele.ModeHTML)
+	})
+
+	bot.Handle("/bot_settings", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
-		if creds.MailboxChatID != 0 {
-			return c.Reply(fmt.Sprintf("📬 Mailbox bound to chat %d", creds.MailboxChatID))
+		text := buildSettingsTopText()
+		menu := buildSettingsTopMenu()
+		sent, err := helpers.RetrySend(bot, c.Chat(), text, menu, tele.ModeHTML)
+		if err != nil {
+			return err
 		}
-		return c.Reply("📬 No mailbox group bound. Send /bot_mailbox in a group to bind it.")
+		bs.SettingsMenuMsgs.Store(sent.ID, true)
+		return nil
 	})
 
 	RegisterMessageHandlers(bs)

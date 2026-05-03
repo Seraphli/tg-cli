@@ -35,7 +35,13 @@ ELAPSED=0
 SESSION_FOUND=false
 while [ $ELAPSED -lt 60 ]; do
   LIST=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session list --port "$TEST_PORT" 2>&1) || true
-  if echo "$LIST" | grep -q "$INTEG_AGENT"; then
+  echo "  DEBUG: LIST (${#LIST} chars): $LIST"
+  set +eo pipefail
+  echo "$LIST" | grep -q "$INTEG_AGENT"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep '$INTEG_AGENT' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     SESSION_FOUND=true
     break
   fi
@@ -104,7 +110,13 @@ RECV_PID=""  # Already exited
 
 # Step 6: Check inbox read status
 INBOX=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --name "$E2E_SESSION" --port "$TEST_PORT" 2>&1) || true
-if echo "$INBOX" | grep "$INTEG_AGENT" | grep -q "^\*"; then
+echo "  DEBUG: INBOX (${#INBOX} chars): $INBOX"
+set +eo pipefail
+echo "$INBOX" | grep "$INTEG_AGENT" | grep -q "^\*"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'INTEG_AGENT...unread' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[2]}" -eq 0 ]; then
   fail "integration: mailbox inbox still shows unread (*) after receive"
 else
   pass "integration: mailbox inbox shows read (no *)"
@@ -180,7 +192,12 @@ fi
 
 # Step 10: Verify kill-pane log has the target pane
 KILL_LOG=$(tail -n +"$((LOG_BEFORE_EXIT + 1))" "$LOG_FILE" | grep "SessionEnd kill-pane" | tail -1)
-if echo "$KILL_LOG" | grep -q "target=%"; then
+set +eo pipefail
+echo "$KILL_LOG" | grep -q "target=%"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'target=%' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "integration: SessionEnd kill-pane has pane target"
 else
   fail "integration: SessionEnd kill-pane missing pane target: $KILL_LOG"

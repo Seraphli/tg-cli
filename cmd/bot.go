@@ -209,12 +209,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	baseBotCommands := []tele.Command{
 		{Text: "bot_start", Description: "Show welcome message"},
 		{Text: "bot_pair", Description: "Pair this chat with the bot"},
-		{Text: "bot_status", Description: "Check bot and pairing status"},
-		{Text: "bot_perm_default", Description: "Switch to default mode"},
-		{Text: "bot_perm_plan", Description: "Switch to plan mode"},
-		{Text: "bot_perm_auto", Description: "Switch to auto-edit mode"},
-		{Text: "bot_perm_bypass", Description: "Switch to full-auto (bypass) mode"},
-		{Text: "bot_perm_status", Description: "Show current pane content"},
+		{Text: "bot_settings", Description: "Bot settings and management"},
 		{Text: "bot_capture", Description: "Capture tmux pane content"},
 		{Text: "p", Description: "Capture tmux pane content"},
 		{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
@@ -222,26 +217,16 @@ func runBot(cmd *cobra.Command, args []string) {
 		{Text: "t", Description: "Send Escape to interrupt Claude"},
 		{Text: "reload", Description: "Reload CC session (exit and resume)"},
 		{Text: "r", Description: "Reload CC session (exit and resume)"},
-		{Text: "bot_routes", Description: "Show route bindings"},
-		{Text: "bot_bind", Description: "Bind agent name to this chat/topic"},
-		{Text: "bot_unbind", Description: "Unbind an agent name route"},
-		{Text: "bot_name", Description: "Set agent name for a session"},
-		{Text: "bot_names", Description: "List and name active sessions"},
-		{Text: "bot_cwd", Description: "Configure CWD source (tmux/payload)"},
 		{Text: "resume", Description: "Resume a previous Claude Code session"},
-		{Text: "bot_verbose", Description: "Toggle tool notifications on/off"},
-		{Text: "bot_tools", Description: "Configure which tools send notifications"},
 		{Text: "bot_new", Description: "Launch new Claude Code session"},
 		{Text: "bot_usage", Description: "Show CC usage limits"},
 		{Text: "u", Description: "Show CC usage limits"},
 		{Text: "bot_merge", Description: "Merge multiple messages before sending"},
-		{Text: "bot_voice", Description: "Voice transcription settings"},
-		{Text: "bot_cron", Description: "Manage cron scheduled tasks"},
-		{Text: "bot_mailbox", Description: "Bind/unbind mailbox group"},
+		{Text: "m", Description: "Merge multiple messages before sending"},
 		{Text: "cu", Description: "Check for CC version updates"},
 		{Text: "check_update", Description: "Check for CC version updates"},
 	}
-	pinnedCommands := []string{"u", "t", "r", "p"}
+	pinnedCommands := []string{"u", "t", "r", "p", "m"}
 	customCmds := handlers.ScanCustomCommands()
 	buildCommands := func() []tele.Command {
 		return buildSortedCommands(baseBotCommands, pinnedCommands, bs.CommandStats.GetAll(), customCmds)

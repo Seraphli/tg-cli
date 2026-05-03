@@ -114,7 +114,12 @@ wait_for_idle
 pane_log "[tool_notify] AFTER CC idle"
 
 # Verify PostToolUse message update occurred (Bash tool call above should trigger it)
-if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "PostToolUse: updated msg_id="; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "PostToolUse: updated msg_id="
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'PostToolUse: updated msg_id=' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "PostToolUse message update detected in bot log"
 else
   # Not a hard failure — PostToolUse only fires if tool is in toolNotifyList and msg was sent
@@ -122,7 +127,9 @@ else
 fi
 
 # Verify PostToolUse result has content (not empty)
+set +eo pipefail
 POST_RESULT_LEN=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -o "result_len=[0-9]*" | head -1 | cut -d= -f2)
+set -eo pipefail
 if [ -n "$POST_RESULT_LEN" ] && [ "$POST_RESULT_LEN" -gt 0 ] 2>/dev/null; then
   pass "PostToolUse result has content (result_len=$POST_RESULT_LEN)"
 else

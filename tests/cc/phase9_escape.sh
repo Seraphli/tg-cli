@@ -56,6 +56,7 @@ BEFORE_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TAR
 
 pane_log "[escape] Pane BEFORE escape captured"
 
+echo "  DEBUG: BEFORE_ESCAPE (${#BEFORE_ESCAPE} chars): $BEFORE_ESCAPE"
 if echo "$BEFORE_ESCAPE" | grep "Esc to cancel" > /dev/null 2>&1; then
   pass "Pane contains AskUserQuestion content before escape"
 else
@@ -64,6 +65,7 @@ fi
 
 # 4. Send Escape via /escape API
 RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/escape?target=$ENCODED_TARGET")
+echo "  DEBUG: RESP (${#RESP} chars): $RESP"
 STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null)
 
 if [ "$STATUS" = "ok" ]; then
@@ -82,6 +84,7 @@ AFTER_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARG
 pane_log "[escape] Pane AFTER escape captured"
 
 # Verify AskUserQuestion UI is gone
+echo "  DEBUG: AFTER_ESCAPE (${#AFTER_ESCAPE} chars): $AFTER_ESCAPE"
 if echo "$AFTER_ESCAPE" | grep "Esc to cancel" > /dev/null 2>&1; then
   fail "AskUserQuestion dialog still active after escape"
 else

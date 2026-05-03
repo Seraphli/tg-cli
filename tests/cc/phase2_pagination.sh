@@ -70,6 +70,7 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
   API_URL="http://127.0.0.1:$TEST_PORT/callback?msg_id=$MSG_ID&page=2"
   echo "  API call: GET $API_URL"
   CB_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+  echo "  DEBUG: CB_RESP (${#CB_RESP} chars): $CB_RESP"
   CB_CODE=$(echo "$CB_RESP" | tail -1)
   if [ "$CB_CODE" = "200" ]; then
     pass "Page turn simulation via /callback returned 200"
@@ -89,7 +90,12 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
   # The enhanced callback log (cmd/api/pagination.go) emits all three fields pulled from PageEntry.
   # If PageEntry extension breaks, these fields will be missing or empty and grep will fail.
   # Numerical correctness of the restored values is covered by TestPageEntry_RoundtripExtendedFields.
-  if echo "$PAGE_TURN_LOG" | grep -qE 'cli="[^"]*" context_pct=-?[0-9]+ agent="[^"]*"'; then
+  set +eo pipefail
+  echo "$PAGE_TURN_LOG" | grep -qE 'cli="[^"]*" context_pct=-?[0-9]+ agent="[^"]*"'
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'extended PageEntry fields' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     pass "Bug 1 regression guard: callback log contains extended PageEntry fields"
   else
     fail "Bug 1: callback log missing extended PageEntry fields: $PAGE_TURN_LOG"

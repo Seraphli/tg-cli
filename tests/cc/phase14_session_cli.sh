@@ -27,12 +27,23 @@ fi
 
 # Test session list — verify it contains the active session
 LIST_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session list --port "$TEST_PORT" 2>&1) || true
-if echo "$LIST_OUTPUT" | grep -q "e2e-cli"; then
+echo "  DEBUG: LIST_OUTPUT (${#LIST_OUTPUT} chars): $LIST_OUTPUT"
+set +eo pipefail
+echo "$LIST_OUTPUT" | grep -q "e2e-cli"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'e2e-cli' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: contains agent name 'e2e-cli'"
 else
   fail "session list: agent name not found: $LIST_OUTPUT"
 fi
-if echo "$LIST_OUTPUT" | grep -q "target=\|%"; then
+set +eo pipefail
+echo "$LIST_OUTPUT" | grep -q "target=\|%"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'target=|%' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: shows tmux target"
 else
   fail "session list: tmux target not found: $LIST_OUTPUT"
@@ -44,13 +55,23 @@ pane_log "[session_cli] BEFORE session send"
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "e2e_session_send_test_marker" > /dev/null 2>&1 || true
 sleep 2
 pane_log "[session_cli] AFTER session send"
-if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"; then
+set +eo pipefail
+tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: message injected and logged"
 else
   fail "session send: injection not found in bot log"
 fi
 # Check TG notification for session send
-if tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "Session send notification\|CLI Message"; then
+set +eo pipefail
+tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "Session send notification\|CLI Message"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Session send notification' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification sent"
 else
   fail "session send: TG notification not found in log"
@@ -68,21 +89,37 @@ wait_for_idle $TIMEOUT
 LOG_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 20 2>&1) || true
 
 # Should have header with tmux target (📟)
-if echo "$LOG_OUTPUT" | grep -q "📟"; then
+echo "  DEBUG: LOG_OUTPUT (${#LOG_OUTPUT} chars): $LOG_OUTPUT"
+set +eo pipefail
+echo "$LOG_OUTPUT" | grep -q "📟"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '📟' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: header contains tmux target (📟)"
 else
-  fail "session log: missing tmux target header: $(echo "$LOG_OUTPUT" | head -1)"
+  fail "session log: missing tmux target header: ${LOG_OUTPUT%%$'\n'*}"
 fi
 
 # Should have separator lines
-if echo "$LOG_OUTPUT" | grep -q "────────────────────────"; then
+set +eo pipefail
+echo "$LOG_OUTPUT" | grep -q "────────────────────────"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '────' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has separator lines between messages"
 else
   fail "session log: missing separator lines"
 fi
 
 # Should have timestamps
-if echo "$LOG_OUTPUT" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}"; then
+set +eo pipefail
+echo "$LOG_OUTPUT" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'timestamp' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has timestamp format"
 else
   fail "session log: missing timestamps"
@@ -90,17 +127,33 @@ fi
 
 # Test --no-tools filter
 NOTOOLS_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 20 --no-tools 2>&1) || true
-if echo "$NOTOOLS_OUTPUT" | grep -q "\[Bash\]"; then
+echo "  DEBUG: NOTOOLS_OUTPUT (${#NOTOOLS_OUTPUT} chars): $NOTOOLS_OUTPUT"
+set +eo pipefail
+echo "$NOTOOLS_OUTPUT" | grep -q "\[Bash\]"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '[Bash]' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   fail "session log --no-tools: still contains [Bash] entries"
 else
   pass "session log --no-tools: Bash entries filtered out"
 fi
-if echo "$NOTOOLS_OUTPUT" | grep -q "\[assistant\]"; then
+set +eo pipefail
+echo "$NOTOOLS_OUTPUT" | grep -q "\[assistant\]"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '[assistant]' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log --no-tools: contains assistant text entries"
 else
   fail "session log --no-tools: no assistant entries found"
 fi
-if echo "$NOTOOLS_OUTPUT" | grep -q "\[user\]"; then
+set +eo pipefail
+echo "$NOTOOLS_OUTPUT" | grep -q "\[user\]"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '[user]' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log --no-tools: contains user text entries"
 else
   fail "session log --no-tools: no user entries found (user messages incorrectly filtered)"
@@ -108,15 +161,22 @@ fi
 
 # Test --format json
 JSON_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 3 --format json 2>&1) || true
+echo "  DEBUG: JSON_OUTPUT (${#JSON_OUTPUT} chars): $JSON_OUTPUT"
 if echo "$JSON_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'target' in d and 'messages' in d" 2>/dev/null; then
   pass "session log --format json: valid JSON with target and messages"
 else
-  fail "session log --format json: invalid JSON structure: $(echo "$JSON_OUTPUT" | head -1)"
+  fail "session log --format json: invalid JSON structure: ${JSON_OUTPUT%%$'\n'*}"
 fi
 
 # Verify session log contains known content (after injecting marker)
 LOG_FULL=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 9999 2>&1) || true
-if echo "$LOG_FULL" | grep -q "e2e_session_send_test_marker"; then
+echo "  DEBUG: LOG_FULL (${#LOG_FULL} chars): $LOG_FULL"
+set +eo pipefail
+echo "$LOG_FULL" | grep -q "e2e_session_send_test_marker"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: contains known content from transcript"
 else
   fail "session log: no known content found in transcript"
@@ -133,12 +193,23 @@ else
 fi
 
 ALL_TEXTS=$(echo "$JSON_3" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(m.get('text','')) for m in d.get('messages',[])]" 2>/dev/null || echo "")
-if echo "$ALL_TEXTS" | grep -q "e2e_session_send_test_marker"; then
+echo "  DEBUG: ALL_TEXTS (${#ALL_TEXTS} chars): $ALL_TEXTS"
+set +eo pipefail
+echo "$ALL_TEXTS" | grep -q "e2e_session_send_test_marker"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log accuracy: messages contain injected marker"
 else
   JSON_5=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 5 --format json 2>&1)
   ALL_5=$(echo "$JSON_5" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(m.get('text','')) for m in d.get('messages',[])]" 2>/dev/null || echo "")
-  if echo "$ALL_5" | grep -q "e2e_session_send_test_marker"; then
+  set +eo pipefail
+  echo "$ALL_5" | grep -q "e2e_session_send_test_marker"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'e2e_session_send_test_marker (top5)' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     pass "session log accuracy: messages contain injected marker (in top 5)"
   else
     fail "session log accuracy: marker not found in recent messages"
@@ -152,7 +223,13 @@ msgs=d.get('messages',[])
 for m in msgs:
     print(m.get('type','unknown'))
 " 2>/dev/null || echo "")
-if echo "$MSG_TYPES" | grep -q "user\|assistant"; then
+echo "  DEBUG: MSG_TYPES (${#MSG_TYPES} chars): $MSG_TYPES"
+set +eo pipefail
+echo "$MSG_TYPES" | grep -q "user\|assistant"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'user|assistant' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log accuracy: messages have valid user/assistant types"
 else
   fail "session log accuracy: messages missing valid types: $MSG_TYPES"

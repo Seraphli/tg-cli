@@ -57,6 +57,7 @@ if [ "$PRETOOL_FOUND" = true ]; then
     pane_log "[codex/pretool] BEFORE approve API call"
     API_URL="http://127.0.0.1:$TEST_PORT/permission/decide?msg_id=$PERM_MSG_ID&decision=allow"
     DECIDE_RESP=$(curl -s "$API_URL")
+    echo "  DEBUG: DECIDE_RESP (${#DECIDE_RESP} chars): $DECIDE_RESP"
     DECIDE_BEHAVIOR=$(echo "$DECIDE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('behavior',''))" 2>/dev/null || true)
     if [ "$DECIDE_BEHAVIOR" = "allow" ]; then
       pass "Codex permission approved via /permission/decide API"

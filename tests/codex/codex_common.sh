@@ -19,7 +19,13 @@ start_codex() {
   local dialog_handled=false
   while [ $elapsed -lt 60 ]; do
     PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
-    if [ "$dialog_handled" = false ] && echo "$PANE_CONTENT" | grep -qi "trust\|continue\|Press enter"; then
+    echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
+    set +eo pipefail
+    echo "$PANE_CONTENT" | grep -qi "trust\|continue\|Press enter"
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep 'trust|continue|Press enter' PIPESTATUS=${_ps[*]}"
+    if [ "$dialog_handled" = false ] && [ "${_ps[1]}" -eq 0 ]; then
       $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
       dialog_handled=true
       echo "Codex dialog detected and confirmed at t=$elapsed"

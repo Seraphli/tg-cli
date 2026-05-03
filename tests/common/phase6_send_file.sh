@@ -21,7 +21,13 @@ SEND_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$TEST_F
 pane_log "[send_file] AFTER CLI send-file"
 
 # Check CLI output for success
-if echo "$SEND_OUTPUT" | grep -q "File sent"; then
+echo "  DEBUG: SEND_OUTPUT (${#SEND_OUTPUT} chars): $SEND_OUTPUT"
+set +eo pipefail
+echo "$SEND_OUTPUT" | grep -q "File sent"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'File sent' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "CLI send-file: command returned success"
 else
   fail "CLI send-file: command output unexpected - $SEND_OUTPUT"

@@ -16,16 +16,29 @@ start_claude() {
   sleep 5
   pane_log "[start_claude] after 5s sleep, before trust check"
   PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
+  echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
+  set +eo pipefail
+  echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'Bypass Permissions' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" Down
     sleep 1
     $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
     echo "Bypass Permissions dialog detected, accepted."
-  elif echo "$PANE_CONTENT" | grep -qi "trust"; then
-    $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
-    echo "Trust dialog detected, confirmed."
   else
-    echo "No dialog detected, skipping."
+    set +eo pipefail
+    echo "$PANE_CONTENT" | grep -qi "trust"
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep 'trust' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
+      $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
+      echo "Trust dialog detected, confirmed."
+    else
+      echo "No dialog detected, skipping."
+    fi
   fi
   pane_log "[start_claude] after trust dialog handling"
   echo "Waiting for Claude to reach idle state..."

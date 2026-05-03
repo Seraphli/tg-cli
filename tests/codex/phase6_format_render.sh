@@ -93,7 +93,13 @@ else
 fi
 
 # Test 2: CLI pane shows nested list content (ground truth)
-if echo "$PANE_RAW" | grep -q "Child item" 2>/dev/null; then
+echo "  DEBUG: PANE_RAW (${#PANE_RAW} chars): $PANE_RAW"
+set +eo pipefail
+echo "$PANE_RAW" | grep -q "Child item" 2>/dev/null
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Child item' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "CLI pane shows nested list content"
 else
   fail "CLI pane missing nested list content"
@@ -123,7 +129,12 @@ else
 fi
 
 # Test 6: Both CLI and TG contain ordered list content
-if echo "$PANE_RAW" | grep -q "Step one" 2>/dev/null && grep -q "Step one" "$TG_PLAIN_FILE" 2>/dev/null; then
+set +eo pipefail
+echo "$PANE_RAW" | grep -q "Step one" 2>/dev/null
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'Step one' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ] && grep -q "Step one" "$TG_PLAIN_FILE" 2>/dev/null; then
   pass "Both CLI and TG contain ordered list content"
 else
   fail "Ordered list content mismatch between CLI and TG"
@@ -177,7 +188,13 @@ if [ "$TAB_STOP_FOUND" = true ]; then
   echo "$TAB_NEW_LOGS" | awk '/TG message sent \[Stop\].*full_text:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{exit} found{print}' > "$TAB_HTML_FILE"
   if grep -q "<pre>" "$TAB_HTML_FILE" 2>/dev/null; then
     PRE_CONTENT=$(awk '/<pre>/{found=1} found{print} /<\/pre>/{found=0}' "$TAB_HTML_FILE")
-    if echo "$PRE_CONTENT" | grep -qP '\t'; then
+    echo "  DEBUG: PRE_CONTENT (${#PRE_CONTENT} chars): $PRE_CONTENT"
+    set +eo pipefail
+    echo "$PRE_CONTENT" | grep -qP '\t'
+    _ps=("${PIPESTATUS[@]}")
+    set -eo pipefail
+    echo "  DEBUG: grep '\\t' PIPESTATUS=${_ps[*]}"
+    if [ "${_ps[1]}" -eq 0 ]; then
       fail "TG code block still contains literal tab characters"
     else
       pass "TG code block tabs expanded to spaces"

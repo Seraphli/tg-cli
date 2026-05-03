@@ -20,6 +20,7 @@ for MODE in $MODES_TO_TEST; do
     pane_log "[perm_switch] BEFORE perm/switch to $MODE"
 
     SWITCH_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/perm/switch?target=$ENCODED_TARGET&mode=$MODE")
+    echo "  DEBUG: SWITCH_RESP (${#SWITCH_RESP} chars): $SWITCH_RESP"
     SWITCH_STATUS=$(echo "$SWITCH_RESP" | jq -r '.status // empty' 2>/dev/null)
     SWITCH_MODE=$(echo "$SWITCH_RESP" | jq -r '.mode // empty' 2>/dev/null)
 
@@ -34,6 +35,7 @@ for MODE in $MODES_TO_TEST; do
 
     # Verify via /perm/status
     STATUS_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/perm/status?target=$ENCODED_TARGET")
+    echo "  DEBUG: STATUS_RESP (${#STATUS_RESP} chars): $STATUS_RESP"
     STATUS_MODE=$(echo "$STATUS_RESP" | jq -r '.mode // empty' 2>/dev/null)
 
     if [ "$STATUS_MODE" = "$MODE" ]; then

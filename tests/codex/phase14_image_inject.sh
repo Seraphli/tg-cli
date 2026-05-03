@@ -20,13 +20,24 @@ wait_for_idle $TIMEOUT
 pane_log "[image_inject] AFTER image+caption inject"
 
 PANE_AFTER=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
-if echo "$PANE_AFTER" | grep -q "\[Image\|tg-cli-test-image"; then
+echo "  DEBUG: PANE_AFTER (${#PANE_AFTER} chars): $PANE_AFTER"
+set +eo pipefail
+echo "$PANE_AFTER" | grep -q "\[Image\|tg-cli-test-image"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '[Image|tg-cli-test-image' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: Codex shows image in pane (image + caption)"
 else
   fail "Image injection: Codex does not show image — image was lost"
 fi
 
-if tail -n +$((LOG_BEFORE + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"; then
+set +eo pipefail
+tail -n +$((LOG_BEFORE + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image + caption)"
 else
   fail "Image injection: no UserPromptSubmit after image inject"
@@ -40,13 +51,23 @@ wait_for_idle $TIMEOUT
 pane_log "[image_inject] AFTER image-only inject"
 
 PANE_AFTER2=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
-if echo "$PANE_AFTER2" | grep -q "\[Image\|tg-cli-test-image"; then
+set +eo pipefail
+echo "$PANE_AFTER2" | grep -q "\[Image\|tg-cli-test-image"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '[Image|tg-cli-test-image' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: Codex shows image in pane (image only)"
 else
   fail "Image injection: Codex does not show image — image was lost"
 fi
 
-if tail -n +$((LOG_BEFORE2 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"; then
+set +eo pipefail
+tail -n +$((LOG_BEFORE2 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image only)"
 else
   fail "Image injection: no UserPromptSubmit after image-only inject"
@@ -62,7 +83,12 @@ inject_prompt "$MULTI_TEXT"
 wait_for_idle $TIMEOUT
 pane_log "[multiline] AFTER multi-line inject"
 
-if tail -n +$((LOG_BEFORE3 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"; then
+set +eo pipefail
+tail -n +$((LOG_BEFORE3 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Multi-line injection: UserPromptSubmit confirmed"
 else
   fail "Multi-line injection: no UserPromptSubmit after multi-line inject"

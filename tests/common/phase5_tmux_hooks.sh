@@ -27,7 +27,13 @@ INSTALL_OUTPUT=$(echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install \
   --tmux-server tg-cli-test \
   --tmux-conf "$TMUX_CONF_TEST" 2>&1) || true
 
-if echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"; then
+echo "  DEBUG: INSTALL_OUTPUT (${#INSTALL_OUTPUT} chars): $INSTALL_OUTPUT"
+set +eo pipefail
+echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'tmux hook registered' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux hooks: install registered hooks on test server"
 else
   fail "tmux hooks: install did not register hooks - output: $INSTALL_OUTPUT"
@@ -42,12 +48,23 @@ fi
 
 # Verify hooks are registered on test server
 HOOKS_OUTPUT=$($TMUX_TEST show-hooks -g 2>&1) || true
-if echo "$HOOKS_OUTPUT" | grep -q "session-created"; then
+echo "  DEBUG: HOOKS_OUTPUT (${#HOOKS_OUTPUT} chars): $HOOKS_OUTPUT"
+set +eo pipefail
+echo "$HOOKS_OUTPUT" | grep -q "session-created"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'session-created' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux hooks: session-created hook registered on test server"
 else
   fail "tmux hooks: session-created hook not found on test server"
 fi
-if echo "$HOOKS_OUTPUT" | grep -q "session-closed"; then
+set +eo pipefail
+echo "$HOOKS_OUTPUT" | grep -q "session-closed"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'session-closed' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux hooks: session-closed hook registered on test server"
 else
   fail "tmux hooks: session-closed hook not found on test server"
@@ -66,7 +83,12 @@ $TMUX_TEST new-session -d -s "$HOOK_TEST_SESSION" -x 200 -y 50
 ELAPSED=0
 CREATE_FOUND=false
 while [ $ELAPSED -lt 15 ]; do
-  if tail -n +"$((LOG_BEFORE_CREATE + 1))" "$LOG_FILE" | grep -q "tmux session-created notification:.*$HOOK_TEST_SESSION"; then
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE_CREATE + 1))" "$LOG_FILE" | grep -q "tmux session-created notification:.*$HOOK_TEST_SESSION"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'tmux session-created notification' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     CREATE_FOUND=true
     break
   fi
@@ -93,7 +115,12 @@ $TMUX_TEST kill-session -t "=$HOOK_TEST_SESSION" 2>/dev/null || true
 ELAPSED=0
 CLOSE_FOUND=false
 while [ $ELAPSED -lt 15 ]; do
-  if tail -n +"$((LOG_BEFORE_CLOSE + 1))" "$LOG_FILE" | grep -q "tmux session-closed notification:.*$HOOK_TEST_SESSION"; then
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE_CLOSE + 1))" "$LOG_FILE" | grep -q "tmux session-closed notification:.*$HOOK_TEST_SESSION"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'tmux session-closed notification' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     CLOSE_FOUND=true
     break
   fi

@@ -67,6 +67,7 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
   echo "Testing page turn callback..."
   API_URL="http://127.0.0.1:$TEST_PORT/callback?msg_id=$MSG_ID&page=2"
   CB_RESP=$(curl -s -w "\n%{http_code}" "$API_URL")
+  echo "  DEBUG: CB_RESP (${#CB_RESP} chars): $CB_RESP"
   CB_CODE=$(echo "$CB_RESP" | tail -1)
   if [ "$CB_CODE" = "200" ]; then
     pass "Codex page turn via /callback returned 200"

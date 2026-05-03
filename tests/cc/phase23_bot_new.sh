@@ -25,6 +25,7 @@ pane_log "[bot_new] BEFORE step 1: trigger /bot_new HTTP API" "$BOT_PANE"
 echo "  Triggering /bot_new via HTTP API..."
 HTTP_RESP=$(curl -s "http://127.0.0.1:${TEST_PORT}/bot_new")
 echo "  HTTP response: $HTTP_RESP"
+echo "  DEBUG: HTTP_RESP (${#HTTP_RESP} chars): $HTTP_RESP"
 HTTP_OK=$(echo "$HTTP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',''))" 2>/dev/null || echo "false")
 if [ "$HTTP_OK" != "True" ]; then
   fail "/bot_new HTTP API call failed"
@@ -77,6 +78,7 @@ pane_log "[bot_new] BEFORE step 3: select session_default callback" "$BOT_PANE"
 echo "  Selecting default session name via /bot_new/callback..."
 CB_RESP=$(curl -s "http://127.0.0.1:${TEST_PORT}/bot_new/callback?uuid=${LAUNCH_UUID}&data=session_default")
 echo "  Callback response: $CB_RESP"
+echo "  DEBUG: CB_RESP (${#CB_RESP} chars): $CB_RESP"
 CB_OK=$(echo "$CB_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',''))" 2>/dev/null || echo "false")
 if [ "$CB_OK" != "True" ]; then
   fail "/bot_new/callback session_default failed"
@@ -121,6 +123,7 @@ pane_log "[bot_new] BEFORE step 5: select dir_select callback" "$BOT_PANE"
 echo "  Selecting current directory via /bot_new/callback dir_select..."
 DIR_RESP=$(curl -s "http://127.0.0.1:${TEST_PORT}/bot_new/callback?uuid=${LAUNCH_UUID}&data=dir_select")
 echo "  Dir select response: $DIR_RESP"
+echo "  DEBUG: DIR_RESP (${#DIR_RESP} chars): $DIR_RESP"
 DIR_OK=$(echo "$DIR_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',''))" 2>/dev/null || echo "false")
 if [ "$DIR_OK" != "True" ]; then
   fail "/bot_new/callback dir_select failed"

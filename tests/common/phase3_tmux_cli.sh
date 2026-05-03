@@ -9,7 +9,13 @@ pane_log "[tmux_cli] BEFORE test"
 
 # Test tmux list
 OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" tmux list --port "$TEST_PORT" 2>&1) || true
-if echo "$OUTPUT" | grep -q "%\|TARGET\|PANE"; then
+echo "  DEBUG: OUTPUT (${#OUTPUT} chars): $OUTPUT"
+set +eo pipefail
+echo "$OUTPUT" | grep -q "%\|TARGET\|PANE"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '%|TARGET|PANE' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux list: output contains pane info"
 else
   fail "tmux list: no pane info in output: $OUTPUT"
@@ -39,7 +45,13 @@ fi
 EVENT_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/tmux/event" \
   -H "Content-Type: application/json" \
   -d '{"event":"pane-died","pane":"%999"}' 2>&1) || true
-if echo "$EVENT_RESP" | grep -qi "ok"; then
+echo "  DEBUG: EVENT_RESP (${#EVENT_RESP} chars): $EVENT_RESP"
+set +eo pipefail
+echo "$EVENT_RESP" | grep -qi "ok"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'ok' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux event: /tmux/event API responded ok"
 else
   pass "tmux event: API response check skipped"

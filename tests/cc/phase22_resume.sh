@@ -21,7 +21,13 @@ while [ $ELAPSED -lt 30 ]; do
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   sleep 2
   PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -q "$SENTINEL"; then
+  echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
+  set +eo pipefail
+  echo "$PANE_CONTENT" | grep -q "$SENTINEL"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'SENTINEL' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     echo "  Shell is ready (sentinel detected)."
     break
   fi
@@ -43,7 +49,12 @@ CC_STARTED=false
 while [ $ELAPSED_CC -lt 30 ]; do
   sleep 2
   PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"; then
+  set +eo pipefail
+  echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'Bypass Permissions' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" Down
     sleep 1
     $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
@@ -51,13 +62,23 @@ while [ $ELAPSED_CC -lt 30 ]; do
     CC_STARTED=true
     break
   fi
-  if echo "$PANE_CONTENT" | grep -qi "trust"; then
+  set +eo pipefail
+  echo "$PANE_CONTENT" | grep -qi "trust"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'trust' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
     echo "  Trust dialog detected, confirmed."
     CC_STARTED=true
     break
   fi
-  if echo "$PANE_CONTENT" | grep -q "Claude Code"; then
+  set +eo pipefail
+  echo "$PANE_CONTENT" | grep -q "Claude Code"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'Claude Code' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     echo "  CC banner detected."
     CC_STARTED=true
     break
@@ -92,12 +113,22 @@ pass "SessionStart after CC restart"
 # it calls sendEventNotification which populates it via GetPaneCLICommand.
 sleep 1
 SS_DEBUG=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -A 30 "TG message sent \[SessionStart\]" | head -40 || true)
-if echo "$SS_DEBUG" | grep -q "🖥"; then
+set +eo pipefail
+echo "$SS_DEBUG" | grep -q "🖥"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '🖥' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Bug 2 regression guard: SessionStart header contains 🖥 CLICommand line"
 else
   fail "Bug 2: SessionStart header missing 🖥 CLICommand line. Log excerpt: $SS_DEBUG"
 fi
-if echo "$SS_DEBUG" | grep -qE '📊 Context:'; then
+set +eo pipefail
+echo "$SS_DEBUG" | grep -qE '📊 Context:'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep '📊 Context:' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "Bug 2 regression guard: SessionStart header contains 📊 Context line"
 else
   echo "  INFO: SessionStart header missing 📊 Context line (may be expected if no context data)"
@@ -113,6 +144,7 @@ ENCODED_PANE=$(printf '%s' "$E2E_PANE" | python3 -c "import sys,urllib.parse; pr
 LIST_RESP=$(curl -s "http://127.0.0.1:${TEST_PORT}/resume/list?target=${ENCODED_PANE}")
 echo "  /resume/list response: $LIST_RESP"
 
+echo "  DEBUG: LIST_RESP (${#LIST_RESP} chars): $LIST_RESP"
 SESSION_COUNT=$(echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('sessions',[])))" 2>/dev/null || echo "0")
 if [ "$SESSION_COUNT" -gt 0 ]; then
   pass "/resume/list returned $SESSION_COUNT session(s)"
@@ -145,6 +177,7 @@ LOG_BEFORE_SELECT=$(wc -l < "$LOG_FILE")
 SELECT_RESP=$(curl -s "http://127.0.0.1:${TEST_PORT}/resume/select?target=${ENCODED_PANE}&session_id=${RESUME_SID}")
 echo "  /resume/select response: $SELECT_RESP"
 
+echo "  DEBUG: SELECT_RESP (${#SELECT_RESP} chars): $SELECT_RESP"
 if echo "$SELECT_RESP" | grep '"ok"' > /dev/null 2>&1; then
   pass "/resume/select returned ok"
 else

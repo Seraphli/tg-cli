@@ -66,6 +66,7 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   API_URL="http://127.0.0.1:$TEST_PORT/permission/decide?msg_id=$PERM_MSG_ID&decision=allow"
   echo "  API call: GET $API_URL"
   DECIDE_RESP=$(curl -s "$API_URL")
+  echo "  DEBUG: DECIDE_RESP (${#DECIDE_RESP} chars): $DECIDE_RESP"
   DECIDE_BEHAVIOR=$(echo "$DECIDE_RESP" | jq -r '.behavior // empty' 2>/dev/null)
   if [ "$DECIDE_BEHAVIOR" = "allow" ]; then
     pass "Permission approved via /permission/decide API (behavior=allow)"

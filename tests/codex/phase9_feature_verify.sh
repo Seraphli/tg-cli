@@ -32,7 +32,12 @@ inject_prompt "Reply with exactly: cooldown_test_two"
 # Check if stopCooldown wait was logged (only fires if within 3s cooldown window)
 sleep 3
 COOLDOWN_LOGGED=false
-if tail -n +"$((LOG_BEFORE_B2 + 1))" "$LOG_FILE" | grep -q "stopCooldown: waiting"; then
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_B2 + 1))" "$LOG_FILE" | grep -q "stopCooldown: waiting"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: grep 'stopCooldown: waiting' PIPESTATUS=${_ps[*]}"
+if [ "${_ps[1]}" -eq 0 ]; then
   COOLDOWN_LOGGED=true
 fi
 
@@ -77,6 +82,7 @@ SEND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   "http://127.0.0.1:$TEST_PORT/session/send" \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"$SESSION_NAME\",\"text\":\"$SEND_TOKEN\",\"from\":\"phase28-test\"}")
+echo "  DEBUG: SEND_RESP (${#SEND_RESP} chars): $SEND_RESP"
 SEND_CODE=$(echo "$SEND_RESP" | tail -1)
 
 if [ "$SEND_CODE" = "200" ]; then
@@ -89,7 +95,12 @@ fi
 ELAPSED=0
 SEND_FOUND=false
 while [ $ELAPSED -lt 15 ]; do
-  if tail -n +"$((LOG_BEFORE_C + 1))" "$LOG_FILE" | grep -q "Session send via API:.*$SEND_TOKEN"; then
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE_C + 1))" "$LOG_FILE" | grep -q "Session send via API:.*$SEND_TOKEN"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'Session send via API:.*SEND_TOKEN' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     SEND_FOUND=true
     break
   fi
@@ -118,7 +129,13 @@ if [ "${E2E_BACKEND:-}" != "codex" ]; then
 
   USAGE_OUTPUT=$(./tg-cli usage 2>&1) || true
 
-  if echo "$USAGE_OUTPUT" | grep -q "CC Usage"; then
+  echo "  DEBUG: USAGE_OUTPUT (${#USAGE_OUTPUT} chars): $USAGE_OUTPUT"
+  set +eo pipefail
+  echo "$USAGE_OUTPUT" | grep -q "CC Usage"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  echo "  DEBUG: grep 'CC Usage' PIPESTATUS=${_ps[*]}"
+  if [ "${_ps[1]}" -eq 0 ]; then
     pass "usage CLI: output contains CC Usage header"
   else
     fail "usage CLI: output missing CC Usage header - got: $USAGE_OUTPUT"
