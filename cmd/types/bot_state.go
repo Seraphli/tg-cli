@@ -30,6 +30,7 @@ type BotState struct {
 	ToolUseMsgs     *stores.ToolUseMsgStore
 	CommandStats    *stores.CommandStatsStore
 	SessionEvents   *stores.SessionEventStore
+	AtChannels      *stores.AtChannelStore
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map

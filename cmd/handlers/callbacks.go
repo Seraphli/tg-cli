@@ -72,9 +72,18 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if pageNum < 1 || pageNum > len(entry.Chunks) {
 			return c.Respond()
 		}
+		logger.Info(fmt.Sprintf("p callback: page=%d msgID=%d hasHeader=%v", pageNum, c.Message().ID, entry.Header != ""))
 		var text string
-		if entry.PermRows != nil {
+		var kb *tele.ReplyMarkup
+		if entry.Header != "" {
+			// @ forward message: show header + chunk with collapse button
+			text = entry.Header + entry.Chunks[pageNum-1]
+			collapseMk := &tele.ReplyMarkup{}
+			collapseBtn := collapseMk.Data("📗 收起", "ce", "c")
+			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), []tele.Row{{collapseBtn}})
+		} else if entry.PermRows != nil {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
+			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
 		} else {
 			text = notify.BuildNotificationText(notify.NotificationData{
 				Event:      entry.Event,
@@ -85,8 +94,8 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				Page:       pageNum,
 				TotalPages: len(entry.Chunks),
 			})
+			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
 		}
-		kb := helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
 		if entry.RawMode {
 			_, err = helpers.RetryEdit(bot, c.Message(), text, kb)
 		} else {
@@ -94,6 +103,47 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		}
 		if err != nil {
 			logger.Debug(fmt.Sprintf("edit page error: %v", err))
+		}
+		return c.Respond()
+	})
+
+	// "ce" callback: collapse/expand @ forward messages
+	bot.Handle(&tele.Btn{Unique: "ce"}, func(c tele.Context) error {
+		entry, ok := bs.Pages.Get(c.Message().ID)
+		logger.Info(fmt.Sprintf("ce callback: data=%s msgID=%d hasEntry=%v", c.Data(), c.Message().ID, entry != nil))
+		if !ok {
+			return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+		}
+		var text string
+		var kb *tele.ReplyMarkup
+		if c.Data() == "c" {
+			// Collapse: show only the first line of the header (the link line)
+			entry.Collapsed = true
+			text = strings.SplitN(entry.Header, "\n", 2)[0]
+			kb = &tele.ReplyMarkup{}
+			expandBtn := kb.Data("📖 展开", "ce", "e")
+			kb.Inline(tele.Row{expandBtn})
+		} else {
+			entry.Collapsed = false
+			text = entry.Header + entry.Chunks[0]
+			collapseMk := &tele.ReplyMarkup{}
+			collapseBtn := collapseMk.Data("📗 收起", "ce", "c")
+			if len(entry.Chunks) > 1 {
+				kb = helpers.BuildPageKeyboardWithExtra(1, len(entry.Chunks), []tele.Row{{collapseBtn}})
+			} else {
+				kb = &tele.ReplyMarkup{}
+				kb.Inline(tele.Row{collapseBtn})
+			}
+		}
+		var editOpts []interface{}
+		editOpts = append(editOpts, kb)
+		if !entry.RawMode {
+			editOpts = append(editOpts, tele.ModeHTML)
+		}
+		_, err := helpers.RetryEdit(bot, c.Message(), text, editOpts...)
+		logger.Info(fmt.Sprintf("ce edit: collapsed=%v err=%v", entry.Collapsed, err))
+		if err != nil {
+			logger.Debug(fmt.Sprintf("ce edit error: %v", err))
 		}
 		return c.Respond()
 	})
@@ -895,6 +945,8 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			showSettingsStatus(bot, bs, c.Message())
 		case "cron":
 			showSettingsCron(bot, bs, c.Message())
+		case "displayname":
+			showSettingsDisplayName(bot, bs, c.Message())
 		}
 		return c.Respond()
 	})
@@ -926,6 +978,15 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		appendBackButton(menu)
 		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("🔒 <b>Permission Mode</b>\n📟 %s\nCurrent: %s", notify.FormatPaneID(tmuxStr), finalMode), menu, tele.ModeHTML)
 		return c.Respond(&tele.CallbackResponse{Text: "✅ " + finalMode})
+	})
+
+	bot.Handle(&tele.InlineButton{Unique: "settings_displayname"}, func(c tele.Context) error {
+		if c.Data() == "set" {
+			helpers.RetryEdit(bot, c.Message(), "👤 <b>Display Name</b>\n\nReply to this message with your desired display name:", tele.ModeHTML)
+			bs.SettingsMenuMsgs.Store(c.Message().ID, "displayname")
+			return c.Respond(&tele.CallbackResponse{Text: "Reply with name"})
+		}
+		return c.Respond()
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "settings_bind"}, func(c tele.Context) error {

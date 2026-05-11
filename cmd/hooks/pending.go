@@ -13,6 +13,7 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/cmd/types"
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
@@ -278,6 +279,68 @@ func ProcessPendingRequest(bs *types.BotState, cb Callbacks, uuid string) {
 		}
 		contentSummary := strings.Join(qSummaries, " | ")
 		logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d questions=%d tmux=%s content=%s uuid=%s", sent.ID, len(askInput.Questions), p.TmuxTarget, contentSummary, uuid))
+		// Forward AskUserQuestion to @ channel peers
+		if agentName != "" {
+			atTargets := bs.AtChannels.GetTargets(agentName)
+			buffered := bs.AtChannels.FlushBufferEntries(agentName)
+			cfg, _ := config.LoadAppConfig()
+			dn := cfg.DisplayName
+			if dn == "" {
+				dn = "User"
+			}
+			for _, peerName := range atTargets {
+				peerInfo := bs.SessionState.FindByName(peerName)
+				if peerInfo == nil {
+					continue
+				}
+				var contentLines []string
+				for _, entry := range buffered {
+					contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: %s", agentName, dn, entry))
+				}
+				// Format full AskQ content with ❓ header and options with descriptions
+				for _, q := range askInput.Questions {
+					contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: ❓ %s", agentName, dn, q.Header))
+					contentLines = append(contentLines, q.Question)
+					for _, o := range q.Options {
+						contentLines = append(contentLines, fmt.Sprintf("- %s — %s", o.Label, o.Description))
+					}
+				}
+				content := strings.Join(contentLines, "\n")
+				instructions := fmt.Sprintf("`%s` is asking a question. Below is the update and question.", agentName)
+				msg := helpers.BuildAtMsg(agentName, peerName, instructions, content)
+
+				peerChat, _, peerTopicID := cb.ResolveChat(bs, peerInfo.TmuxTarget)
+				if peerChat != nil {
+					var fwdOpts []interface{}
+					if peerTopicID > 0 {
+						fwdOpts = append(fwdOpts, &tele.SendOptions{ThreadID: peerTopicID})
+					}
+					targetHeader := helpers.BuildAtHeader(agentName, peerName) + "\n---\n" + instructions + "\n---\n"
+					helpers.SendPagedForward(bs.Bot, peerChat, targetHeader, content, bs.Pages, "", fwdOpts...)
+				}
+				// Inject to target pane = TG content
+				go func(target, text string) {
+					injectP := helpers.SafeInjectTextParams{
+						Bot:              bs.Bot,
+						ToolNotifs:       bs.ToolNotifs,
+						PendingFiles:     bs.PendingFiles,
+						PendingPerms:     bs.PendingPerms,
+						InjectQueue:      bs.InjectQueue,
+						InjectConfirm:    bs.InjectConfirm,
+						StopCooldown:     bs.StopCooldown,
+						ReactionTracker:  bs.ReactionTracker,
+						SessionState:     bs.SessionState,
+						HookSessionLocks: &bs.HookSessionLocks,
+						SessionEvents:    bs.SessionEvents,
+						ResolveChat: func(t string) (*tele.Chat, string, int) {
+							return cb.ResolveChat(bs, t)
+						},
+						FormatPaneID: notify.FormatPaneID,
+					}
+					helpers.SafeInjectText(injectP, target, text)
+				}(peerInfo.TmuxTarget, msg)
+			}
+		}
 		bs.SessionWatch.Notify(agentName, stores.WatchEvent{
 			Event:   "AskUserQuestion",
 			Agent:   agentName,

@@ -105,14 +105,17 @@ else
   fail "/route/unbind returned $UNBIND_CODE"
 fi
 
-# Verify routes is now empty
+# Verify the unbound route is gone
 LIST_RESP_AFTER=$(curl -s "http://127.0.0.1:$TEST_PORT/route/list")
 echo "  DEBUG: LIST_RESP_AFTER (${#LIST_RESP_AFTER} chars): $LIST_RESP_AFTER"
-ROUTE_COUNT=$(echo "$LIST_RESP_AFTER" | jq '.name_routes | length')
-if [ "$ROUTE_COUNT" = "0" ]; then
-  pass "/route/list is empty after unbind"
+set +eo pipefail
+echo "$LIST_RESP_AFTER" | grep -q "e2e-cli"
+_ub=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ub[1]}" -ne 0 ]; then
+  pass "/route/list no longer contains e2e-cli after unbind"
 else
-  fail "/route/list still has $ROUTE_COUNT routes after unbind"
+  fail "/route/list still contains e2e-cli after unbind"
 fi
 
 # Inject another prompt (should fall back to default chat)

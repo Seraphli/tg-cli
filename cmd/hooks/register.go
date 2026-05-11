@@ -120,6 +120,46 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					helpers.RetrySend(bs.Bot, chat, text, sessionEndOpts...)
 					logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionEnd [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
 				}
+				// Close all @ channels involving this session
+				if hookAgentName != "" {
+					closedPeers := bs.AtChannels.CloseAll(hookAgentName)
+					for _, peer := range closedPeers {
+						peerInfo := bs.SessionState.FindByName(peer)
+						if peerInfo == nil {
+							continue
+						}
+						msg := helpers.BuildAtMsg(hookAgentName, peer, "", "session ended, channel closed")
+						peerChat, _, peerTopicID := cb.ResolveChat(bs, peerInfo.TmuxTarget)
+						if peerChat != nil {
+							var sendOpts []interface{}
+							if peerTopicID > 0 {
+								sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: peerTopicID})
+							}
+							helpers.RetrySend(bs.Bot, peerChat, msg, sendOpts...)
+						}
+						// Inject to peer pane (they need to know the channel is gone)
+						go func(target, text string) {
+							p := helpers.SafeInjectTextParams{
+								Bot:              bs.Bot,
+								ToolNotifs:       bs.ToolNotifs,
+								PendingFiles:     bs.PendingFiles,
+								PendingPerms:     bs.PendingPerms,
+								InjectQueue:      bs.InjectQueue,
+								InjectConfirm:    bs.InjectConfirm,
+								StopCooldown:     bs.StopCooldown,
+								ReactionTracker:  bs.ReactionTracker,
+								SessionState:     bs.SessionState,
+								HookSessionLocks: &bs.HookSessionLocks,
+								SessionEvents:    bs.SessionEvents,
+								ResolveChat: func(t string) (*tele.Chat, string, int) {
+									return cb.ResolveChat(bs, t)
+								},
+								FormatPaneID: notify.FormatPaneID,
+							}
+							helpers.SafeInjectText(p, target, text)
+						}(peerInfo.TmuxTarget, msg)
+					}
+				}
 				bs.Pages.CleanupSession(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
 				CleanPendingFilesBySession(p.SessionID)
@@ -199,6 +239,60 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					if body != "" {
 						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
 					}
+					// Forward Stop output to @ channel targets
+					if hookAgentName != "" && body != "" {
+						cfg, _ := config.LoadAppConfig()
+						dn := cfg.DisplayName
+						if dn == "" {
+							dn = "User"
+						}
+						atTargets := bs.AtChannels.GetTargets(hookAgentName)
+						buffered := bs.AtChannels.FlushBufferEntries(hookAgentName)
+						for _, peerName := range atTargets {
+							peerInfo := bs.SessionState.FindByName(peerName)
+							if peerInfo == nil {
+								continue
+							}
+							var contentLines []string
+							for _, entry := range buffered {
+								contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: %s", hookAgentName, dn, entry))
+							}
+							contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: %s", hookAgentName, dn, body))
+							content := strings.Join(contentLines, "\n")
+							instructions := fmt.Sprintf("`%s` completed a task. Below is the progress update.", hookAgentName)
+							msg := helpers.BuildAtMsg(hookAgentName, peerName, instructions, content)
+							logger.Info(fmt.Sprintf("@ forward: %s → %s body_len=%d content=%s", hookAgentName, peerName, len(content), helpers.TruncateStr(content, 200)))
+							go func(target, text, instr, cnt, peer string) {
+								p := helpers.SafeInjectTextParams{
+									Bot:              bs.Bot,
+									ToolNotifs:       bs.ToolNotifs,
+									PendingFiles:     bs.PendingFiles,
+									PendingPerms:     bs.PendingPerms,
+									InjectQueue:      bs.InjectQueue,
+									InjectConfirm:    bs.InjectConfirm,
+									StopCooldown:     bs.StopCooldown,
+									ReactionTracker:  bs.ReactionTracker,
+									SessionState:     bs.SessionState,
+									HookSessionLocks: &bs.HookSessionLocks,
+									SessionEvents:    bs.SessionEvents,
+									ResolveChat: func(t string) (*tele.Chat, string, int) {
+										return cb.ResolveChat(bs, t)
+									},
+									FormatPaneID: notify.FormatPaneID,
+								}
+								helpers.SafeInjectText(p, target, text)
+								peerChat, _, peerTopicID := cb.ResolveChat(bs, target)
+								if peerChat != nil {
+									var sendOpts []interface{}
+									if peerTopicID > 0 {
+										sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: peerTopicID})
+									}
+									targetHeader := helpers.BuildAtHeader(hookAgentName, peer) + "\n---\n" + instr + "\n---\n"
+									helpers.SendPagedForward(bs.Bot, peerChat, targetHeader, cnt, bs.Pages, "", sendOpts...)
+								}
+							}(peerInfo.TmuxTarget, msg, instructions, content, peerName)
+						}
+					}
 					bs.SessionWatch.Notify(hookAgentName, stores.WatchEvent{
 						Event:   "Stop",
 						Agent:   hookAgentName,
@@ -237,6 +331,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					body := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
 					if body != "" {
 						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+						// Accumulate Update text for @ channel forwarding
+						if hookAgentName != "" {
+							bs.AtChannels.AppendBuffer(hookAgentName, body)
+						}
 					} else {
 						logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 					}

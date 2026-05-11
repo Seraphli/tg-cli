@@ -60,17 +60,15 @@ pane_log() {
   local label="$1"
   local target="${2:-${E2E_PANE:-}}"
   if [ -z "$target" ]; then
-    echo "=== PANE: $label === (no pane)" >> "$LOG_FILE"
+    echo "  === PANE: $label === (no pane)"
     return
   fi
   local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$target" | jq -sRr @uri)"
   local capture
   capture=$(curl -s "$api_url" | jq -r '.content // "(empty)"' 2>/dev/null || echo "(capture failed)")
-  {
-    echo "=== PANE: $label ==="
-    echo "$capture"
-    echo "=== END PANE ==="
-  } >> "$LOG_FILE"
+  echo "  === PANE: $label ==="
+  echo "$capture"
+  echo "  === END PANE ==="
 }
 
 inject_prompt() {

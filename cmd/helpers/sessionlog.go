@@ -213,8 +213,9 @@ func ExtractCommandName(content string) string {
 }
 
 // isSystemTagContent checks if a string starts with a known CC system tag prefix.
+// "# /" covers skill definition texts loaded by the Skill tool.
 func isSystemTagContent(s string) bool {
-	prefixes := []string{"<local-command-", "<command-", "<task-notification", "<bash-input", "<system-reminder"}
+	prefixes := []string{"<local-command-", "<command-", "<task-notification", "<bash-input", "<system-reminder", "# /"}
 	for _, p := range prefixes {
 		if strings.HasPrefix(s, p) {
 			return true

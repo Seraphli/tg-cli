@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -929,6 +932,65 @@ func Register(bs *types.BotState) {
 		}
 		bs.SettingsMenuMsgs.Store(sent.ID, true)
 		return nil
+	})
+
+	bot.Handle("/bot_at", func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("❌ Not paired. Use /bot_pair first.")
+		}
+		payload := strings.TrimSpace(c.Message().Payload)
+		if payload == "" {
+			return c.Reply("❌ Usage: /bot_at <Name> [message]\n/bot_at end <Name>")
+		}
+		parts := strings.SplitN(payload, " ", 2)
+		targetName := parts[0]
+		msg := ""
+		if len(parts) > 1 {
+			msg = parts[1]
+		}
+		if targetName == "end" {
+			if msg == "" {
+				return c.Reply("❌ Usage: /bot_at end <Name>")
+			}
+			endTarget := strings.TrimSpace(msg)
+			tmuxStr, _, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
+			if err != nil {
+				return c.Reply("❌ No session bound to this group.")
+			}
+			initiatorInfo := bs.SessionState.FindInfoByTarget(tmuxStr)
+			if initiatorInfo == nil || initiatorInfo.Name == "" {
+				return c.Reply("❌ Session has no name.")
+			}
+			// Call /at/close API to reuse the full close logic (TG notifications + pane inject)
+			creds, _ := config.LoadCredentials()
+			port := creds.Port
+			if port == 0 {
+				port = 12500
+			}
+			closeBody, _ := json.Marshal(map[string]string{"initiator": initiatorInfo.Name, "target": endTarget})
+			closeResp, closeErr := http.Post(fmt.Sprintf("http://127.0.0.1:%d/at/close", port), "application/json", bytes.NewReader(closeBody))
+			if closeErr != nil {
+				return c.Reply(fmt.Sprintf("❌ Close failed: %v", closeErr))
+			}
+			defer closeResp.Body.Close()
+			if closeResp.StatusCode != 200 {
+				respBody, _ := io.ReadAll(closeResp.Body)
+				return c.Reply(fmt.Sprintf("❌ %s", string(respBody)))
+			}
+			return c.Reply(fmt.Sprintf("@ channel closed: %s ↔ %s", initiatorInfo.Name, endTarget))
+		}
+		tmuxStr, _, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
+		if err != nil {
+			return c.Reply("❌ No session bound to this group.")
+		}
+		initiatorInfo := bs.SessionState.FindInfoByTarget(tmuxStr)
+		if initiatorInfo == nil || initiatorInfo.Name == "" {
+			return c.Reply("❌ Session has no name. Use /bot_name to set one first.")
+		}
+		go openAtChannel(bs, initiatorInfo.Name, targetName, 3, 0, msg)
+		return c.Reply(fmt.Sprintf("📨 Opening @ channel: %s → %s", initiatorInfo.Name, targetName))
 	})
 
 	RegisterMessageHandlers(bs)

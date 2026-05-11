@@ -40,6 +40,8 @@ var (
 	sessionNoHeader    bool
 	sessionSetName     string
 	sessionSendWatch   bool
+	sessionAtRounds    int
+	sessionAtLines     int
 )
 
 var sessionListCmd = &cobra.Command{
@@ -102,6 +104,12 @@ var sessionStopCmd = &cobra.Command{
 	Run:   runSessionStop,
 }
 
+var sessionAtCmd = &cobra.Command{
+	Use:   "at",
+	Short: "Open @ channel, reply, or end",
+	Run:   runSessionAt,
+}
+
 func init() {
 	SessionCmd.PersistentFlags().StringVar(&sessionHost, "host", "", "Bot API host URL (e.g., https://tg-cli.example.com)")
 	SessionCmd.PersistentFlags().StringVar(&sessionToken, "token", "", "API authentication token")
@@ -144,6 +152,12 @@ func init() {
 	sessionStopCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
 	sessionStopCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
 	sessionStopCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
+	sessionAtCmd.Flags().StringVar(&sessionName, "name", "", "Agent name (for self-identification)")
+	sessionAtCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session")
+	sessionAtCmd.Flags().IntVar(&sessionAtRounds, "rounds", 3, "Number of interaction rounds as context")
+	sessionAtCmd.Flags().IntVar(&sessionAtLines, "lines", 0, "Number of transcript lines as context (overrides --rounds)")
+	sessionAtCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port")
+	sessionAtCmd.Flags().StringVar(&sessionText, "text", "", "Text message (for reply)")
 	SessionCmd.AddCommand(sessionListCmd)
 	SessionCmd.AddCommand(sessionLogCmd)
 	SessionCmd.AddCommand(sessionSendCmd)
@@ -154,6 +168,7 @@ func init() {
 	SessionCmd.AddCommand(sessionNameCmd)
 	SessionCmd.AddCommand(sessionCaptureCmd)
 	SessionCmd.AddCommand(sessionStopCmd)
+	SessionCmd.AddCommand(sessionAtCmd)
 }
 
 // buildAPIURL constructs the full API URL from host or port
@@ -733,6 +748,126 @@ func runSessionName(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Session %s named '%s'\n", sessionID[:8], sessionSetName)
+}
+
+func runSessionAt(cmd *cobra.Command, args []string) {
+	port := getSessionPort()
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: tg-cli session at <from> <to> [message...]")
+		fmt.Fprintln(os.Stderr, "       tg-cli session at end <from> <to>")
+		fmt.Fprintln(os.Stderr, "       tg-cli session at reply <from> <to> --text \"msg\"")
+		os.Exit(1)
+	}
+	// Resolve self name
+	resolveInitiator := func() string {
+		name := sessionName
+		if sessionSelf {
+			name = resolveSessionSelf(port)
+		}
+		if name == "" {
+			name = tryResolveSessionSelf(port)
+		}
+		if name == "" {
+			fmt.Fprintln(os.Stderr, "Error: cannot resolve initiator; provide --name or --self or run from a registered session")
+			os.Exit(1)
+		}
+		return name
+	}
+	switch args[0] {
+	case "end":
+		var initiator, target string
+		if len(args) >= 3 {
+			initiator = args[1]
+			target = args[2]
+		} else if len(args) >= 2 {
+			initiator = resolveInitiator()
+			target = args[1]
+		} else {
+			fmt.Fprintln(os.Stderr, "Error: target name required. Usage: tg-cli session at end <from> <to>")
+			os.Exit(1)
+		}
+		reqBody := map[string]string{"initiator": initiator, "target": target}
+		data, _ := json.Marshal(reqBody)
+		url := buildAPIURL(sessionHost, port, "/at/close")
+		resp, err := apiRequest("POST", url, bytes.NewReader(data), sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+			os.Exit(1)
+		}
+		fmt.Printf("@ channel closed: %s ↔ %s\n", initiator, target)
+	case "reply":
+		var from, to string
+		if len(args) >= 3 {
+			from = args[1]
+			to = args[2]
+		} else if len(args) >= 2 {
+			from = resolveInitiator()
+			to = args[1]
+		} else {
+			fmt.Fprintln(os.Stderr, "Error: target name required. Usage: tg-cli session at reply <from> <to> --text \"msg\"")
+			os.Exit(1)
+		}
+		if sessionText == "" {
+			fmt.Fprintln(os.Stderr, "Error: --text is required for reply")
+			os.Exit(1)
+		}
+		reqBody := map[string]string{"from": from, "to": to, "text": sessionText}
+		data, _ := json.Marshal(reqBody)
+		url := buildAPIURL(sessionHost, port, "/at/reply")
+		resp, err := apiRequest("POST", url, bytes.NewReader(data), sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+			os.Exit(1)
+		}
+		fmt.Printf("Reply sent: %s → %s\n", from, to)
+	default:
+		// Open @ channel: tg-cli session at <from> <to> [message...]
+		var initiator, targetName string
+		var message string
+		if len(args) >= 2 {
+			initiator = args[0]
+			targetName = args[1]
+			if len(args) > 2 {
+				message = strings.Join(args[2:], " ")
+			}
+		} else {
+			initiator = resolveInitiator()
+			targetName = args[0]
+		}
+		reqBody := map[string]interface{}{
+			"initiator": initiator,
+			"target":    targetName,
+			"rounds":    sessionAtRounds,
+			"lines":     sessionAtLines,
+			"message":   message,
+		}
+		data, _ := json.Marshal(reqBody)
+		url := buildAPIURL(sessionHost, port, "/at/open")
+		resp, err := apiRequest("POST", url, bytes.NewReader(data), sessionToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			fmt.Fprintf(os.Stderr, "Error: %s\n", string(body))
+			os.Exit(1)
+		}
+		fmt.Printf("@ channel opened: %s → %s\n", initiator, targetName)
+	}
 }
 
 func runSessionStop(cmd *cobra.Command, args []string) {

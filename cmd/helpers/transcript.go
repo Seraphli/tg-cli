@@ -3,6 +3,7 @@ package helpers
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -252,4 +253,226 @@ func ParseCodexTranscript(f *os.File, noTools bool, filteredTools map[string]boo
 		})
 	}
 	return entries
+}
+
+// TranscriptRound represents one round of interaction (contiguous user messages + contiguous assistant messages).
+type TranscriptRound struct {
+	UserTexts      []string
+	AssistantTexts []string
+}
+
+// ReadLastNRounds reads the last N rounds from a transcript file.
+// A round = contiguous block of user messages followed by contiguous block of assistant messages.
+func ReadLastNRounds(transcriptPath string, n int, backend string) ([]TranscriptRound, error) {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	noToolsFilter := map[string]bool{
+		"Bash": true, "Read": true, "Write": true, "Edit": true,
+		"Glob": true, "Grep": true, "Agent": true, "WebFetch": true,
+		"WebSearch": true, "NotebookEdit": true,
+	}
+	noopDetail := func(name string, input map[string]interface{}) string { return "" }
+	var entries []TranscriptLogEntry
+	if backend == "codex" {
+		entries = ParseCodexTranscript(f, true, noToolsFilter, noopDetail)
+	} else {
+		entries = ParseCCTranscript(f, true, noToolsFilter, noopDetail)
+	}
+	var rounds []TranscriptRound
+	var current TranscriptRound
+	lastRole := ""
+	for _, e := range entries {
+		if e.Text == "" {
+			continue
+		}
+		if e.Type == "user" && isSystemTagContent(e.Text) {
+			continue
+		}
+		role := e.Type
+		switch {
+		case role == "user" && lastRole != "user":
+			if len(current.UserTexts) > 0 && len(current.AssistantTexts) > 0 {
+				rounds = append(rounds, current)
+				current = TranscriptRound{}
+			} else if len(current.AssistantTexts) > 0 {
+				current = TranscriptRound{}
+			}
+			current.UserTexts = append(current.UserTexts, e.Text)
+		case role == "user" && lastRole == "user":
+			current.UserTexts = append(current.UserTexts, e.Text)
+		case role == "assistant" && lastRole != "assistant":
+			current.AssistantTexts = append(current.AssistantTexts, e.Text)
+		case role == "assistant" && lastRole == "assistant":
+			current.AssistantTexts = append(current.AssistantTexts, e.Text)
+		}
+		lastRole = role
+	}
+	if len(current.UserTexts) > 0 && len(current.AssistantTexts) > 0 {
+		rounds = append(rounds, current)
+	}
+	if len(rounds) > n {
+		rounds = rounds[len(rounds)-n:]
+	}
+	return rounds, nil
+}
+
+// ReadLastNLines reads the last N text entries from a transcript file.
+func ReadLastNLines(transcriptPath string, n int, backend string) ([]TranscriptLogEntry, error) {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	noToolsFilter := map[string]bool{
+		"Bash": true, "Read": true, "Write": true, "Edit": true,
+		"Glob": true, "Grep": true, "Agent": true, "WebFetch": true,
+		"WebSearch": true, "NotebookEdit": true,
+	}
+	noopDetail := func(name string, input map[string]interface{}) string { return "" }
+	var entries []TranscriptLogEntry
+	if backend == "codex" {
+		entries = ParseCodexTranscript(f, true, noToolsFilter, noopDetail)
+	} else {
+		entries = ParseCCTranscript(f, true, noToolsFilter, noopDetail)
+	}
+	var textEntries []TranscriptLogEntry
+	for _, e := range entries {
+		if e.Text != "" && !(e.Type == "user" && isSystemTagContent(e.Text)) {
+			textEntries = append(textEntries, e)
+		}
+	}
+	if len(textEntries) > n {
+		textEntries = textEntries[len(textEntries)-n:]
+	}
+	return textEntries, nil
+}
+
+// extractToolParam extracts a representative parameter string from tool input.
+func extractToolParam(name string, input map[string]interface{}) string {
+	switch name {
+	case "Bash":
+		if cmd, ok := input["command"].(string); ok {
+			return cmd
+		}
+	case "Read", "Edit", "Write":
+		if fp, ok := input["file_path"].(string); ok {
+			return fp
+		}
+	case "Agent":
+		if desc, ok := input["description"].(string); ok {
+			return desc
+		}
+	}
+	for _, v := range input {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// FormatToolLine formats a tool call as a single display line with truncation.
+func FormatToolLine(sessionName, toolName, param string) string {
+	const targetMax = 40
+	prefix := fmt.Sprintf("[%s]: 🔧 %s(\"", sessionName, toolName)
+	suffix := "\")"
+	prefixLen := len([]rune(prefix))
+	suffixLen := len([]rune(suffix))
+	paramBudget := targetMax - prefixLen - suffixLen
+	if paramBudget <= 0 {
+		return fmt.Sprintf("[%s]: 🔧 %s", sessionName, toolName)
+	}
+	paramRunes := []rune(param)
+	if len(paramRunes) > paramBudget {
+		return prefix + string(paramRunes[:paramBudget-1]) + "…" + suffix
+	}
+	return prefix + param + suffix
+}
+
+// ReadContextBlock reads a transcript and returns formatted context lines.
+// rounds specifies number of conversation rounds (0 defaults to 3); lines specifies raw entry count (takes priority over rounds when > 0).
+func ReadContextBlock(path string, rounds, lines int, backend, sessionName, displayName string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	var entries []TranscriptLogEntry
+	if backend == "codex" {
+		entries = ParseCodexTranscript(f, false, nil, func(name string, input map[string]interface{}) string {
+			return extractToolParam(name, input)
+		})
+	} else {
+		entries = ParseCCTranscript(f, false, nil, func(name string, input map[string]interface{}) string {
+			return extractToolParam(name, input)
+		})
+	}
+	var filtered []TranscriptLogEntry
+	for _, e := range entries {
+		if e.Type == "user" && e.Text != "" && isSystemTagContent(e.Text) {
+			continue
+		}
+		if e.Text == "" && e.Tool == "" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	var selected []TranscriptLogEntry
+	if lines > 0 {
+		if len(filtered) > lines {
+			selected = filtered[len(filtered)-lines:]
+		} else {
+			selected = filtered
+		}
+	} else {
+		r := rounds
+		if r == 0 {
+			r = 3
+		}
+		type ctxRound struct{ entries []TranscriptLogEntry }
+		var rnds []ctxRound
+		var current ctxRound
+		lastRole := ""
+		for _, e := range filtered {
+			role := e.Type
+			if role == "user" && lastRole == "assistant" {
+				if len(current.entries) > 0 {
+					rnds = append(rnds, current)
+					current = ctxRound{}
+				}
+			}
+			current.entries = append(current.entries, e)
+			lastRole = role
+		}
+		if len(current.entries) > 0 {
+			rnds = append(rnds, current)
+		}
+		if len(rnds) > r {
+			rnds = rnds[len(rnds)-r:]
+		}
+		for _, rd := range rnds {
+			selected = append(selected, rd.entries...)
+		}
+	}
+	var output []string
+	for _, e := range selected {
+		// Default: user speaks to session, assistant speaks back to user
+		speaker := displayName
+		recipient := sessionName
+		if e.Type == "assistant" {
+			speaker = sessionName
+			recipient = displayName
+		}
+		if e.Text != "" {
+			output = append(output, fmt.Sprintf("[%s → %s]: %s", speaker, recipient, e.Text))
+		}
+		// Tool use: always attributed to session (no direction marker)
+		if e.Tool != "" {
+			output = append(output, FormatToolLine(sessionName, e.Tool, e.ToolDetail))
+		}
+	}
+	return strings.Join(output, "\n"), nil
 }

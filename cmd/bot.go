@@ -199,6 +199,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		ToolUseMsgs:     stores.NewToolUseMsgStore(),
 		CommandStats:    stores.NewCommandStatsStore(configDir),
 		SessionEvents:   stores.NewSessionEventStore(),
+		AtChannels:      stores.NewAtChannelStore(configDir),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
@@ -225,6 +226,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		{Text: "m", Description: "Merge multiple messages before sending"},
 		{Text: "cu", Description: "Check for CC version updates"},
 		{Text: "check_update", Description: "Check for CC version updates"},
+		{Text: "bot_at", Description: "Open @ channel with another session"},
 	}
 	pinnedCommands := []string{"u", "t", "r", "p", "m"}
 	customCmds := handlers.ScanCustomCommands()
@@ -260,6 +262,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	bs.CronJobs.Load()
 	mailbox.load()
 	bs.InjectQueue.Load()
+	bs.AtChannels.Load()
 	bs.MergeBuffers.Load()
 	// Setup HTTP server
 	mux := http.NewServeMux()

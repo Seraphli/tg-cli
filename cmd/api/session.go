@@ -106,22 +106,24 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 	mux.HandleFunc("/session/list", func(w http.ResponseWriter, r *http.Request) {
 		sessions := bs.SessionState.All()
 		type sessionListItem struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			Target     string `json:"target"`
-			CWD        string `json:"cwd"`
-			ProjectDir string `json:"project_dir"`
-			Running    bool   `json:"running"`
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			Target         string `json:"target"`
+			CWD            string `json:"cwd"`
+			ProjectDir     string `json:"project_dir"`
+			Running        bool   `json:"running"`
+			TranscriptPath string `json:"transcript_path,omitempty"`
 		}
 		items := make([]sessionListItem, 0, len(sessions))
 		for sid, info := range sessions {
 			items = append(items, sessionListItem{
-				ID:         sid,
-				Name:       info.Name,
-				Target:     info.TmuxTarget,
-				CWD:        info.CWD,
-				ProjectDir: info.ProjectDir,
-				Running:    helpers.IsSessionRunning(info.TmuxTarget),
+				ID:             sid,
+				Name:           info.Name,
+				Target:         info.TmuxTarget,
+				CWD:            info.CWD,
+				ProjectDir:     info.ProjectDir,
+				Running:        helpers.IsSessionRunning(info.TmuxTarget),
+				TranscriptPath: info.TranscriptPath,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")

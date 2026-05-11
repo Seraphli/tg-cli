@@ -118,6 +118,7 @@ type AppConfig struct {
 	PaginationMaxRunes  int    `json:"paginationMaxRunes,omitempty"`
 	NotifyFormat        string `json:"notifyFormat,omitempty"` // "html" (default) or "raw"
 	TableMode           string `json:"tableMode,omitempty"`    // "image" (default) or "code"
+	DisplayName         string `json:"displayName,omitempty"`
 	UsageSource         string `json:"usageSource,omitempty"`  // "tmux" (default) or "api"
 }
 

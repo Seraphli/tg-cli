@@ -522,6 +522,9 @@ func buildSettingsTopMenu() *tele.ReplyMarkup {
 			menu.Data("📊 Status", "settings", "status"),
 			menu.Data("⏰ Cron", "settings", "cron"),
 		),
+		menu.Row(
+			menu.Data("👤 Display Name", "settings", "displayname"),
+		),
 	)
 	return menu
 }
@@ -890,4 +893,20 @@ func showSettingsCron(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 	menu.Inline(rows...)
 	appendBackButton(menu)
 	helpers.RetryEdit(bot, msg, "⏰ <b>Cron Jobs</b>\n\n"+body, menu, tele.ModeHTML)
+}
+
+func showSettingsDisplayName(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		helpers.RetryEdit(bot, msg, "❌ Failed to load config", tele.ModeHTML)
+		return
+	}
+	current := cfg.DisplayName
+	if current == "" {
+		current = "(not set)"
+	}
+	menu := &tele.ReplyMarkup{}
+	menu.Inline(menu.Row(menu.Data("✏️ Set Name", "settings_displayname", "set")))
+	appendBackButton(menu)
+	helpers.RetryEdit(bot, msg, fmt.Sprintf("👤 <b>Display Name</b>\nCurrent: %s\n\nClick \"Set Name\" then reply to set your display name.", current), menu, tele.ModeHTML)
 }

@@ -302,6 +302,60 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		if !checkSessionAlive(bs, tmuxStr) {
 			return c.Reply("⚠️ Session is no longer running. Tmux route has been unbound.")
 		}
+		// Check for @Name prefix to initiate @ channel
+		if strings.HasPrefix(text, "@") {
+			parts := strings.SplitN(text[1:], " ", 2)
+			if len(parts) >= 1 && parts[0] != "" {
+				targetName := parts[0]
+				initiatorInfo := bs.SessionState.FindInfoByTarget(tmuxStr)
+				if initiatorInfo != nil && initiatorInfo.Name != "" {
+					targetInfo := bs.SessionState.FindByName(targetName)
+					if targetInfo != nil {
+						go openAtChannel(bs, initiatorInfo.Name, targetName, 3, 0, text)
+						return nil
+					}
+				}
+			}
+		}
+		// Forward TG message to @ channel targets (initiator auto-forward)
+		detectedAtTarget := ""
+		initiatorInfo := bs.SessionState.FindInfoByTarget(tmuxStr)
+		if initiatorInfo != nil && initiatorInfo.Name != "" {
+			atTargets := bs.AtChannels.GetTargets(initiatorInfo.Name)
+			if len(atTargets) > 0 {
+				cfg, _ := config.LoadAppConfig()
+				displayName := cfg.DisplayName
+				if displayName == "" {
+					displayName = "User"
+				}
+				initiatorName := initiatorInfo.Name
+				for _, peer := range atTargets {
+					peerInfo := bs.SessionState.FindByName(peer)
+					if peerInfo == nil {
+						continue
+					}
+					recipient := initiatorName
+					if detectedAtTarget != "" {
+						recipient = detectedAtTarget
+					}
+					content := fmt.Sprintf("[%s → %s]: %s", displayName, recipient, injectionText)
+					instructions := fmt.Sprintf("`%s`(user) sent a message to `%s`.",
+						displayName, recipient)
+					forwardMsg := helpers.BuildAtMsg(initiatorName, peer, instructions, content)
+					go func(target, msg string) {
+						safeInjectText(bs, target, msg)
+						peerChat, _, peerTopicID := helpers.ResolveChat(bs.SessionState, target)
+						if peerChat != nil {
+							var notifyOpts []interface{}
+							if peerTopicID > 0 {
+								notifyOpts = append(notifyOpts, &tele.SendOptions{ThreadID: peerTopicID})
+							}
+							helpers.RetrySend(bs.Bot, peerChat, msg, notifyOpts...)
+						}
+					}(peerInfo.TmuxTarget, forwardMsg)
+				}
+			}
+		}
 		sendFeedback(tmuxStr)
 		if err := InjectMessage(bs, tmuxStr, injectionText, imgPath); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -310,6 +364,26 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		return nil
 	}
 	replyTo := c.Message().ReplyTo
+	if val, ok := bs.SettingsMenuMsgs.Load(replyTo.ID); ok {
+		if marker, isStr := val.(string); isStr && marker == "displayname" {
+			newName := strings.TrimSpace(c.Text())
+			if newName == "" {
+				return c.Reply("❌ Name cannot be empty.")
+			}
+			cfg, err := config.LoadAppConfig()
+			if err != nil {
+				return c.Reply("❌ Failed to load config.")
+			}
+			cfg.DisplayName = newName
+			if err := config.SaveAppConfig(cfg); err != nil {
+				return c.Reply("❌ Failed to save config.")
+			}
+			bs.SettingsMenuMsgs.Delete(replyTo.ID)
+			bot.Edit(c.Message().ReplyTo, fmt.Sprintf("👤 <b>Display Name</b>\n✅ Set to: %s", newName), tele.ModeHTML)
+			logger.Info(fmt.Sprintf("Display name set: %s", newName))
+			return nil
+		}
+	}
 	if val, ok := bs.LaunchPending.Load(replyTo.ID); ok {
 		state := val.(*LaunchState)
 		customValue := strings.TrimSpace(c.Text())
@@ -394,6 +468,149 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	}
 	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, helpers.TruncateStr(text, 200)))
 	return nil
+}
+
+func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines int, message string) {
+	initiatorInfo := bs.SessionState.FindByName(initiator)
+	targetInfo := bs.SessionState.FindByName(target)
+	if initiatorInfo == nil || targetInfo == nil {
+		return
+	}
+	isNew := bs.AtChannels.Open(initiator, target)
+	cfg, _ := config.LoadAppConfig()
+	displayName := cfg.DisplayName
+	if displayName == "" {
+		displayName = "User"
+	}
+	if isNew {
+		// Read context from initiator's transcript
+		r := rounds
+		if r == 0 {
+			r = 3
+		}
+		contextStr, _ := helpers.ReadContextBlock(initiatorInfo.TranscriptPath, r, 0, initiatorInfo.Backend, initiator, displayName)
+		if message != "" {
+			if contextStr != "" {
+				contextStr += "\n"
+			}
+			contextStr += fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+		}
+		// Initiator pane: no-content message (just instructions)
+		initiatorInstructions := fmt.Sprintf("`%s`(user) opened a channel to `%s`. `%s` will receive the last %d rounds of your conversation and see your ongoing output until the channel is closed. `%s` can reply to you via this channel. Run `tg-cli session at end %s %s` to close the channel.",
+			displayName, target, target, r, target, initiator, target)
+		initiatorContent := ""
+		if message != "" {
+			initiatorContent = fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+		}
+		initiatorMsg := helpers.BuildAtMsg(initiator, target, initiatorInstructions, initiatorContent)
+		safeInjectText(bs, initiatorInfo.TmuxTarget, initiatorMsg)
+		// Target pane: full context with instructions
+		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `tg-cli session at reply %s %s --text \"your message\"` to reply, or `tg-cli session at end %s %s` to close the channel.",
+			displayName, initiator, r, initiator, initiator, target, initiator, target, initiator)
+		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, contextStr)
+		safeInjectText(bs, targetInfo.TmuxTarget, targetMsg)
+		// TG notifications
+		targetHeader := helpers.BuildAtHeader(initiator, target) + "\n---\n" + targetInstructions + "\n---\n"
+		initiatorChat, _, initiatorTopicID := helpers.ResolveChat(bs.SessionState, initiatorInfo.TmuxTarget)
+		if initiatorChat != nil {
+			var opts []interface{}
+			if initiatorTopicID > 0 {
+				opts = append(opts, &tele.SendOptions{ThreadID: initiatorTopicID})
+			}
+			helpers.RetrySend(bs.Bot, initiatorChat, initiatorMsg, opts...)
+		}
+		targetChat, _, targetTopicID := helpers.ResolveChat(bs.SessionState, targetInfo.TmuxTarget)
+		if targetChat != nil {
+			var opts []interface{}
+			if targetTopicID > 0 {
+				opts = append(opts, &tele.SendOptions{ThreadID: targetTopicID})
+			}
+			helpers.SendPagedForward(bs.Bot, targetChat, targetHeader, contextStr, bs.Pages, "", opts...)
+		}
+		logger.Info(fmt.Sprintf("@ channel opened via TG: %s -> %s rounds=%d", initiator, target, rounds))
+		// Auto-forward open message to other existing channels
+		otherTargets := bs.AtChannels.GetTargets(initiator)
+		for _, other := range otherTargets {
+			if other == target {
+				continue
+			}
+			otherInfo := bs.SessionState.FindByName(other)
+			if otherInfo == nil {
+				continue
+			}
+			fwdContent := initiatorContent
+			if fwdContent == "" {
+				fwdContent = fmt.Sprintf("[%s → %s]: @%s", displayName, target, target)
+			}
+			fwdInstr := fmt.Sprintf("`%s`(user) sent a message to `%s`.", displayName, target)
+			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, fwdContent)
+			go func(t, msg string) {
+				safeInjectText(bs, t, msg)
+				otherChat, _, otherTopicID := helpers.ResolveChat(bs.SessionState, t)
+				if otherChat != nil {
+					var fwdOpts []interface{}
+					if otherTopicID > 0 {
+						fwdOpts = append(fwdOpts, &tele.SendOptions{ThreadID: otherTopicID})
+					}
+					helpers.RetrySend(bs.Bot, otherChat, msg, fwdOpts...)
+				}
+			}(otherInfo.TmuxTarget, fwdMsg)
+		}
+	} else if message != "" {
+		// Channel already exists: forward message to target
+		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session.",
+			displayName, initiator)
+		initiatorContent := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+		initiatorMsg := helpers.BuildAtMsg(initiator, target, "", initiatorContent)
+		content := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, content)
+		// Initiator TG only (no inject)
+		initiatorChat, _, initiatorTopicID := helpers.ResolveChat(bs.SessionState, initiatorInfo.TmuxTarget)
+		if initiatorChat != nil {
+			var opts []interface{}
+			if initiatorTopicID > 0 {
+				opts = append(opts, &tele.SendOptions{ThreadID: initiatorTopicID})
+			}
+			helpers.RetrySend(bs.Bot, initiatorChat, initiatorMsg, opts...)
+		}
+		safeInjectText(bs, initiatorInfo.TmuxTarget, initiatorMsg)
+		// Target: inject + TG
+		safeInjectText(bs, targetInfo.TmuxTarget, targetMsg)
+		targetChat, _, targetTopicID := helpers.ResolveChat(bs.SessionState, targetInfo.TmuxTarget)
+		if targetChat != nil {
+			var opts []interface{}
+			if targetTopicID > 0 {
+				opts = append(opts, &tele.SendOptions{ThreadID: targetTopicID})
+			}
+			helpers.RetrySend(bs.Bot, targetChat, targetMsg, opts...)
+		}
+		logger.Info(fmt.Sprintf("@ channel already open: %s -> %s message=%s", initiator, target, helpers.TruncateStr(message, 200)))
+		// Auto-forward existing channel message to other open channels
+		otherTargets := bs.AtChannels.GetTargets(initiator)
+		for _, other := range otherTargets {
+			if other == target {
+				continue
+			}
+			otherInfo := bs.SessionState.FindByName(other)
+			if otherInfo == nil {
+				continue
+			}
+			fwdContent := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+			fwdInstr := fmt.Sprintf("`%s`(user) sent a message to `%s`.", displayName, target)
+			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, fwdContent)
+			go func(t, msg string) {
+				safeInjectText(bs, t, msg)
+				otherChat, _, otherTopicID := helpers.ResolveChat(bs.SessionState, t)
+				if otherChat != nil {
+					var fwdOpts []interface{}
+					if otherTopicID > 0 {
+						fwdOpts = append(fwdOpts, &tele.SendOptions{ThreadID: otherTopicID})
+					}
+					helpers.RetrySend(bs.Bot, otherChat, msg, fwdOpts...)
+				}
+			}(otherInfo.TmuxTarget, fwdMsg)
+		}
+	}
 }
 
 // RegisterMessageHandlers registers OnText and OnVoice handlers.
