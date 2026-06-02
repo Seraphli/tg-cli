@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
@@ -212,6 +213,50 @@ func FormatUsageResponse(data []byte) (string, error) {
 		return "", fmt.Errorf("no usage data in response")
 	}
 	return result, nil
+}
+
+// FetchUsageTmux creates a temporary tmux session, launches CC, runs /usage, and returns formatted output.
+func FetchUsageTmux() (string, error) {
+	// Clean up stale sessions from previous failed runs
+	out, _ := injector.GlobalTmuxCmd("list-sessions", "-F", "#{session_name}").Output()
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, "tg-cli-usage-") {
+			logger.Info(fmt.Sprintf("FetchUsageTmux: killing stale session %s", name))
+			injector.GlobalTmuxCmd("kill-session", "-t", name).Run()
+		}
+	}
+	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
+	configDir := config.GetConfigDir()
+	cmd := injector.GlobalTmuxCmd("new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to create temp session: %w", err)
+	}
+	target, _ := injector.ParseTarget(sessionName)
+	injector.SendKeys(target, "claude", "Enter")
+	if !WaitForPaneContent(target, "❯", 30*time.Second) {
+		dump, _ := injector.CapturePane(target)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: CC init timeout, session=%s kept alive for debugging, pane dump:\n%s", sessionName, dump))
+		return "", fmt.Errorf("CC failed to initialize (timeout waiting for ❯), session %s kept alive", sessionName)
+	}
+	injector.SendKeys(target, "/usage", "Enter")
+	if !WaitForPaneContent(target, "used", 10*time.Second) {
+		dump, _ := injector.CapturePane(target)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: /usage timeout, session=%s kept alive for debugging, pane dump:\n%s", sessionName, dump))
+		return "", fmt.Errorf("failed to get usage data (timeout waiting for 'used'), session %s kept alive", sessionName)
+	}
+	time.Sleep(1 * time.Second)
+	content, err := injector.CapturePane(target)
+	if err != nil {
+		logger.Error(fmt.Sprintf("FetchUsageTmux: capture failed, session=%s kept alive", sessionName))
+		return "", fmt.Errorf("failed to capture pane: %w, session %s kept alive", err, sessionName)
+	}
+	formatted := ParseUsageOutput(content)
+	if formatted == "" {
+		logger.Error(fmt.Sprintf("FetchUsageTmux: parse empty, session=%s kept alive, raw pane:\n%s", sessionName, content))
+		return "", fmt.Errorf("failed to parse usage data (empty result), session %s kept alive", sessionName)
+	}
+	injector.GlobalTmuxCmd("kill-session", "-t", sessionName).Run()
+	return formatted, nil
 }
 
 // ParseResetTime formats a reset timestamp for display, always including day and timezone.

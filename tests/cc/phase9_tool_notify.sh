@@ -8,6 +8,9 @@ echo "--- Tool notification test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-9"
+
 # Verify toolNotifyList is configured in test config
 TEST_APP_CONFIG="$TEST_CONFIG_DIR/config.json"
 if [ -f "$TEST_APP_CONFIG" ] && grep -q "Bash" "$TEST_APP_CONFIG" 2>/dev/null; then

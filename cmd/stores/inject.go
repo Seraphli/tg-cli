@@ -100,6 +100,19 @@ func (iq *InjectQueueStore) ItemCount(tmuxTarget string) int {
 	return len(iq.queues[tmuxTarget])
 }
 
+// QueueStatus returns a map of target → item count for all non-empty queues.
+func (iq *InjectQueueStore) QueueStatus() map[string]int {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	result := make(map[string]int)
+	for target, items := range iq.queues {
+		if len(items) > 0 {
+			result[target] = len(items)
+		}
+	}
+	return result
+}
+
 // GetTexts returns the text of all queued items for the given tmux target.
 func (iq *InjectQueueStore) GetTexts(tmuxTarget string) []string {
 	iq.mu.Lock()

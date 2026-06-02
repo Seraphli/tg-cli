@@ -2,6 +2,7 @@ package injector
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -17,6 +18,28 @@ func getInjectLock(target TmuxTarget) *sync.Mutex {
 	key := FormatTarget(target)
 	v, _ := injectMu.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+const maxSetBufferSize = 16000
+
+// setBuffer sets a tmux buffer by name. For text exceeding maxSetBufferSize bytes,
+// it falls back to writing a temp file and using load-buffer to avoid tmux arg-length limits.
+func setBuffer(target TmuxTarget, bufName, text string) error {
+	if len(text) <= maxSetBufferSize {
+		return tmuxCmd(target, "set-buffer", "-b", bufName, "--", text).Run()
+	}
+	f, err := os.CreateTemp("", "tg-cli-buf-*.txt")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
+	if _, err := f.WriteString(text); err != nil {
+		f.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	f.Close()
+	return tmuxCmd(target, "load-buffer", "-b", bufName, tmpPath).Run()
 }
 
 type TmuxTarget struct {
@@ -42,25 +65,23 @@ func NormalizeText(text string) string {
 
 // tmuxCmd builds a tmux command with optional server name (-L) and socket (-S) flags.
 func tmuxCmd(target TmuxTarget, args ...string) *exec.Cmd {
-	var prefix []string
+	prefix := []string{"-u"}
 	if ServerName != "" {
 		prefix = append(prefix, "-L", ServerName)
 	}
 	if target.Socket != "" {
 		prefix = append(prefix, "-S", target.Socket)
 	}
-	if len(prefix) > 0 {
-		return exec.Command("tmux", append(prefix, args...)...)
-	}
-	return exec.Command("tmux", args...)
+	return exec.Command("tmux", append(prefix, args...)...)
 }
 
 // globalTmuxCmd builds a tmux command with optional server name (-L) flag only (no target socket).
 func globalTmuxCmd(args ...string) *exec.Cmd {
+	prefix := []string{"-u"}
 	if ServerName != "" {
-		return exec.Command("tmux", append([]string{"-L", ServerName}, args...)...)
+		prefix = append(prefix, "-L", ServerName)
 	}
-	return exec.Command("tmux", args...)
+	return exec.Command("tmux", append(prefix, args...)...)
 }
 
 // TmuxCmd is the exported wrapper for tmuxCmd, used by external packages
@@ -104,7 +125,7 @@ func InjectText(target TmuxTarget, text string, submit ...bool) error {
 	}
 	time.Sleep(500 * time.Millisecond)
 	// Set buffer
-	if err := tmuxCmd(target, "set-buffer", "-b", bufName, "--", text).Run(); err != nil {
+	if err := setBuffer(target, bufName, text); err != nil {
 		return fmt.Errorf("set-buffer failed: %w", err)
 	}
 	// Paste with bracketed paste
@@ -130,7 +151,7 @@ func InjectTextAppend(target TmuxTarget, text string, submit ...bool) error {
 		return fmt.Errorf("empty text after normalization")
 	}
 	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
-	if err := tmuxCmd(target, "set-buffer", "-b", bufName, "--", text).Run(); err != nil {
+	if err := setBuffer(target, bufName, text); err != nil {
 		return fmt.Errorf("set-buffer failed: %w", err)
 	}
 	if err := tmuxCmd(target, "paste-buffer", "-t", target.PaneID, "-b", bufName, "-r", "-p").Run(); err != nil {

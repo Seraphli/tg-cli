@@ -8,6 +8,9 @@ echo "--- Inject queue merge test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-13"
+
 SESSION_NAME="e2e-cli"
 MARKER_A="inject_merge_test_A_$RANDOM"
 MARKER_B="inject_merge_test_B_$RANDOM"
@@ -15,8 +18,6 @@ MARKER_B="inject_merge_test_B_$RANDOM"
 # =============================================
 # Test: Queue messages while CC is busy, verify merge on flush
 # =============================================
-
-LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
 # Get session ID and name it
 SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '

@@ -13,6 +13,9 @@ type BotState struct {
 	Bot   *tele.Bot
 	Creds *config.Credentials
 
+	Port      int    // resolved bot HTTP port; used to render @ channel reply/end CLI instructions
+	ConfigDir string // resolved config dir; used to render @ channel reply/end CLI instructions
+
 	Pages           *stores.PageCacheStore
 	PendingPerms    *stores.PendingPermStore
 	ToolNotifs      *stores.ToolNotifyStore
@@ -31,6 +34,7 @@ type BotState struct {
 	CommandStats    *stores.CommandStatsStore
 	SessionEvents   *stores.SessionEventStore
 	AtChannels      *stores.AtChannelStore
+	CompactTools    *stores.CompactToolStore
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map

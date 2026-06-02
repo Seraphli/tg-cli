@@ -8,6 +8,9 @@ echo "--- Group routing test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-16"
+
 # Use a fixed agent name for testing
 AGENT_NAME="e2e-cli"
 
@@ -29,6 +32,10 @@ else
   fail "Could not extract session ID from session list API"
   exit 1
 fi
+
+# Name the session so resolveChat can match it to the name route
+curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=$AGENT_NAME" > /dev/null 2>&1 || true
+echo "  Named session $SESSION_ID as $AGENT_NAME"
 
 # Call POST /route/bind
 echo "  Binding route: name=$AGENT_NAME → chat=$DEFAULT_CHAT_ID"
@@ -57,7 +64,7 @@ fi
 # Inject new prompt to trigger route resolution
 LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
 pane_log "[group_routing] BEFORE 'say test routing' prompt"
-inject_prompt "say test routing"
+inject_prompt "Reply with exactly: route_test_ok"
 pane_log "[group_routing] AFTER routing prompt"
 
 # Wait for Stop notification

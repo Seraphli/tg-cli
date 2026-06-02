@@ -8,6 +8,9 @@ echo "--- Long message pagination test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-3"
+
 # Record log position before injecting long prompt
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
 TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
@@ -34,7 +37,7 @@ while [ $ELAPSED -lt $PAGE_TIMEOUT ]; do
     NEW_PAGE_LOGS=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE")
     if echo "$NEW_PAGE_LOGS" | grep -E "pages, msg_id=" > /dev/null 2>&1; then
       PAGINATION_FOUND=true
-      MSG_ID=$(grep -oPm1 'msg_id=\K[0-9]+' <<< "$NEW_PAGE_LOGS" || true)
+      MSG_ID=$(echo "$NEW_PAGE_LOGS" | grep -oP 'pages, msg_id=\K[0-9]+' | head -1 || true)
       break
     fi
   fi
@@ -105,4 +108,4 @@ elif [ "$PAGINATION_FOUND" = false ]; then
 fi
 
 # Typing continuity: inject → Stop (long prompt, ~30s+ without tools)
-check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase2"
+check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase3"

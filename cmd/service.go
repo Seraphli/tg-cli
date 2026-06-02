@@ -238,6 +238,13 @@ var serviceUpgradeCmd = &cobra.Command{
 		})
 		f.Close()
 		systemctl("daemon-reload")
+		home, _ := os.UserHomeDir()
+		claudeSettingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := MigrateClaudeSettings(claudeSettingsPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: settings migration failed: %v\n", err)
+		} else {
+			fmt.Println("Claude settings migrated.")
+		}
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
 		fmt.Printf("Upgrade complete (v%s)\n", newVersion)

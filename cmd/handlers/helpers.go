@@ -6,6 +6,7 @@ package handlers
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -271,12 +272,16 @@ func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 	case "plan":
 		permFlag = " --permission-mode plan"
 	case "auto":
+		permFlag = " --permission-mode auto"
+	case "acceptEdits":
 		permFlag = " --permission-mode acceptEdits"
 	}
 	if !strings.Contains(claudeCmd, "--continue") && !strings.Contains(claudeCmd, "--resume") {
 		claudeCmd += " --continue"
 	}
-	if permFlag != "" && !strings.Contains(claudeCmd, "--permission-mode") {
+	if permFlag != "" {
+		re := regexp.MustCompile(`\s*--permission-mode\s+\S+`)
+		claudeCmd = re.ReplaceAllString(claudeCmd, "")
 		claudeCmd += permFlag
 	}
 	logger.Info(fmt.Sprintf("doUpgradeSession: detected command=%s permMode=%s target=%s", claudeCmd, permMode, tmuxTarget))
@@ -363,7 +368,7 @@ func handleUsageCommandAPI(bs *types.BotState, c tele.Context, existingMsg *tele
 	return nil
 }
 
-// handleUsageCommandTmux fetches CC usage via tmux.
+// handleUsageCommandTmux fetches CC usage via a temporary tmux session.
 func handleUsageCommandTmux(bs *types.BotState, c tele.Context, existingMsg *tele.Message) error {
 	bot := bs.Bot
 	var msg *tele.Message
@@ -376,45 +381,10 @@ func handleUsageCommandTmux(bs *types.BotState, c tele.Context, existingMsg *tel
 			return err
 		}
 	}
-	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
-	configDir := config.GetConfigDir()
-	cmd := injector.GlobalTmuxCmd("new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
-	if err := cmd.Run(); err != nil {
-		logger.Error(fmt.Sprintf("handleUsageCommand: failed to create temp session err=%v", err))
-		helpers.RetryEdit(bot, msg, "❌ Failed to create temp session", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: temp session created session=%s", sessionName))
-	defer injector.GlobalTmuxCmd("kill-session", "-t", sessionName).Run()
-	target, _ := injector.ParseTarget(sessionName)
-	logger.Info(fmt.Sprintf("handleUsageCommand: starting claude session=%s", sessionName))
-	injector.SendKeys(target, "claude", "Enter")
-	if !helpers.WaitForPaneContent(target, "❯", 30*time.Second) {
-		logger.Error("handleUsageCommand: CC failed to initialize (timeout waiting for ❯)")
-		helpers.RetryEdit(bot, msg, "❌ CC failed to initialize", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: CC ready session=%s", sessionName))
-	logger.Info("handleUsageCommand: injecting /usage")
-	injector.SendKeys(target, "/usage", "Enter")
-	if !helpers.WaitForPaneContent(target, "used", 10*time.Second) {
-		logger.Error("handleUsageCommand: failed to get usage data (timeout waiting for 'used')")
-		helpers.RetryEdit(bot, msg, "❌ Failed to get usage data", tele.ModeHTML)
-		return nil
-	}
-	logger.Info("handleUsageCommand: usage output detected")
-	time.Sleep(1 * time.Second)
-	content, err := injector.CapturePane(target)
+	formatted, err := helpers.FetchUsageTmux()
 	if err != nil {
-		logger.Error(fmt.Sprintf("handleUsageCommand: failed to capture pane err=%v", err))
-		helpers.RetryEdit(bot, msg, "❌ Failed to capture usage data", tele.ModeHTML)
-		return nil
-	}
-	logger.Info(fmt.Sprintf("handleUsageCommand: pane captured len=%d", len(content)))
-	formatted := helpers.ParseUsageOutput(content)
-	if formatted == "" {
-		logger.Error("handleUsageCommand: failed to parse usage data (empty result)")
-		helpers.RetryEdit(bot, msg, "❌ Failed to parse usage data", tele.ModeHTML)
+		logger.Error(fmt.Sprintf("handleUsageCommand: %v", err))
+		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", err.Error()), tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
@@ -545,17 +515,18 @@ func buildPermSubMenu(currentMode string) *tele.ReplyMarkup {
 	modes := []struct{ label, data string }{
 		{"Default", "default"},
 		{"Plan", "plan"},
-		{"Auto-edit", "auto"},
+		{"Accept edits", "acceptEdits"},
+		{"Auto", "auto"},
 		{"Bypass", "bypass"},
 	}
 	var row1, row2 []tele.Btn
-	for _, m := range modes {
+	for i, m := range modes {
 		label := m.label
 		if m.data == currentMode {
 			label = "✅ " + label
 		}
 		btn := menu.Data(label, "settings_perm", m.data)
-		if len(row1) < 2 {
+		if i < 3 {
 			row1 = append(row1, btn)
 		} else {
 			row2 = append(row2, btn)
@@ -619,6 +590,7 @@ func showSettingsToolNotify(bot *tele.Bot, bs *types.BotState, msg *tele.Message
 	enabled := cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
+	var controlRow []tele.Btn
 	var textParts []string
 	textParts = append(textParts, "🔔 <b>Tool Notifications</b>")
 	if msg.Chat.Type == tele.ChatGroup || msg.Chat.Type == tele.ChatSuperGroup {
@@ -627,15 +599,16 @@ func showSettingsToolNotify(bot *tele.Bot, bs *types.BotState, msg *tele.Message
 		for key, route := range creds.NameRouteMap {
 			if route.ChatID == msg.Chat.ID {
 				routeFound = true
-				label := "✅ Forward to this group: ON"
+				// Shorten label to fit alongside other buttons in one row
+				label := "✅ Forward: ON"
 				if route.ToolNotifyOff {
-					label = "⬜ Forward to this group: OFF"
+					label = "⬜ Forward: OFF"
 				}
-				rows = append(rows, menu.Row(menu.Data(label, "tools_route_toggle", key)))
+				controlRow = append(controlRow, menu.Data(label, "tools_route_toggle", key))
 				if route.ToolNotifyOff {
-					textParts = append(textParts, "Forward: ⬜ OFF")
+					textParts = append(textParts, "Forward: ⬜ OFF — Forward tool notifications to this group")
 				} else {
-					textParts = append(textParts, "Forward: ✅ ON")
+					textParts = append(textParts, "Forward: ✅ ON — Forward tool notifications to this group")
 				}
 				break
 			}
@@ -648,12 +621,22 @@ func showSettingsToolNotify(bot *tele.Bot, bs *types.BotState, msg *tele.Message
 	if !enabled {
 		globalLabel = "⬜ Global: OFF"
 	}
-	rows = append(rows, menu.Row(menu.Data(globalLabel, "verbose", "toggle")))
 	globalStatus := "✅ ON"
 	if !enabled {
 		globalStatus = "⬜ OFF"
 	}
-	textParts = append(textParts, "Global: "+globalStatus)
+	controlRow = append(controlRow, menu.Data(globalLabel, "verbose", "toggle"))
+	textParts = append(textParts, "Global: "+globalStatus+" — Master switch for all tool notifications")
+	compactLabel := "⬜ Compact: OFF"
+	compactStatus := "⬜ OFF"
+	if cfg.ToolNotifyCompact {
+		compactLabel = "✅ Compact: ON"
+		compactStatus = "✅ ON"
+	}
+	controlRow = append(controlRow, menu.Data(compactLabel, "tool_compact", "toggle"))
+	textParts = append(textParts, "Compact: "+compactStatus+" — Merge tool calls into one message")
+	// Place all control buttons on a single row
+	rows = append(rows, menu.Row(controlRow...))
 	toolsMenu := buildToolsMenu(cfg.ToolNotifyList)
 	for _, row := range toolsMenu.InlineKeyboard {
 		var btns []tele.Btn

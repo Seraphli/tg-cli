@@ -100,6 +100,12 @@ func registerInjection(mux *http.ServeMux, bs *types.BotState) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"content": content})
 	})
+	mux.HandleFunc("/inject/queue-status", func(w http.ResponseWriter, r *http.Request) {
+		status := bs.InjectQueue.QueueStatus()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"queues": status})
+	})
+
 	mux.HandleFunc("/escape", func(w http.ResponseWriter, r *http.Request) {
 		target := r.URL.Query().Get("target")
 		if target == "" {

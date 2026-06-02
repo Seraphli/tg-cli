@@ -120,6 +120,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		}
 		body = markdown.RenderTelegramHTML(body)
 	}
+	logger.Debug(fmt.Sprintf("TG message [%s] full_body:\n%s", event, body))
 	headerLen := notify.HeaderLen(nd)
 	paginationMax := 4000
 	if cfg.PaginationMaxRunes > 0 {
@@ -139,7 +140,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		text := notify.BuildNotificationText(nd)
 		sent, err := helpers.RetrySend(b, chat, text, sendOpts...)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, helpers.TruncateStr(text, 500)))
+			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, text))
 		} else {
 			if sent != nil {
 				sentMsgID = sent.ID
@@ -156,7 +157,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		opts := append([]interface{}{kb}, sendOpts...)
 		sent, err := helpers.RetrySend(b, chat, text, opts...)
 		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, helpers.TruncateStr(text, 500)))
+			logger.Error(fmt.Sprintf("Failed to send notification: %v html=%s", err, text))
 		} else {
 			sentMsgID = sent.ID
 			bs.Pages.Store(sent.ID, sessionID, &stores.PageEntry{

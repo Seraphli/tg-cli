@@ -8,6 +8,9 @@ echo "--- Format rendering test (lists, indentation, code blocks) ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-12"
+
 wait_for_idle $TIMEOUT
 
 LOG_BEFORE_FMT=$(wc -l < "$LOG_FILE")
@@ -66,7 +69,7 @@ PANE_RAW=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$E
 # === Extract TG full_text from bot log ===
 NEW_LOGS=$(tail -n +"$((LOG_BEFORE_FMT + 1))" "$LOG_FILE")
 TG_HTML_FILE="/tmp/tg-cli-e2e-tg-html.txt"
-echo "$NEW_LOGS" | awk '/TG message sent \[Stop\].*full_text:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{exit} found{print}' > "$TG_HTML_FILE"
+echo "$NEW_LOGS" | awk '/TG message \[Stop\].*full_body:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{found=0; next} found{print}' > "$TG_HTML_FILE"
 
 # Strip HTML tags to get plain text
 TG_PLAIN_FILE="/tmp/tg-cli-e2e-tg-plain.txt"
@@ -184,7 +187,7 @@ done
 if [ "$TAB_STOP_FOUND" = true ]; then
   TAB_NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE")
   TAB_HTML_FILE="/tmp/tg-cli-e2e-tab-html.txt"
-  echo "$TAB_NEW_LOGS" | awk '/TG message sent \[Stop\].*full_text:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{exit} found{print}' > "$TAB_HTML_FILE"
+  echo "$TAB_NEW_LOGS" | awk '/TG message \[Stop\].*full_body:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{found=0; next} found{print}' > "$TAB_HTML_FILE"
   if grep -q "<pre>" "$TAB_HTML_FILE" 2>/dev/null; then
     PRE_CONTENT=$(awk '/<pre>/{found=1} found{print} /<\/pre>/{found=0}' "$TAB_HTML_FILE")
     echo "  DEBUG: PRE_CONTENT (${#PRE_CONTENT} chars): $PRE_CONTENT"

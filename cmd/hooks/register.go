@@ -161,6 +161,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 				bs.Pages.CleanupSession(p.SessionID)
+				bs.CompactTools.Reset(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
 				CleanPendingFilesBySession(p.SessionID)
 				logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
@@ -299,6 +300,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						Summary: "Task completed",
 						Detail:  helpers.TruncateStr(body, 500),
 					})
+					bs.CompactTools.Reset(p.SessionID)
 					// Flush queued inject items after Stop via async dispatch to avoid blocking hook response
 					if p.TmuxTarget != "" {
 						bs.SessionEvents.DispatchAsync(p.SessionID, "flush:stop", func() error {
@@ -327,8 +329,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				// PreToolUse: send intermediate notification
 				// Skip processTranscriptUpdates for AskUserQuestion — /pending/notify handler will call it
 				// to avoid race condition where both paths compete for sessionCounts
+				var body string
 				if chat != nil && p.ToolName != "AskUserQuestion" {
-					body := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
+					body = cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
 					if body != "" {
 						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
 						// Accumulate Update text for @ channel forwarding
@@ -339,16 +342,109 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 					}
 				}
+				// Reset compact tool message cycle when new assistant text arrives (independent of whitelist)
+				if body != "" {
+					bs.CompactTools.Reset(p.SessionID)
+				}
 				// Send tool detail notification if configured
 				toolCfg, _ := config.LoadAppConfig()
-				if helpers.ShouldNotifyTool(p.ToolName, toolCfg.ToolNotifyEnabled, toolCfg.ToolNotifyList) {
-					toolText := notify.BuildToolNotifyText(p.ToolName, p.ToolInput, cwdForRoute)
-					if toolText != "" {
-						toolChat, toolChatID, toolTopicID := chat, chatID, hookTopicID
-						if chat != nil && helpers.IsRouteToolNotifyOff(bs.SessionState, p.TmuxTarget) {
-							toolChat, toolChatID, toolTopicID = helpers.GetPrivateChat()
+				if p.ToolName != "AskUserQuestion" && helpers.ShouldNotifyTool(p.ToolName, toolCfg.ToolNotifyEnabled, toolCfg.ToolNotifyList) {
+					toolChat, toolChatID, toolTopicID := chat, chatID, hookTopicID
+					if chat != nil && helpers.IsRouteToolNotifyOff(bs.SessionState, p.TmuxTarget) {
+						toolChat, toolChatID, toolTopicID = helpers.GetPrivateChat()
+					}
+					if toolChat != nil && toolCfg.ToolNotifyCompact {
+						// Compact mode: accumulate tool lines in a single message
+						compactLine := notify.BuildCompactToolLine(p.ToolName, p.ToolInput, cwdForRoute, toolCfg.CompactToolMaxLen)
+						existing, exists := bs.CompactTools.Get(p.SessionID)
+						if exists {
+							existing.Lines = append(existing.Lines, compactLine)
+							compactBody := strings.Join(existing.Lines, "\n")
+							nd := notify.NotificationData{
+								Event: "CompactTool", Project: p.Project, CWD: cwdForRoute,
+								TmuxTarget: p.TmuxTarget, AgentName: hookAgentName,
+								Backend: func() string {
+									if info := bs.SessionState.FindInfoByTarget(p.TmuxTarget); info != nil && info.Backend != "" {
+										return info.Backend
+									}
+									return "cc"
+								}(),
+								CLICommand:     helpers.GetPaneCLICommand(p.TmuxTarget),
+								ContextUsedPct: -1,
+								Body:           compactBody,
+							}
+							if usedPct, usedTokens, windowSize, ctxOk := helpers.ReadContextUsage(p.SessionID); ctxOk {
+								nd.ContextUsedPct = usedPct
+								nd.ContextUsedTokens = usedTokens
+								nd.ContextWindowSize = windowSize
+							}
+							fullText := notify.BuildNotificationText(nd)
+							if len([]rune(fullText)) > 4000 {
+								// Overflow: reset and send as new message
+								bs.CompactTools.Reset(p.SessionID)
+								nd.Body = compactLine
+								overflowText := notify.BuildNotificationText(nd)
+								var sendOpts []interface{}
+								sendOpts = append(sendOpts, tele.ModeHTML)
+								if existing.TopicID > 0 {
+									sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: existing.TopicID})
+								}
+								sent, err := helpers.RetrySend(bs.Bot, &tele.Chat{ID: existing.ChatID}, overflowText, sendOpts...)
+								if err != nil {
+									logger.Error(fmt.Sprintf("compact tool overflow send failed: %v", err))
+								} else if sent != nil {
+									bs.CompactTools.Store(p.SessionID, &stores.CompactToolEntry{
+										MsgID: sent.ID, ChatID: existing.ChatID, TopicID: existing.TopicID,
+										Lines: []string{compactLine},
+									})
+									logger.Debug(fmt.Sprintf("compact tool overflow sent: session=%s msg_id=%d tool=%s\n<<<BODY\n%s\nBODY>>>", p.SessionID, sent.ID, p.ToolName, overflowText))
+								}
+							} else {
+								editMsg := &tele.Message{ID: existing.MsgID, Chat: &tele.Chat{ID: existing.ChatID}}
+								helpers.RetryEdit(bs.Bot, editMsg, fullText, tele.ModeHTML)
+								logger.Debug(fmt.Sprintf("compact tool edited: session=%s msg_id=%d tool=%s lines=%d\n<<<BODY\n%s\nBODY>>>", p.SessionID, existing.MsgID, p.ToolName, len(existing.Lines), fullText))
+							}
+						} else {
+							compactBody := compactLine
+							nd := notify.NotificationData{
+								Event: "CompactTool", Project: p.Project, CWD: cwdForRoute,
+								TmuxTarget: p.TmuxTarget, AgentName: hookAgentName,
+								Backend: func() string {
+									if info := bs.SessionState.FindInfoByTarget(p.TmuxTarget); info != nil && info.Backend != "" {
+										return info.Backend
+									}
+									return "cc"
+								}(),
+								CLICommand:     helpers.GetPaneCLICommand(p.TmuxTarget),
+								ContextUsedPct: -1,
+								Body:           compactBody,
+							}
+							if usedPct, usedTokens, windowSize, ctxOk := helpers.ReadContextUsage(p.SessionID); ctxOk {
+								nd.ContextUsedPct = usedPct
+								nd.ContextUsedTokens = usedTokens
+								nd.ContextWindowSize = windowSize
+							}
+							fullText := notify.BuildNotificationText(nd)
+							var sendOpts []interface{}
+							sendOpts = append(sendOpts, tele.ModeHTML)
+							if toolTopicID > 0 {
+								sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: toolTopicID})
+							}
+							sent, err := helpers.RetrySend(bs.Bot, toolChat, fullText, sendOpts...)
+							if err != nil {
+								logger.Error(fmt.Sprintf("compact tool send failed: %v", err))
+							} else if sent != nil {
+								bs.CompactTools.Store(p.SessionID, &stores.CompactToolEntry{
+									MsgID: sent.ID, ChatID: toolChat.ID, TopicID: toolTopicID,
+									Lines: []string{compactLine},
+								})
+								logger.Debug(fmt.Sprintf("compact tool sent: session=%s msg_id=%d tool=%s chat=%s\n<<<BODY\n%s\nBODY>>>", p.SessionID, sent.ID, p.ToolName, toolChatID, fullText))
+							}
 						}
-						if toolChat != nil {
+					} else if toolChat != nil {
+						// Standard detailed mode
+						toolText := notify.BuildToolNotifyText(p.ToolName, p.ToolInput, cwdForRoute)
+						if toolText != "" {
 							msgID := cb.SendEventNotification(bs, toolChat, toolChatID, p.SessionID, "ToolUse", p.Project, cwdForRoute, p.TmuxTarget, toolText, p.ToolName, hookAgentName, toolTopicID)
 							if p.ToolUseID != "" && msgID > 0 {
 								bs.ToolUseMsgs.Store(p.ToolUseID, &stores.ToolUseMsgEntry{MsgID: msgID, ChatID: toolChat.ID, TopicID: toolTopicID, Body: toolText})
@@ -359,6 +455,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			case "PostToolUse":
 				if p.ToolUseID == "" {
 					break
+				}
+				if p.ToolName == "AskUserQuestion" && p.TmuxTarget != "" {
+					var resp struct {
+						Answers map[string]string `json:"answers"`
+					}
+					json.Unmarshal(p.ToolResponse, &resp)
+					bs.InjectConfirm.NotifyAskAnswered(p.TmuxTarget, resp.Answers)
 				}
 				entry, ok := bs.ToolUseMsgs.Get(p.ToolUseID)
 				if !ok {
@@ -417,14 +520,6 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					})
 				}
 				logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d", entry.MsgID, p.ToolName, p.ToolUseID, len(resultText)))
-				// Confirm InjectConfirm for AskUserQuestion answer verification
-				if p.ToolName == "AskUserQuestion" && p.TmuxTarget != "" {
-					var resp struct {
-						Answers map[string]string `json:"answers"`
-					}
-					json.Unmarshal(p.ToolResponse, &resp)
-					bs.InjectConfirm.NotifyAskAnswered(p.TmuxTarget, resp.Answers)
-				}
 				// Flush inject queue after tool execution via async dispatch to avoid blocking hook response
 				if p.ToolName != "AskUserQuestion" && p.TmuxTarget != "" {
 					if bs.InjectQueue.HasItems(p.TmuxTarget) {

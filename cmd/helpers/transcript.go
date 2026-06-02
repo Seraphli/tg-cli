@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Seraphli/tg-cli/internal/config"
 )
 
 // TranscriptLogEntry represents a parsed message from a CC or Codex transcript JSONL.
@@ -375,8 +377,10 @@ func extractToolParam(name string, input map[string]interface{}) string {
 }
 
 // FormatToolLine formats a tool call as a single display line with truncation.
-func FormatToolLine(sessionName, toolName, param string) string {
-	const targetMax = 40
+func FormatToolLine(sessionName, toolName, param string, targetMax int) string {
+	if targetMax <= 0 {
+		targetMax = 40
+	}
 	prefix := fmt.Sprintf("[%s]: 🔧 %s(\"", sessionName, toolName)
 	suffix := "\")"
 	prefixLen := len([]rune(prefix))
@@ -457,6 +461,11 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 			selected = append(selected, rd.entries...)
 		}
 	}
+	cfg, _ := config.LoadAppConfig()
+	toolMax := 40
+	if cfg.ToolLineMaxRunes > 0 {
+		toolMax = cfg.ToolLineMaxRunes
+	}
 	var output []string
 	for _, e := range selected {
 		// Default: user speaks to session, assistant speaks back to user
@@ -471,7 +480,7 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 		}
 		// Tool use: always attributed to session (no direction marker)
 		if e.Tool != "" {
-			output = append(output, FormatToolLine(sessionName, e.Tool, e.ToolDetail))
+			output = append(output, FormatToolLine(sessionName, e.Tool, e.ToolDetail, toolMax))
 		}
 	}
 	return strings.Join(output, "\n"), nil

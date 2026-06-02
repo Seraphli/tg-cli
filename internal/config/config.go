@@ -116,10 +116,13 @@ type AppConfig struct {
 	VoiceRetainCount    int    `json:"voiceRetainCount,omitempty"`
 	CWDSource           string `json:"cwdSource,omitempty"`
 	PaginationMaxRunes  int    `json:"paginationMaxRunes,omitempty"`
+	ToolLineMaxRunes    int    `json:"toolLineMaxRunes,omitempty"`
 	NotifyFormat        string `json:"notifyFormat,omitempty"` // "html" (default) or "raw"
 	TableMode           string `json:"tableMode,omitempty"`    // "image" (default) or "code"
 	DisplayName         string `json:"displayName,omitempty"`
 	UsageSource         string `json:"usageSource,omitempty"`  // "tmux" (default) or "api"
+	ToolNotifyCompact   bool   `json:"toolNotifyCompact,omitempty"`
+	CompactToolMaxLen   int    `json:"compactToolMaxLen,omitempty"` // compact tool-line character (rune) budget; default 60
 }
 
 // appConfigCache stores the last loaded config for dynamic reload support.

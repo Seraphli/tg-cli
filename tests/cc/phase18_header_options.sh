@@ -8,9 +8,29 @@ echo "--- Header options test (session send --no-header, cron inject header, --s
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-18"
+
 # =============================================
 # Test 1: session send header behavior
 # =============================================
+
+# Name the session so session send --name e2e-cli can resolve it
+SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+import sys, json
+pane = sys.argv[1]
+d = json.load(sys.stdin)
+for s in d.get("sessions", []):
+    t = s.get("target", "")
+    if t == pane or t.startswith(pane + "@"):
+        print(s.get("id", ""))
+        sys.exit(0)
+print("")
+' "$E2E_PANE" 2>/dev/null || echo "")
+if [ -n "$SESSION_ID" ]; then
+  curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=e2e-cli" > /dev/null 2>&1 || true
+  echo "  Named session $SESSION_ID as e2e-cli"
+fi
 
 # Extract short pane_id and fake TMUX env for simulating "from within e2e-cli pane"
 SHORT_PANE="${E2E_PANE%@*}"
@@ -20,7 +40,7 @@ FAKE_TMUX="${SOCK_PATH},1234,0"
 # 1a: auto-resolve from via TMUX_PANE/TMUX env → inject header with resolved sender
 LOG_BEFORE_1A=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 env TMUX_PANE="$SHORT_PANE" TMUX="$FAKE_TMUX" \
-  ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_auto" > /dev/null 2>&1 || true
+  ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --text "header_test_auto — Reply with only: acknowledged" > /dev/null 2>&1 || true
 sleep 2
 NEW_1A=$(tail -n +"$((LOG_BEFORE_1A + 1))" "$LOG_FILE")
 set +eo pipefail
@@ -76,7 +96,7 @@ fi
 
 # 1c: explicit --from → header uses explicit sender
 LOG_BEFORE_1C=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_explicit" > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_explicit — Reply with only: acknowledged" > /dev/null 2>&1 || true
 sleep 2
 NEW_1C=$(tail -n +"$((LOG_BEFORE_1C + 1))" "$LOG_FILE")
 set +eo pipefail
@@ -104,11 +124,11 @@ wait_for_idle
 
 # 1d: explicit --from + --no-header → inject text has no header prefix
 LOG_BEFORE_1D=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from manual-sender --text "header_test_noheader — Reply with only: acknowledged" --no-header > /dev/null 2>&1 || true
 sleep 2
 NEW_1D=$(tail -n +"$((LOG_BEFORE_1D + 1))" "$LOG_FILE")
 set +eo pipefail
-echo "$NEW_1D" | grep -q 'Session send via API:.*noHeader=true.*header_test_noheader.*injectText="header_test_noheader"'
+echo "$NEW_1D" | grep -q 'Session send via API:.*noHeader=true.*header_test_noheader.*injectText="header_test_noheader'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: grep 'Session send via API...noheader' PIPESTATUS=${_ps[*]}"

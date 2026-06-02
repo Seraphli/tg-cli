@@ -7,7 +7,7 @@ _E2E_COMMON_LOADED=1
 # Shared config (allow override via env)
 BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot}"
 E2E_SESSION="${E2E_SESSION:-tg-cli-e2e}"
-export TMUX_TEST="tmux -L tg-cli-test -f /dev/null"
+export TMUX_TEST="tmux -u -L tg-cli-test -f /dev/null"
 TEST_CONFIG_DIR="$HOME/.tg-cli-test"
 TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$TEST_CONFIG_DIR/claude-config}"
 TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
@@ -28,6 +28,8 @@ export E2E_RESULTS_FILE
 
 pass() { echo "PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  PASS: $1"; }
 fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; exit 1; }
+pass_opt() { echo "OPT_PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  OPT_PASS: $1"; }
+warn() { echo "WARN|$1" >> "$E2E_RESULTS_FILE"; echo "  WARN: $1"; }
 # Global error-exit logging
 set -E
 
@@ -63,9 +65,9 @@ pane_log() {
     echo "  === PANE: $label === (no pane)"
     return
   fi
-  local api_url="http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$target" | jq -sRr @uri)"
+  local pane_id="${target%@*}"
   local capture
-  capture=$(curl -s "$api_url" | jq -r '.content // "(empty)"' 2>/dev/null || echo "(capture failed)")
+  capture=$($TMUX_TEST capture-pane -t "$pane_id" -p -S - 2>/dev/null || echo "(capture failed)")
   echo "  === PANE: $label ==="
   echo "$capture"
   echo "  === END PANE ==="
@@ -74,16 +76,17 @@ pane_log() {
 inject_prompt() {
   local text="$1"
   local image="${2:-}"
+  local target="${3:-$E2E_PANE}"
   local api_url="http://127.0.0.1:$TEST_PORT/inject/message"
   local payload
   if [ -n "$image" ]; then
-    payload=$(jq -n --arg t "$E2E_PANE" --arg txt "$text" --arg img "$image" \
+    payload=$(jq -n --arg t "$target" --arg txt "$text" --arg img "$image" \
       '{target: $t, text: $txt, imagePath: $img}')
   else
-    payload=$(jq -n --arg t "$E2E_PANE" --arg txt "$text" \
+    payload=$(jq -n --arg t "$target" --arg txt "$text" \
       '{target: $t, text: $txt}')
   fi
-  echo "  API call: POST $api_url target=$E2E_PANE text=${text:0:80}..."
+  echo "  API call: POST $api_url target=$target text=${text:0:80}..."
   local resp
   resp=$(curl -s -w "\n%{http_code}" -X POST \
     -H "Content-Type: application/json" \
@@ -93,6 +96,7 @@ inject_prompt() {
   code=$(echo "$resp" | tail -1)
   if [ "$code" != "200" ]; then
     echo "  WARNING: inject/message API returned $code"
+    pane_log "[inject_prompt] failed ($code) target=$target"
     return 1
   fi
   return 0
@@ -133,8 +137,11 @@ wait_for_idle() {
     sleep 1
     elapsed=$((elapsed + 1))
   done
-  echo "WARN: wait_for_idle timed out after ${timeout}s"
-  return 1
+  local debug_resp debug_target
+  debug_resp=$(curl -sf "$url" 2>/dev/null || echo '{"error":"curl failed"}')
+  debug_target="${target:-${E2E_PANE:-}}"
+  pane_log "wait_for_idle TIMEOUT after ${timeout}s (idle_resp: $debug_resp)" "$debug_target"
+  fail "wait_for_idle timed out after ${timeout}s on target=${debug_target:-<none>} (idle_resp: $debug_resp)"
 }
 
 wait_for_pane_content() {
@@ -183,9 +190,11 @@ check_typing_continuity() {
   t1_epoch=$(date -d "$t1_ts" +%s 2>/dev/null || echo 0)
   t2_epoch=$(date -d "$t2_ts" +%s 2>/dev/null || echo 0)
   duration=$((t2_epoch - t1_epoch))
-  # Count "Typing sent" entries between T1 and T2
+  # Count typing SEND ATTEMPTS (ticker fired) between T1 and T2. The tick line is logged before
+  # the HTTP sendChatAction call, so a transient network send failure does NOT create a gap — only
+  # a missed attempt would. 3s ticker, so the expected count math below (duration/3 - 2) is unchanged.
   local typing_timestamps
-  typing_timestamps=$(echo "$new_entries" | grep "Typing sent" | grep -oP '^\[\K[^]]+' || true)
+  typing_timestamps=$(echo "$new_entries" | grep 'tick:.*sending=true' | grep -oP '^\[\K[^]]+' || true)
   local count=0 max_gap=0 prev_epoch=""
   if [ -n "$typing_timestamps" ]; then
     while IFS= read -r ts; do
@@ -241,10 +250,11 @@ start_bot() {
   > "$TYPING_LOG_FILE"
   # Clean stale state from previous runs
   rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
-  rm -f "$TEST_CONFIG_DIR/inject-queue.json" "$TEST_CONFIG_DIR/merge-buffers.json" "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
+  rm -f "$TEST_CONFIG_DIR/inject-queue.json" "$TEST_CONFIG_DIR/merge-buffers.json" "$TEST_CONFIG_DIR/sessions.json" "$TEST_CONFIG_DIR/at-channels.json" 2>/dev/null || true
+  rm -rf "$TEST_CONFIG_DIR/mailbox" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
   $TMUX_TEST send-keys -t "$BOT_SESSION" \
-    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1 | tee -a $LOG_FILE" Enter
+    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1" Enter
   echo "Waiting for bot to start..."
   wait_for_bot_ready
 }
@@ -271,7 +281,7 @@ MINEOF
   python3 -c "import json;f='$TEST_SETTINGS';d=json.load(open(f));d['skipDangerousModePermissionPrompt']=True;p=d.setdefault('permissions',{});a=p.setdefault('allow',[]);r='Read(//tmp/**)';a.append(r) if r not in a else None;json.dump(d,open(f,'w'),indent=2)"
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
-  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"
+  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --dangerously-skip-permissions --setting-sources user"
   echo "{\"toolNotifyList\":[\"Bash\",\"AskUserQuestion\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
@@ -284,7 +294,7 @@ cleanup_sessions() {
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   sleep 2
   $TMUX_TEST kill-session -t "=$BOT_SESSION" 2>/dev/null || true
-  $TMUX_TEST kill-server 2>/dev/null || true
+  # Do NOT kill-server — debug sessions (tg-cli-usage-*) may be kept alive for investigation
   return $exit_code
 }
 
@@ -298,6 +308,5 @@ ensure_infrastructure() {
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  start_claude
   trap cleanup_sessions EXIT
 }

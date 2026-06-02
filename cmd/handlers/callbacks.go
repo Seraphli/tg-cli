@@ -443,6 +443,27 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		return c.Respond(&tele.CallbackResponse{Text: "Saved: " + statusText})
 	})
 
+	btnToolCompact := tele.InlineButton{Unique: "tool_compact"}
+	bot.Handle(&btnToolCompact, func(c tele.Context) error {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
+		}
+		cfg.ToolNotifyCompact = !cfg.ToolNotifyCompact
+		if err := config.SaveAppConfig(cfg); err != nil {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save config"})
+		}
+		statusText := "OFF"
+		if cfg.ToolNotifyCompact {
+			statusText = "ON"
+		}
+		if IsSettingsMenu(bs, c.Message().ID) {
+			showSettingsToolNotify(bot, bs, c.Message())
+			return c.Respond(&tele.CallbackResponse{Text: "Compact: " + statusText})
+		}
+		return c.Respond(&tele.CallbackResponse{Text: "Compact: " + statusText})
+	})
+
 	btnToolsToggle := tele.InlineButton{Unique: "tools_toggle"}
 	bot.Handle(&btnToolsToggle, func(c tele.Context) error {
 		toolName := c.Data()

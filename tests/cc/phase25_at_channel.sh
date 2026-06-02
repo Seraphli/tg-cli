@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 26: @ channel TC1-TC9 per behavior spec
+# Phase 25: @ channel TC1-TC9 per behavior spec
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/cc_common.sh"
@@ -9,23 +9,101 @@ echo "--- @ channel tests (TC1-TC9) ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-25"
+
 AT_SESSION="tg-cli-e2e-at"
 AT_PANE=""
+AT_C_SESSION=""
+AT_C_PANE=""
 
 cleanup_at_session() {
-  echo "  [at_channel] cleanup: killing AT tmux session..."
-  $TMUX_TEST kill-session -t "=$AT_SESSION" 2>/dev/null || true
-  # Unbind routes created by this phase to avoid interfering with subsequent phases
+  local rc=$?
+  _CC_PHASE_SESSION=""
+  local fail_count=0
+  if [ $rc -eq 0 ]; then
+    echo "  [at_channel] cleanup (graceful)..."
+    if [ -n "$AT_C_SESSION" ]; then
+      stop_claude "$AT_C_SESSION" || fail_count=$((fail_count + 1))
+    fi
+    stop_claude "$AT_SESSION" || fail_count=$((fail_count + 1))
+    stop_claude "e2e-cc-25" || fail_count=$((fail_count + 1))
+  else
+    echo "  [at_channel] cleanup (abnormal rc=$rc), capturing and killing..."
+    if [ -n "$AT_C_SESSION" ]; then
+      pane_log "[at_channel] abnormal exit - $AT_C_SESSION" "$AT_C_PANE"
+      $TMUX_TEST kill-session -t "=$AT_C_SESSION" 2>/dev/null || true
+    fi
+    pane_log "[at_channel] abnormal exit - AT_SESSION" "$AT_PANE"
+    pane_log "[at_channel] abnormal exit - e2e-cc-25"
+    $TMUX_TEST kill-session -t "=$AT_SESSION" 2>/dev/null || true
+    $TMUX_TEST kill-session -t "=e2e-cc-25" 2>/dev/null || true
+  fi
   curl -s -X POST "http://127.0.0.1:$TEST_PORT/route/unbind" \
     -H "Content-Type: application/json" -d '{"name":"e2e-cli"}' > /dev/null 2>&1 || true
   curl -s -X POST "http://127.0.0.1:$TEST_PORT/route/unbind" \
     -H "Content-Type: application/json" -d '{"name":"e2e-at-b"}' > /dev/null 2>&1 || true
   curl -s -X POST "http://127.0.0.1:$TEST_PORT/route/unbind" \
     -H "Content-Type: application/json" -d '{"name":"e2e-at-c"}' > /dev/null 2>&1 || true
+  if [ $fail_count -gt 0 ]; then
+    exit 1
+  fi
+  exit $rc
 }
 trap cleanup_at_session EXIT
 
-LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+# check_inject_errors: fail-fast helper to detect inject errors and unexpected PermissionRequests
+# Args: marker (line count before section), context (label for error message)
+check_inject_errors() {
+  local marker="$1"
+  local context="$2"
+  local section
+  # Exclude CC hook payload lines before pattern matching to avoid false positives
+  section=$(tail -n +"$((marker + 1))" "$LOG_FILE" 2>/dev/null | grep -v "\[HOOK\] CC stdin payload\|\[HOOK\] POST \|Raw hook payload" || true)
+  local fail_found=false
+
+  set +eo pipefail
+  local inject_errors=$(echo "$section" | grep -c "safeInjectText: inject not confirmed\|@ open inject target error:\|@ open auto-forward inject error:\|@ open existing inject initiator error:" || true)
+  set -eo pipefail
+  if [ "$inject_errors" -gt 0 ]; then
+    echo "  [fail-fast] inject errors in $context:"
+    echo "$section" | grep "safeInjectText: inject not confirmed\|@ open inject target error:\|@ open auto-forward inject error:\|@ open existing inject initiator error:" || true
+    fail_found=true
+  fi
+
+  set +eo pipefail
+  local perm_errors=$(echo "$section" | grep -c "Permission request sent:\|safeInjectText: PermissionRequest pending, queued\|flushInjectQueue: PermissionRequest pending" || true)
+  set -eo pipefail
+  if [ "$perm_errors" -gt 0 ]; then
+    echo "  [fail-fast] unexpected PermissionRequest in $context:"
+    echo "$section" | grep "Permission request sent:\|safeInjectText: PermissionRequest pending, queued\|flushInjectQueue: PermissionRequest pending" || true
+    fail_found=true
+  fi
+
+  if [ "$fail_found" = true ]; then
+    fail "$context: inject/PermissionRequest error(s) detected in bot log"
+  fi
+}
+
+# cc_run_at: tell the CC session at $pane to run an exact @ channel CLI command ITSELF (so it has
+# channel context in its own transcript, per spec scenario 4), then wait for it to settle. The
+# prompt is bounded so the session runs only this command and does not explore the codebase.
+# $1=pane, $2=full command (MUST include --config-dir/--port so it reaches the TEST bot).
+# Verified via the PostToolUse entry in the bot log (a Bash tool call fires PostToolUse → logged).
+cc_run_at() {
+  local pane="$1" cmd="$2"
+  inject_prompt "Use the Bash tool to run EXACTLY this one command and nothing else, then reply with only the word done. Do NOT read files, search, or explore the codebase — just run the command: $cmd" "" "$pane"
+  wait_for_idle $AT_TIMEOUT "$pane"
+}
+
+# cc_prime_target: give a passive @ channel test target session a bounded standing instruction so it
+# does NOT autonomously act on received @ channel forwards (e.g. close the channel). It still obeys
+# explicit cc_run_at commands. $1=pane.
+cc_prime_target() {
+  local pane="$1"
+  inject_prompt "You are a passive @ channel test target. You may receive @ channel notifications from other sessions. When you receive one, reply with ONLY the word ack and take NO other action — do NOT run any tg-cli or session at command, do NOT reply to or close any @ channel, do NOT read files or explore — UNLESS a message explicitly says to use the Bash tool to run a specific command." "" "$pane"
+  wait_for_idle $AT_TIMEOUT "$pane"
+}
 
 # Ensure session A (e2e-cli) is named — re-apply in case previous phases renamed it
 pane_log "[at_channel] BEFORE setup"
@@ -45,45 +123,15 @@ if [ -n "$SESSION_A_ID" ]; then
   echo "  Session A (e2e-cli) confirmed: $SESSION_A_ID"
 fi
 
-# Launch session B in a new tmux session on the test tmux server
-$TMUX_TEST kill-session -t "=$AT_SESSION" 2>/dev/null || true
-$TMUX_TEST new-session -d -s "$AT_SESSION"
-AT_PANE=$($TMUX_TEST list-panes -t "$AT_SESSION" -F '#{pane_id}@#{socket_path}')
+# Save A's context before launching session B
+_SAVE_A_SESSION="$E2E_SESSION"
+_SAVE_A_PANE="$E2E_PANE"
+
+# Launch session B using start_claude helper
+start_claude "$AT_SESSION" "--dangerously-skip-permissions" "false"
+AT_PANE="$E2E_PANE"
 export AT_PANE
 echo "  Session B pane: $AT_PANE"
-
-# Start CC in session B
-$TMUX_TEST send-keys -t "$AT_SESSION" \
-  "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --allow-dangerously-skip-permissions"
-sleep 1
-$TMUX_TEST send-keys -t "$AT_SESSION" Enter
-echo "  Waiting for session B CC to start..."
-sleep 5
-
-# Handle trust/bypass dialog for session B
-PANE_B_CONTENT=$($TMUX_TEST capture-pane -t "${AT_PANE%@*}" -p -S - 2>/dev/null || true)
-echo "  DEBUG: session B pane (${#PANE_B_CONTENT} chars): $PANE_B_CONTENT"
-set +eo pipefail
-echo "$PANE_B_CONTENT" | grep -qi "Bypass Permissions"
-_ps=("${PIPESTATUS[@]}")
-set -eo pipefail
-if [ "${_ps[1]}" -eq 0 ]; then
-  $TMUX_TEST send-keys -t "$AT_SESSION" Down
-  sleep 1
-  $TMUX_TEST send-keys -t "$AT_SESSION" C-m
-  echo "  Session B: Bypass Permissions dialog accepted."
-else
-  set +eo pipefail
-  echo "$PANE_B_CONTENT" | grep -qi "trust"
-  _ps=("${PIPESTATUS[@]}")
-  set -eo pipefail
-  if [ "${_ps[1]}" -eq 0 ]; then
-    $TMUX_TEST send-keys -t "$AT_SESSION" C-m
-    echo "  Session B: Trust dialog confirmed."
-  else
-    echo "  Session B: No dialog detected."
-  fi
-fi
 
 # Wait for session B to register (SessionStart hook fires)
 echo "  Waiting for session B to register with bot..."
@@ -124,8 +172,16 @@ curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_B_ID&name=
 echo "  Session B named: e2e-at-b"
 sleep 1
 
+# Restore A context
+E2E_SESSION="$_SAVE_A_SESSION"
+E2E_PANE="$_SAVE_A_PANE"
+export E2E_SESSION E2E_PANE
+
 # Use longer timeout for @ channel tests (session B startup + SafeInjectText can be slow in full suite)
 AT_TIMEOUT=$((TIMEOUT * 2))
+# CC sessions must run tg-cli against the TEST bot (else bare tg-cli hits production).
+AT_CLI="./tg-cli --config-dir $TEST_CONFIG_DIR"
+AT_PORT_FLAG="--port $TEST_PORT"
 
 # Bind routes so TG notifications are sent (required for pagination/collapse tests)
 DEFAULT_CHAT_ID=$(python3 -c "
@@ -144,69 +200,104 @@ echo "  Routes bound: e2e-cli → $DEFAULT_CHAT_ID, e2e-at-b → $DEFAULT_CHAT_I
 
 # Wait for session B to reach idle state
 wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
+cc_prime_target "$AT_PANE"
 
-# --- TC1: Channel Open + target context (fixture) ---
+# --- TC1: Channel Open + target context (echo marker + story) ---
 echo ""
 echo "  [TC1] Channel Open + target context"
 
-# Inject a simple prompt to session A to create transcript file
-echo "  Injecting warmup prompt to create transcript..."
+# TC1-11 marker. N is a VALUE (a number/string, e.g. 2567890). The prompt gives CC the value of N and
+# the TEMPLATE tc1_warmup_{N} separately, and CC assembles tc1_warmup_2567890 itself. So the contiguous
+# marker is produced only by CC: it is NOT in the prompt (which carries "tc1_warmup_{N}" + "2567890"
+# separately; the prompt IS forwarded as user text — see bot.log "[User → e2e-cli]: echo tc1_warmup").
+# CC's command "echo tc1_warmup_2567890" is truncated in the 🔧 summary (default targetMax=40), so the
+# full marker is not there either. It survives only in the tool_result, which the forward drops (spec:110).
+TC1_N="2567890"
+TC1_RESULT_MARKER="tc1_warmup_${TC1_N}"
+echo "  Injecting warmup prompts to build transcript (marker=${TC1_RESULT_MARKER})..."
 pane_log "[TC1] BEFORE warmup inject" "$E2E_PANE"
 pane_log "[TC1] BEFORE warmup inject (B)" "$AT_PANE"
-inject_prompt "echo tc1_warmup" || true
-wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
-sleep 2
+# Tool call (fast): CC assembles + echoes the marker → 🔧 tool_use (TC1-10) + filterable tool_result (TC1-11).
+inject_prompt "The value of N is ${TC1_N}. Use the Bash tool to echo the marker tc1_warmup_{N}, replacing {N} with the value of N. Then reply with only the single word done and nothing else." || true
+wait_for_idle $AT_TIMEOUT "$E2E_PANE"
+wait_for_idle $AT_TIMEOUT "$AT_PANE"
+# Long assistant text (fast, no tools): triggers @ channel pagination (TC1-4) at the reduced test
+# threshold (paginationMaxRunes=500). ~150 words ≈ >800 runes >> 500.
+inject_prompt "Without using any tools, write a short fictional story of about 150 words about a lighthouse keeper and a talking seagull. Output only the story prose, nothing else." || true
+wait_for_idle $AT_TIMEOUT "$E2E_PANE"
+wait_for_idle $AT_TIMEOUT "$AT_PANE"
+sleep 5
 pane_log "[TC1] AFTER warmup inject" "$E2E_PANE"
 pane_log "[TC1] AFTER warmup inject (B)" "$AT_PANE"
 
-# Write fixture to session A's transcript path so ReadContextBlock uses it
-SESSION_A_INFO=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
-import sys, json
-pane = sys.argv[1]
-d = json.load(sys.stdin)
-for s in d.get("sessions", []):
-    t = s.get("target", "")
-    if t == pane or t.startswith(pane + "@"):
-        print(s.get("id", ""), s.get("transcript_path", ""), sep="\t")
-        sys.exit(0)
-print("\t")
-' "$E2E_PANE" 2>/dev/null || echo "	")
-SESSION_A_ID=$(echo "$SESSION_A_INFO" | cut -f1)
-SESSION_A_TRANSCRIPT=$(echo "$SESSION_A_INFO" | cut -f2)
-echo "  DEBUG: session A id=$SESSION_A_ID transcript=$SESSION_A_TRANSCRIPT"
-
-# Append fixture entries to session A's transcript so context read includes long content
-FIXTURE_FILE="${SCRIPT_DIR}/../fixtures/at_channel_transcript.jsonl"
-if [ -n "$SESSION_A_TRANSCRIPT" ] && [ -f "$FIXTURE_FILE" ]; then
-  cat "$FIXTURE_FILE" >> "$SESSION_A_TRANSCRIPT"
-  echo "  Appended fixture to transcript: $SESSION_A_TRANSCRIPT ($(wc -l < "$SESSION_A_TRANSCRIPT") lines)"
+# Resolve session A transcript path
+A_TRANSCRIPT=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | SESSION_A_ID="$SESSION_A_ID" python3 -c "
+import sys, json, os
+sid = os.environ['SESSION_A_ID']
+for s in json.load(sys.stdin).get('sessions', []):
+    if s.get('id') == sid:
+        print(s.get('transcript_path', '')); break
+")
+echo "  DEBUG: TC1-0 A_TRANSCRIPT=$A_TRANSCRIPT"
+# TC1-0 (positive source for TC1-11): marker must be in a tool_result content / toolUseResult.stdout of
+# A's transcript — proves CC's echo OUTPUT produced it (not just the command). Verified before forward
+# so that TC1-11's "absent from forward" genuinely proves the tool_result was filtered.
+TC1_SRC="NOTFOUND"
+if [ -n "$A_TRANSCRIPT" ] && [ -f "$A_TRANSCRIPT" ]; then
+  TC1_SRC=$(MARKER="$TC1_RESULT_MARKER" python3 -c "
+import sys, json, os
+marker = os.environ['MARKER']; found = False
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try: e = json.loads(line)
+    except Exception: continue
+    content = (e.get('message') or {}).get('content')
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get('type') == 'tool_result':
+                tc = c.get('content', '')
+                if isinstance(tc, list):
+                    tc = ''.join(p.get('text','') if isinstance(p, dict) else str(p) for p in tc)
+                if isinstance(tc, str) and marker in tc: found = True
+    tur = e.get('toolUseResult')
+    if isinstance(tur, dict) and isinstance(tur.get('stdout',''), str) and marker in tur['stdout']:
+        found = True
+    if found: break
+print('FOUND' if found else 'NOTFOUND')
+" < "$A_TRANSCRIPT")
+fi
+echo "  DEBUG: TC1-0 TC1_SRC=$TC1_SRC"
+if [ "$TC1_SRC" = "FOUND" ]; then
+  pass "TC1-0: marker $TC1_RESULT_MARKER present in session A tool_result/stdout (CC produced it; TC1-11 is meaningful)"
 else
-  echo "  WARN: could not append fixture (transcript=$SESSION_A_TRANSCRIPT fixture_exists=$([ -f "$FIXTURE_FILE" ] && echo yes || echo no))"
+  fail "TC1-0: marker $TC1_RESULT_MARKER not found in source tool_result/stdout — TC1-11 would be invalid (CC did not produce the marker in a tool result)"
 fi
 
 LOG_BEFORE_TC1=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[TC1] BEFORE @ open" "$E2E_PANE"
 pane_log "[TC1] BEFORE @ open (B)" "$AT_PANE"
 
-# Open channel A -> B with message marker
-AT_OPEN_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b --rounds 3 "e2e_at_open_marker" \
-  --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: AT_OPEN_OUTPUT (${#AT_OPEN_OUTPUT} chars): $AT_OPEN_OUTPUT"
+# Open channel A -> B with message marker (A's CC runs the command itself — scenario 4)
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 3 \"e2e_at_open_marker\" $AT_PORT_FLAG"
 
-sleep 2
+# Wait for B to process injected context before assertions
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC1] AFTER @ open" "$E2E_PANE"
 pane_log "[TC1] AFTER @ open (B)" "$AT_PANE"
 
-# TC1-1: CLI confirms channel opened
+# TC1-1: A's CC ran the open command itself — PostToolUse hook recorded the Bash tool call
+# (fresh-scoped via LOG_BEFORE_TC1; PostToolUse is logged only when the tool actually ran, so the
+# injected prompt's UserPromptSubmit line cannot satisfy this).
 set +eo pipefail
-echo "$AT_OPEN_OUTPUT" | grep -q "@ channel opened"
+tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-cli e2e-at-b --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC1-1 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC1-1: CLI output confirms channel opened"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC1-1: A ran 'session at e2e-cli e2e-at-b' itself (PostToolUse in bot log)"
 else
-  fail "TC1-1: CLI did not confirm channel opened: $AT_OPEN_OUTPUT"
+  fail "TC1-1: no PostToolUse 'session at e2e-cli e2e-at-b --rounds 3' — A did not run the open itself"
 fi
 
 # TC1-2: bot log contains @ channel opened:
@@ -307,28 +398,30 @@ else
   fail "TC1-9: B missing [e2e-cli → direction marker in UserPromptSubmit"
 fi
 
-# TC1-10: UserPromptSubmit payload contains 🔧 (tool_use summary from fixture)
+# TC1-10: UserPromptSubmit payload contains 🔧 (tool_use summary)
 set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "🔧"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC1-10 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
-  pass "TC1-10: B received 🔧 tool_use summary from fixture"
+  pass "TC1-10: B received 🔧 tool_use summary"
 else
   fail "TC1-10: B missing 🔧 tool_use summary in UserPromptSubmit"
 fi
 
-# TC1-11: UserPromptSubmit payload does NOT contain tool_result content (filtered)
+# TC1-11: forwarded payload does NOT contain the resolved tool_result marker (tool_result filtered, spec:110).
+# CC assembles the marker; it is absent from prompt (template + value separate), 🔧 summary (CC's command
+# truncated at default 40), and CC prose ("reply only done"); present only if filtering regressed.
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q '"242"'
+tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "$TC1_RESULT_MARKER"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-11 (tool_result filter) PIPESTATUS=${_ps[*]}"
+echo "  DEBUG: TC1-11 (tool_result filter, marker=$TC1_RESULT_MARKER) PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -ne 0 ]; then
-  pass "TC1-11: tool_result content '242' is NOT present (correctly filtered)"
+  pass "TC1-11: tool_result filtered ($TC1_RESULT_MARKER absent from forward)"
 else
-  fail "TC1-11: tool_result content '242' leaked into context (filter broken)"
+  fail "TC1-11: tool_result marker $TC1_RESULT_MARKER leaked into forward (filtering regressed)"
 fi
 
 # TC1-12: UserPromptSubmit payload contains @ prefix (open message preserves @name text)
@@ -362,7 +455,34 @@ else
   fail "TC1-13: could not extract msg_id from SendPagedForward log"
 fi
 
+# TC1-14 (round-29): forwarded reply instruction carries the test bot's --config-dir
+# (otherwise B's bare `tg-cli` would hit the PRODUCTION bot and never find the channel)
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q -- "--config-dir $TEST_CONFIG_DIR"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: TC1-14 (--config-dir $TEST_CONFIG_DIR) PIPESTATUS=${_ps[*]}"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC1-14: forwarded reply instruction carries --config-dir $TEST_CONFIG_DIR (B reaches test bot)"
+else
+  fail "TC1-14: forwarded reply instruction missing --config-dir $TEST_CONFIG_DIR — B would hit production bot"
+fi
+
+# TC1-15 (round-29): forwarded reply instruction carries the test bot's --port
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q -- "--port $TEST_PORT"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+echo "  DEBUG: TC1-15 (--port $TEST_PORT) PIPESTATUS=${_ps[*]}"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC1-15: forwarded reply instruction carries --port $TEST_PORT"
+else
+  fail "TC1-15: forwarded reply instruction missing --port $TEST_PORT"
+fi
+
 wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
+
+check_inject_errors "$LOG_BEFORE_TC1" "TC1"
 
 # --- TC2: Collapse/Expand buttons ---
 echo ""
@@ -483,9 +603,8 @@ _al3=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_al3[1]}" -ne 0 ]; then
   echo "  Channel not found — reopening for TC3..."
-  ./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b --rounds 1 \
-    --port "$TEST_PORT" 2>&1 || true
-  sleep 2
+  cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 1 $AT_PORT_FLAG"
+  wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
   echo "  Channel reopened for TC3."
 fi
 
@@ -563,24 +682,24 @@ pane_log "[TC4] BEFORE @ reply (B)" "$AT_PANE"
 
 LOG_BEFORE_TC4=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
-AT_REPLY_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at reply e2e-at-b e2e-cli \
-  --text "e2e_at_reply_marker" --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: AT_REPLY_OUTPUT (${#AT_REPLY_OUTPUT} chars): $AT_REPLY_OUTPUT"
+# B's CC runs the reply command itself (scenario 4 — agent-initiated)
+cc_run_at "$AT_PANE" "$AT_CLI session at reply e2e-at-b e2e-cli --text \"e2e_at_reply_marker\" $AT_PORT_FLAG"
 
-sleep 2
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC4] AFTER @ reply (A)" "$E2E_PANE"
 pane_log "[TC4] AFTER @ reply (B)" "$AT_PANE"
 
-# TC4-1: CLI confirms Reply sent
+# TC4-1: B's CC ran the reply command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-echo "$AT_REPLY_OUTPUT" | grep -q "Reply sent"
+tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at reply e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC4-1 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC4-1: CLI output confirms Reply sent"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC4-1: B ran 'session at reply e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
-  fail "TC4-1: CLI did not confirm Reply sent: $AT_REPLY_OUTPUT"
+  fail "TC4-1: no PostToolUse 'session at reply e2e-at-b e2e-cli' — B did not run the reply itself"
 fi
 
 # TC4-2: bot log contains @ reply:
@@ -788,12 +907,11 @@ pane_log "[TC6] BEFORE existing channel open (B)" "$AT_PANE"
 
 LOG_BEFORE_TC6=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
-# Open again on existing channel (should trigger 'New message from' path)
-TC6_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b \
-  --rounds 1 "e2e_tc6_existing_marker" --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC6 OUTPUT (${#TC6_OUTPUT} chars): $TC6_OUTPUT"
+# Open again on existing channel (A's CC runs the command itself — scenario 4)
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 1 \"e2e_tc6_existing_marker\" $AT_PORT_FLAG"
 
-sleep 2
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC6] AFTER existing channel open" "$E2E_PANE"
 pane_log "[TC6] AFTER existing channel open (B)" "$AT_PANE"
 
@@ -859,6 +977,8 @@ fi
 
 wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
+check_inject_errors "$LOG_BEFORE_TC6" "TC6"
+
 # --- TC7: Close — Initiator Closes ---
 echo ""
 echo "  [TC7] Close — Initiator"
@@ -867,24 +987,24 @@ pane_log "[TC7] BEFORE @ end (B)" "$AT_PANE"
 
 LOG_BEFORE_TC7=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
-AT_END_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-cli e2e-at-b \
-  --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC7 END OUTPUT (${#AT_END_OUTPUT} chars): $AT_END_OUTPUT"
+# A's CC runs the end command itself (scenario 4 — agent-initiated close)
+cc_run_at "$E2E_PANE" "$AT_CLI session at end e2e-cli e2e-at-b $AT_PORT_FLAG"
 
-sleep 2
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC7] AFTER @ end" "$E2E_PANE"
 pane_log "[TC7] AFTER @ end (B)" "$AT_PANE"
 
-# TC7-1: CLI confirms channel closed
+# TC7-1: A's CC ran the end command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-echo "$AT_END_OUTPUT" | grep -q "@ channel closed"
+tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-cli e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC7-1 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC7-1: CLI confirms channel closed"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC7-1: A ran 'session at end e2e-cli e2e-at-b' itself (PostToolUse in bot log)"
 else
-  fail "TC7-1: CLI did not confirm channel closed: $AT_END_OUTPUT"
+  fail "TC7-1: no PostToolUse 'session at end e2e-cli e2e-at-b' — A did not run the close itself"
 fi
 
 # TC7-2: bot log contains @ channel closed:
@@ -939,13 +1059,10 @@ fi
 echo ""
 echo "  [TC8] Close — Target (Bidirectional)"
 
-# Reopen channel A -> B first
+# Reopen channel A -> B first (A's CC runs the command itself)
 pane_log "[TC8] BEFORE reopen" "$E2E_PANE"
 pane_log "[TC8] BEFORE reopen (B)" "$AT_PANE"
-TC8_REOPEN=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b --rounds 1 \
-  --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC8 reopen: $TC8_REOPEN"
-sleep 2
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 1 $AT_PORT_FLAG"
 wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC8] AFTER reopen" "$E2E_PANE"
 pane_log "[TC8] AFTER reopen (B)" "$AT_PANE"
@@ -959,37 +1076,35 @@ LOG_BEFORE_TC8=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[TC8] BEFORE B closes channel" "$E2E_PANE"
 pane_log "[TC8] BEFORE B closes channel (B)" "$AT_PANE"
 
-# B executes close
-TC8_END_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-at-b e2e-cli \
-  --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC8 END OUTPUT (${#TC8_END_OUTPUT} chars): $TC8_END_OUTPUT"
+# B's CC executes close (scenario 4 — agent-initiated close from target side)
+cc_run_at "$AT_PANE" "$AT_CLI session at end e2e-at-b e2e-cli $AT_PORT_FLAG"
 
-sleep 2
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC8] AFTER B closes channel" "$E2E_PANE"
 pane_log "[TC8] AFTER B closes channel (B)" "$AT_PANE"
 
-# TC8-1: CLI does not contain channel not found
+# TC8-1: B's CC ran the end command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-echo "$TC8_END_OUTPUT" | grep -q "channel not found"
+tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC8-1 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[1]}" -ne 0 ]; then
-  pass "TC8-1: CLI does not contain 'channel not found'"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC8-1: B ran 'session at end e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
-  fail "TC8-1: CLI contains 'channel not found' — bidirectional close failed: $TC8_END_OUTPUT"
+  fail "TC8-1: no PostToolUse 'session at end e2e-at-b e2e-cli' — B did not run the close itself"
 fi
-
-# TC8-2: CLI confirms channel closed
+# TC8-2: bot log shows the target-side close succeeded (fresh-scoped)
 set +eo pipefail
-echo "$TC8_END_OUTPUT" | grep -q "@ channel closed"
+tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep -q "@ channel closed"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC8-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC8-2: CLI confirms channel closed (target-side close)"
+  pass "TC8-2: bot log shows '@ channel closed' (target-side close succeeded)"
 else
-  fail "TC8-2: CLI missing '@ channel closed' for target-side close: $TC8_END_OUTPUT"
+  fail "TC8-2: bot log missing '@ channel closed' for B's close"
 fi
 
 # TC8-3: /at/list returns empty
@@ -1007,13 +1122,10 @@ fi
 echo ""
 echo "  [TC9] SessionEnd — Auto Cleanup"
 
-# Reopen channel A -> B
+# Reopen channel A -> B (A's CC runs the command itself)
 pane_log "[TC9] BEFORE reopen" "$E2E_PANE"
 pane_log "[TC9] BEFORE reopen (B)" "$AT_PANE"
-TC9_REOPEN=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b --rounds 1 \
-  --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC9 reopen: $TC9_REOPEN"
-sleep 2
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 1 $AT_PORT_FLAG"
 wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 pane_log "[TC9] AFTER reopen" "$E2E_PANE"
 pane_log "[TC9] AFTER reopen (B)" "$AT_PANE"
@@ -1100,12 +1212,11 @@ fi
 echo ""
 echo "  [TC10] Boss auto-forward"
 
-# Reopen channel A → B for TC10
+# Reopen channel A → B for TC10 (A's CC runs the command itself)
 pane_log "[TC10] BEFORE reopen" "$E2E_PANE"
 pane_log "[TC10] BEFORE reopen (B)" "$AT_PANE"
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b --rounds 3 "tc10_setup" \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 2
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b --rounds 3 \"tc10_setup\" $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
 LOG_BEFORE_TC10=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
@@ -1156,10 +1267,10 @@ else
   fail "TC10-3: content label missing direction [e2e-cli → e2e-at-b]:"
 fi
 
-# Close channel for next TC
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-cli e2e-at-b \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 1
+# Close channel for next TC (A's CC runs the close itself)
+cc_run_at "$E2E_PANE" "$AT_CLI session at end e2e-cli e2e-at-b $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
 # ========================================
 # TC11: Agent CLI-initiated @ channel
@@ -1171,27 +1282,26 @@ LOG_BEFORE_TC11=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[TC11] BEFORE open" "$E2E_PANE"
 pane_log "[TC11] BEFORE open (B)" "$AT_PANE"
 
-# B opens channel to A (agent-initiated)
-CLI_OUTPUT_TC11=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-at-b e2e-cli \
-  --rounds 3 "e2e_agent_open_marker" --port "$TEST_PORT" 2>&1) || true
-echo "  DEBUG: TC11 CLI_OUTPUT (${#CLI_OUTPUT_TC11} chars): $CLI_OUTPUT_TC11"
-sleep 3
+# B's CC opens channel to A (agent-initiated — scenario 4)
+cc_run_at "$AT_PANE" "$AT_CLI session at e2e-at-b e2e-cli --rounds 3 \"e2e_agent_open_marker\" $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
 pane_log "[TC11] AFTER open" "$E2E_PANE"
 pane_log "[TC11] AFTER open (B)" "$AT_PANE"
 
 AFTER_LOG_TC11=$(tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE")
 
-# TC11-1: CLI output confirms channel opened
+# TC11-1: B's CC ran the open command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-echo "$CLI_OUTPUT_TC11" | grep -q "@ channel opened"
+tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-at-b e2e-cli --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 echo "  DEBUG: TC11-1 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC11-1: CLI output confirms @ channel opened"
+if [ "${_ps[2]}" -eq 0 ]; then
+  pass "TC11-1: B ran 'session at e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
-  fail "TC11-1: CLI missing '@ channel opened': $CLI_OUTPUT_TC11"
+  fail "TC11-1: no PostToolUse 'session at e2e-at-b e2e-cli --rounds 3' — B did not run the open itself"
 fi
 
 # TC11-2: bot log contains @ channel opened:
@@ -1242,10 +1352,12 @@ else
   fail "TC11-5: A content label missing direction [e2e-at-b → e2e-cli]:"
 fi
 
-# Close channel for next TC
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-at-b e2e-cli \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 1
+# Close channel for next TC (B's CC runs the close itself)
+cc_run_at "$AT_PANE" "$AT_CLI session at end e2e-at-b e2e-cli $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
+
+check_inject_errors "$LOG_BEFORE_TC11" "TC11"
 
 # ========================================
 # TC12: Multi-channel parallel
@@ -1253,56 +1365,68 @@ sleep 1
 echo ""
 echo "  [TC12] Multi-channel"
 
-# Setup: create third tmux window for session C (e2e-at-c)
-PANE_C=$($TMUX_TEST new-window -t "$AT_SESSION" -P -F '#{pane_id}@#{socket_path}')
-sleep 1
-echo "  Session C pane: $PANE_C"
+# Launch real CC session C
+AT_C_SESSION="tg-cli-e2e-at-c"
+_SAVE_SESSION="$E2E_SESSION"
+_SAVE_PANE="$E2E_PANE"
 
-# Register session C via SessionStart hook (same pattern as existing session registration)
-TC12_C_SID="e2e-at-c-session-$$"
-curl -s -X POST "http://127.0.0.1:${TEST_PORT}/hook/SessionStart" \
-  -H 'Content-Type: application/json' \
-  -d "{\"session_id\":\"${TC12_C_SID}\",\"tmux_target\":\"${PANE_C}\",\"cwd\":\"$(pwd)\",\"project\":\"tg-cli\",\"hook_event_name\":\"SessionStart\",\"backend\":\"cc\"}" > /dev/null 2>&1 || true
-sleep 1
+start_claude "$AT_C_SESSION" "--dangerously-skip-permissions" "false"
+AT_C_PANE="$E2E_PANE"
 
-# Name session C as e2e-at-c
-TC12_C_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+E2E_SESSION="$_SAVE_SESSION"
+E2E_PANE="$_SAVE_PANE"
+export E2E_SESSION E2E_PANE
+
+echo "  Session C pane: $AT_C_PANE"
+
+ELAPSED=0
+TC12_C_ID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  TC12_C_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
 import sys, json
 pane = sys.argv[1]
 d = json.load(sys.stdin)
 for s in d.get("sessions", []):
     t = s.get("target", "")
-    if t == pane or t.startswith(pane.split("@")[0]):
+    if t == pane or t.startswith(pane + "@"):
         print(s.get("id", ""))
         sys.exit(0)
 print("")
-' "$PANE_C" 2>/dev/null || echo "")
-if [ -n "$TC12_C_ID" ]; then
-  curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$TC12_C_ID&name=e2e-at-c" > /dev/null 2>&1 || true
-  echo "  Session C named: e2e-at-c (id=$TC12_C_ID)"
-else
-  echo "  WARN: Session C not found in session list, using session_id directly"
-  curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=${TC12_C_SID}&name=e2e-at-c" > /dev/null 2>&1 || true
+' "$AT_C_PANE" 2>/dev/null || echo "")
+  if [ -n "$TC12_C_ID" ]; then
+    echo "  Session C registered: $TC12_C_ID"
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+  echo "  Waiting for session C registration... ${ELAPSED}s / ${TIMEOUT}s"
+done
+
+if [ -z "$TC12_C_ID" ]; then
+  fail "TC12: session C failed to register within ${TIMEOUT}s"
+  exit 1
 fi
 
-# Bind route for e2e-at-c
+curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$TC12_C_ID&name=e2e-at-c" > /dev/null 2>&1 || true
+echo "  Session C named: e2e-at-c (id=$TC12_C_ID)"
+
 curl -s -X POST "http://127.0.0.1:${TEST_PORT}/route/bind" \
   -H 'Content-Type: application/json' \
   -d "{\"name\":\"e2e-at-c\",\"chat_id\":${DEFAULT_CHAT_ID}}" > /dev/null 2>&1 || true
 sleep 1
 echo "  Session C registered and route bound: e2e-at-c → $DEFAULT_CHAT_ID"
+cc_prime_target "$AT_C_PANE"
 
 LOG_BEFORE_TC12=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
-# Step 1: Open A → B
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-b "e2e_multi_ch1" \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 2
+# Step 1: Open A → B (A's CC runs the command itself)
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-b \"e2e_multi_ch1\" $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
-# Step 2: Open A → C
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at e2e-cli e2e-at-c "e2e_multi_ch2" \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 2
+# Step 2: Open A → C (A's CC runs the command itself)
+cc_run_at "$E2E_PANE" "$AT_CLI session at e2e-cli e2e-at-c \"e2e_multi_ch2\" $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_C_PANE" || true
 
 AFTER_LOG_TC12_STEP2=$(tail -n +"$((LOG_BEFORE_TC12 + 1))" "$LOG_FILE")
 
@@ -1414,41 +1538,81 @@ else
   fail "TC12-6: stop marker content missing in Stop forward"
 fi
 
-# Step 4: Close A → B only
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-cli e2e-at-b \
-  --port "$TEST_PORT" 2>&1 || true
-sleep 1
+check_inject_errors "$LOG_BEFORE_TC12" "TC12-open"
+
+# Step 4: Send existing message to B only (not broadcast to C)
+LOG_BEFORE_TC12_EXIST=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+curl -s -X POST "http://127.0.0.1:${TEST_PORT}/at/open" \
+  -H 'Content-Type: application/json' \
+  -d '{"initiator":"e2e-cli","target":"e2e-at-b","message":"e2e_multi_existing"}' > /dev/null 2>&1
+sleep 3
+
+AFTER_LOG_TC12_EXIST=$(tail -n +"$((LOG_BEFORE_TC12_EXIST + 1))" "$LOG_FILE")
+
+# TC12-7: B received direct existing message (isNew=false log for e2e-at-b with marker)
+set +eo pipefail
+echo "$AFTER_LOG_TC12_EXIST" | grep "@ channel opened.*e2e-at-b.*isNew=false.*e2e_multi_existing" | grep -q "."
+_rc=$?
+set -eo pipefail
+if [ "$_rc" -eq 0 ]; then
+  pass "TC12-7: B received direct existing message (@ channel opened isNew=false e2e_multi_existing)"
+else
+  fail "TC12-7: B did not receive direct existing message"
+fi
+
+# TC12-8: C did NOT receive direct existing message (no isNew=false open to C with marker)
+# Note: @ forward lines containing e2e_multi_existing are legitimate (CC Stop output referencing marker)
+set +eo pipefail
+echo "$AFTER_LOG_TC12_EXIST" | grep "@ channel opened.*e2e-at-c.*isNew=false.*e2e_multi_existing" | grep -q "."
+_rc=$?
+set -eo pipefail
+if [ "$_rc" -ne 0 ]; then
+  pass "TC12-8: C did not receive direct existing message (correct — not broadcast)"
+else
+  fail "TC12-8: C incorrectly received direct existing message"
+fi
+
+check_inject_errors "$LOG_BEFORE_TC12_EXIST" "TC12-existing"
+
+# Step 5: Close A → B only (A's CC runs the close itself)
+cc_run_at "$E2E_PANE" "$AT_CLI session at end e2e-cli e2e-at-b $AT_PORT_FLAG"
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
+wait_for_idle $AT_TIMEOUT "$AT_PANE" || true
 
 AT_LIST_TC12_AFTER=$(curl -s "http://127.0.0.1:${TEST_PORT}/at/list" 2>/dev/null || echo "{}")
 echo "  DEBUG: TC12 AT_LIST after close B: $AT_LIST_TC12_AFTER"
 
-# TC12-7: C still in /at/list
+# TC12-9: C still in /at/list
 set +eo pipefail
 echo "$AT_LIST_TC12_AFTER" | grep -q "e2e-at-c"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-7 PIPESTATUS=${_ps[*]}"
+echo "  DEBUG: TC12-9 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
-  pass "TC12-7: e2e-at-c still in /at/list after closing B"
+  pass "TC12-9: e2e-at-c still in /at/list after closing B"
 else
-  fail "TC12-7: e2e-at-c missing from /at/list after closing B"
+  fail "TC12-9: e2e-at-c missing from /at/list after closing B"
 fi
 
-# TC12-8: B no longer in /at/list
+# TC12-10: B no longer in /at/list
 set +eo pipefail
 echo "$AT_LIST_TC12_AFTER" | grep -q "e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-8 PIPESTATUS=${_ps[*]}"
+echo "  DEBUG: TC12-10 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -ne 0 ]; then
-  pass "TC12-8: e2e-at-b removed from /at/list (channel closed)"
+  pass "TC12-10: e2e-at-b removed from /at/list (channel closed)"
 else
-  fail "TC12-8: e2e-at-b still in /at/list after closing (not removed)"
+  fail "TC12-10: e2e-at-b still in /at/list after closing (not removed)"
 fi
 
-# Cleanup: close remaining A → C channel and unbind C route
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session at end e2e-cli e2e-at-c \
-  --port "$TEST_PORT" 2>&1 || true
+# Cleanup: close remaining A → C channel (A runs it; E2E_PANE still valid), THEN stop C session.
+# Closing before stop_claude avoids stop_claude clearing E2E_PANE out from under cc_run_at.
+cc_run_at "$E2E_PANE" "$AT_CLI session at end e2e-cli e2e-at-c $AT_PORT_FLAG"
+if [ -n "$AT_C_SESSION" ]; then
+  stop_claude "$AT_C_SESSION" || true
+  AT_C_SESSION=""
+fi
 curl -s -X POST "http://127.0.0.1:${TEST_PORT}/route/unbind" \
   -H 'Content-Type: application/json' \
   -d '{"name":"e2e-at-c"}' > /dev/null 2>&1 || true

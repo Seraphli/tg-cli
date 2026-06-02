@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 22: Full integration test — session new + mailbox + session exit + tmux auto-kill
+# Phase 23: Full integration test — session new + mailbox + session exit + tmux auto-kill
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/cc_common.sh"
@@ -15,9 +15,27 @@ RECV_PID=""
 RECV_FILE="/tmp/e2e-mailbox-recv-$$.txt"
 
 cleanup_integration() {
+  local rc=$?
   [ -n "$RECV_PID" ] && kill "$RECV_PID" 2>/dev/null || true
-  $TMUX_TEST kill-session -t "=$INTEG_SESSION" 2>/dev/null || true
   rm -f "$RECV_FILE"
+  if [ $rc -eq 0 ]; then
+    if $TMUX_TEST has-session -t "=$INTEG_SESSION" 2>/dev/null; then
+      echo "ERROR: $INTEG_SESSION still exists after normal completion"
+      INTEG_PANE=$($TMUX_TEST list-panes -t "$INTEG_SESSION" -F '#{pane_id}' 2>/dev/null || echo "")
+      if [ -n "$INTEG_PANE" ]; then
+        pane_log "[integ] session residual" "$INTEG_PANE"
+      fi
+      $TMUX_TEST kill-session -t "=$INTEG_SESSION" 2>/dev/null || true
+      exit 1
+    fi
+  else
+    echo "  [integ] abnormal exit rc=$rc, capturing and killing $INTEG_SESSION"
+    INTEG_PANE=$($TMUX_TEST list-panes -t "$INTEG_SESSION" -F '#{pane_id}' 2>/dev/null || echo "")
+    if [ -n "$INTEG_PANE" ]; then
+      pane_log "[integ] abnormal exit" "$INTEG_PANE"
+    fi
+    $TMUX_TEST kill-session -t "=$INTEG_SESSION" 2>/dev/null || true
+  fi
 }
 trap cleanup_integration EXIT
 

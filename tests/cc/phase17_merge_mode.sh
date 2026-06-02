@@ -8,6 +8,9 @@ echo "--- Merge mode test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-17"
+
 # Bind route for merge test
 AGENT_NAME="e2e-cli"
 SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '

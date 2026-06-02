@@ -8,6 +8,9 @@ echo "--- Multi-question multiSelect AskUserQuestion (hook) ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-6"
+
 LOG_BEFORE_MQ=$(wc -l < "$LOG_FILE")
 
 # Send prompt that triggers multi-question AskUserQuestion
@@ -30,8 +33,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   echo "  Waiting for multiQ AskUserQuestion... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-wait_for_idle
-pane_log "[multiselect] AFTER hook notification detected (idle)"
+pane_log "[multiselect] AFTER hook notification detected"
 
 if [ "$MQ_FOUND" = true ]; then
   pass "Multi-question AskUserQuestion notification received"

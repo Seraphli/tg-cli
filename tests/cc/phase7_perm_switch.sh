@@ -8,12 +8,15 @@ echo "--- Permission mode switching test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-7" "--allow-dangerously-skip-permissions"
+
 # E2E_PANE is the tmux pane ID (e.g. %0)
 TARGET="$E2E_PANE"
 ENCODED_TARGET=$(printf '%s' "$TARGET" | jq -sRr @uri)
 
 # Test each mode: switch to it, then verify via /perm/status
-MODES_TO_TEST="plan auto bypass default"
+MODES_TO_TEST="plan acceptEdits auto bypass default"
 
 for MODE in $MODES_TO_TEST; do
     LOG_BEFORE=$(wc -l < "$LOG_FILE")
@@ -51,3 +54,7 @@ for MODE in $MODES_TO_TEST; do
         fail "Perm switch API log not found for $MODE"
     fi
 done
+
+# Restore bypass mode before cleanup so stop_claude /exit works without permission prompts
+curl -s "http://127.0.0.1:$TEST_PORT/perm/switch?target=$ENCODED_TARGET&mode=bypass" > /dev/null 2>&1 || true
+sleep 1

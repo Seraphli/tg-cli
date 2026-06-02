@@ -103,7 +103,7 @@ func executePrintJob(job *stores.CronJob, bs *BotState) {
 	c.Env = env
 	output, err := c.CombinedOutput()
 	if err != nil {
-		logger.Error(fmt.Sprintf("Cron print job failed: id=%s err=%v output=%s", job.ID[:8], err, helpers.TruncateStr(string(output), 500)))
+		logger.Error(fmt.Sprintf("Cron print job failed: id=%s err=%v output=%s", job.ID[:8], err, string(output)))
 		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Error:</b> %s", cronNotifyHeader(job), err.Error()), "")
 		return
 	}

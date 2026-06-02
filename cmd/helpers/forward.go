@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	tele "gopkg.in/telebot.v3"
 )
@@ -32,7 +33,12 @@ func BuildAtMsg(from, to, instructions, content string) string {
 // If the body fits in one chunk (after accounting for header), sends directly with no buttons.
 // If multi-chunk, sends the first page with pagination + collapse button, stores in pages cache.
 func SendPagedForward(bot *tele.Bot, chat *tele.Chat, header, body string, pages *stores.PageCacheStore, sessionID string, opts ...interface{}) error {
-	maxBody := 4000 - len([]rune(header)) - 100
+	cfg, _ := config.LoadAppConfig()
+	paginationMax := 4000
+	if cfg.PaginationMaxRunes > 0 {
+		paginationMax = cfg.PaginationMaxRunes
+	}
+	maxBody := paginationMax - len([]rune(header)) - 100
 	if maxBody < 500 {
 		maxBody = 500
 	}

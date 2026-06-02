@@ -139,7 +139,7 @@ func init() {
 	sessionWatchCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port")
 	sessionPermCmd.Flags().StringVar(&sessionName, "name", "", "Agent name")
 	sessionPermCmd.Flags().BoolVar(&sessionSelf, "self", false, "Auto-detect current session (uses TMUX_PANE)")
-	sessionPermCmd.Flags().StringVar(&sessionPermMode, "mode", "", "Target mode: bypass/auto/plan/default")
+	sessionPermCmd.Flags().StringVar(&sessionPermMode, "mode", "", "Target mode: bypass/auto/acceptEdits/plan/default")
 	sessionPermCmd.Flags().BoolVar(&sessionPermStatus, "status", false, "Show current permission mode")
 	sessionPermCmd.Flags().IntVar(&sessionPort, "port", 0, "Bot HTTP port (default: from config or 12500)")
 	sessionNameCmd.Flags().StringVar(&sessionName, "name", "", "Agent name to query (resolve session by current name)")

@@ -186,8 +186,14 @@ func runHook(cmd *cobra.Command, args []string) {
 		notifyClient.Post(notifyURL, "application/json", bytes.NewReader(enrichedJSON))
 
 		// 4. Poll for status=answered
-		hookLog("polling for answer... (ppid=%d)", os.Getppid())
+		origPPID := os.Getppid()
+		hookLog("polling for answer... (ppid=%d)", origPPID)
 		for {
+			if currentPPID := os.Getppid(); currentPPID != origPPID {
+				hookLog("parent process changed: orig=%d current=%d (CC exited, hook orphaned)", origPPID, currentPPID)
+				os.Remove(pendingPath)
+				hookExit(0, "parent exited")
+			}
 			hookLog("poll tick: ppid=%d", os.Getppid())
 			data, err := os.ReadFile(pendingPath)
 			if err == nil && len(data) > 0 {

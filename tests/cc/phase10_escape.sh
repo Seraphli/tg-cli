@@ -14,6 +14,9 @@ fi
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-10"
+
 TARGET="$E2E_PANE"
 ENCODED_TARGET=$(printf '%s' "$TARGET" | jq -sRr @uri)
 
@@ -48,8 +51,6 @@ if [ "$AQ_FOUND" != true ]; then
 fi
 
 pass "AskUserQuestion triggered for escape test"
-
-wait_for_idle
 
 # 3. Capture pane BEFORE escape — verify AskUserQuestion UI is visible
 BEFORE_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')

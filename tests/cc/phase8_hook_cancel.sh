@@ -8,6 +8,9 @@ echo "--- Hook cancel (TUI answer) test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-8" "--allow-dangerously-skip-permissions"
+
 # Record log position
 LOG_BEFORE_CANCEL=$(wc -l < "$LOG_FILE")
 

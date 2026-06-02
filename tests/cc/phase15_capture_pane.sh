@@ -7,6 +7,10 @@ echo ""
 echo "--- CapturePane test ---"
 
 ensure_infrastructure
+
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-15"
+
 pane_log "[capture_pane] BEFORE test"
 
 # Test CapturePane via HTTP API endpoint

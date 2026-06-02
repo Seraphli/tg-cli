@@ -6,6 +6,10 @@ echo ""
 echo "--- Image injection test ---"
 
 ensure_infrastructure
+
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-19"
+
 pane_log "[image_inject] BEFORE test"
 
 TEST_IMG="/tmp/tg-cli-test-image-$$.jpg"

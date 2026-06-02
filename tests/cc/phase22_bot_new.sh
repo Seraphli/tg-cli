@@ -13,8 +13,57 @@ BOT_PANE=$($TMUX_TEST list-panes -t "$BOT_SESSION" -F '#{pane_id}')
 
 # Cleanup: destroy the tmux session created by /bot_new (on test server)
 cleanup_bot_new() {
-  echo "  [bot_new] cleanup: killing tg-cli tmux session..."
-  $TMUX_TEST kill-session -t "=tg-cli" 2>/dev/null || true
+  local rc=$?
+  if [ $rc -eq 0 ]; then
+    local tg_pane
+    tg_pane=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}@#{socket_path}' 2>/dev/null | head -1 || echo "")
+    if [ -n "$tg_pane" ]; then
+      local pane_id="${tg_pane%%@*}"
+      local wait_elapsed=0
+      local reg_target=""
+      while [ $wait_elapsed -lt 30 ]; do
+        reg_target=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" 2>/dev/null | python3 -c "
+import sys, json
+pane_id = sys.argv[1]
+d = json.load(sys.stdin)
+for s in d.get('sessions', []):
+    t = s.get('target', '')
+    t_id = t.split('@', 1)[0]
+    if t_id == pane_id:
+        print(t)
+        sys.exit(0)
+print('')
+" "$pane_id" 2>/dev/null || echo "")
+        if [ -n "$reg_target" ]; then
+          break
+        fi
+        sleep 2
+        wait_elapsed=$((wait_elapsed + 2))
+      done
+      if [ -z "$reg_target" ]; then
+        echo "ERROR: [bot_new] tg-cli session not registered within 30s"
+        pane_log "[bot_new] session not registered" "$tg_pane"
+        $TMUX_TEST kill-session -t "=tg-cli" 2>/dev/null || true
+        return 1
+      fi
+      if ! wait_for_idle 30 "$reg_target"; then
+        echo "ERROR: [bot_new] tg-cli session not idle within 30s"
+        pane_log "[bot_new] session not idle" "$tg_pane"
+        $TMUX_TEST kill-session -t "=tg-cli" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    if ! stop_claude "tg-cli"; then
+      return 1
+    fi
+  else
+    echo "  [bot_new] abnormal exit rc=$rc, capturing and killing tg-cli session"
+    NEW_PANE=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
+    if [ -n "$NEW_PANE" ]; then
+      pane_log "[bot_new] abnormal exit" "$NEW_PANE"
+    fi
+    $TMUX_TEST kill-session -t "=tg-cli" 2>/dev/null || true
+  fi
 }
 trap cleanup_bot_new EXIT
 

@@ -84,7 +84,7 @@ func GetPaneLabel(tmuxTarget string, formatPaneID func(string) string) string {
 }
 
 // DetectPermMode captures pane content and detects the current CC permission mode.
-// Returns (mode, rawContent, error). Mode is one of: "default", "plan", "auto", "bypass", "question".
+// Returns (mode, rawContent, error). Mode is one of: "default", "plan", "auto", "acceptEdits", "bypass", "question".
 func DetectPermMode(t injector.TmuxTarget) (string, string, error) {
 	content, err := injector.CapturePane(t)
 	if err != nil {
@@ -102,8 +102,10 @@ func DetectPermMode(t injector.TmuxTarget) (string, string, error) {
 		return "bypass", content, nil
 	case strings.Contains(bottom, "plan"):
 		return "plan", content, nil
-	case strings.Contains(bottom, "accept edits"):
+	case strings.Contains(bottom, "auto mode on"):
 		return "auto", content, nil
+	case strings.Contains(bottom, "accept edits"):
+		return "acceptEdits", content, nil
 	case strings.Contains(bottom, "options") || strings.Contains(bottom, "answer"):
 		// CC is showing an AskUserQuestion dialog
 		return "question", content, nil

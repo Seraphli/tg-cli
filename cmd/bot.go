@@ -182,6 +182,8 @@ func runBot(cmd *cobra.Command, args []string) {
 	bs := &BotState{
 		Bot:             bot,
 		Creds:           &creds,
+		Port:            port,
+		ConfigDir:       configDir,
 		Pages:           stores.NewPageCacheStore(),
 		PendingPerms:    stores.NewPendingPermStore(),
 		ToolNotifs:      stores.NewToolNotifyStore(),
@@ -200,6 +202,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		CommandStats:    stores.NewCommandStatsStore(configDir),
 		SessionEvents:   stores.NewSessionEventStore(),
 		AtChannels:      stores.NewAtChannelStore(configDir),
+		CompactTools:    stores.NewCompactToolStore(),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {

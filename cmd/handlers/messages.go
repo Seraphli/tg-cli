@@ -183,7 +183,7 @@ func resolveReplyTarget(bs *types.BotState, replyText string) (injector.TmuxTarg
 	}
 	targetPtr, err := helpers.ExtractTmuxTargetFromText(replyText)
 	if err != nil {
-		logger.Debug(fmt.Sprintf("resolveReplyTarget: ExtractTmuxTargetFromText failed: %v text=%s", err, helpers.TruncateStr(replyText, 100)))
+		logger.Debug(fmt.Sprintf("resolveReplyTarget: ExtractTmuxTargetFromText failed: %v text=%s", err, replyText))
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
 	target := *targetPtr
@@ -495,9 +495,12 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 			}
 			contextStr += fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
 		}
+		initEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, initiator, target)
+		targetReplyCmd := helpers.AtReplyCommand(bs.ConfigDir, bs.Port, target, initiator)
+		targetEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, target, initiator)
 		// Initiator pane: no-content message (just instructions)
-		initiatorInstructions := fmt.Sprintf("`%s`(user) opened a channel to `%s`. `%s` will receive the last %d rounds of your conversation and see your ongoing output until the channel is closed. `%s` can reply to you via this channel. Run `tg-cli session at end %s %s` to close the channel.",
-			displayName, target, target, r, target, initiator, target)
+		initiatorInstructions := fmt.Sprintf("`%s`(user) opened a channel to `%s`. `%s` will receive the last %d rounds of your conversation and see your ongoing output until the channel is closed. `%s` can reply to you via this channel. Run `%s` to close the channel.",
+			displayName, target, target, r, target, initEndCmd)
 		initiatorContent := ""
 		if message != "" {
 			initiatorContent = fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
@@ -505,8 +508,8 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 		initiatorMsg := helpers.BuildAtMsg(initiator, target, initiatorInstructions, initiatorContent)
 		safeInjectText(bs, initiatorInfo.TmuxTarget, initiatorMsg)
 		// Target pane: full context with instructions
-		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `tg-cli session at reply %s %s --text \"your message\"` to reply, or `tg-cli session at end %s %s` to close the channel.",
-			displayName, initiator, r, initiator, initiator, target, initiator, target, initiator)
+		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `%s` to reply, or `%s` to close the channel.",
+			displayName, initiator, r, initiator, initiator, targetReplyCmd, targetEndCmd)
 		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, contextStr)
 		safeInjectText(bs, targetInfo.TmuxTarget, targetMsg)
 		// TG notifications

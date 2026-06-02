@@ -8,6 +8,9 @@ echo "--- Table rendering test (image) ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-11"
+
 wait_for_idle $TIMEOUT
 
 LOG_BEFORE_TABLE=$(wc -l < "$LOG_FILE")

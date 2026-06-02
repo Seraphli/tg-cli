@@ -7,6 +7,9 @@ echo ""
 echo "--- AskUserQuestion test ---"
 
 ensure_infrastructure
+
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-5"
 wait_for_idle
 
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
@@ -37,31 +40,30 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-wait_for_idle
-pane_log "[ask_user] AFTER hook notification (idle)"
+pane_log "[ask_user] AFTER hook notification detected"
 
 if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pass "AskUserQuestion TG notification sent (msg_id=$AQ_MSG_ID)"
 
-  # Verify AskUserQuestion ToolUse notification format (from BuildToolNotifyText AskUserQuestion case)
-  AQ_TOOLUSE_TEXT=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -A20 "TG message sent \[ToolUse\] full_text" | head -20 || true)
-  if [ -n "$AQ_TOOLUSE_TEXT" ]; then
-    if echo "$AQ_TOOLUSE_TEXT" | grep "❓" > /dev/null 2>&1; then
-      pass "AskUserQuestion ToolUse notification has ❓ format"
+  # Verify AskUserQuestion notification format (from pending.go BuildQuestionText path)
+  AQ_QUESTION_TEXT=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -A20 "TG question message sent full_text" | head -20 || true)
+  if [ -n "$AQ_QUESTION_TEXT" ]; then
+    if echo "$AQ_QUESTION_TEXT" | grep "❓" > /dev/null 2>&1; then
+      pass "AskUserQuestion notification has ❓ format"
     else
-      fail "AskUserQuestion ToolUse notification missing ❓ format"
+      fail "AskUserQuestion notification missing ❓ format"
     fi
-    if echo "$AQ_TOOLUSE_TEXT" | grep "map\[" > /dev/null 2>&1; then
-      fail "AskUserQuestion ToolUse notification contains raw Go map[] format"
+    if echo "$AQ_QUESTION_TEXT" | grep "map\[" > /dev/null 2>&1; then
+      fail "AskUserQuestion notification contains raw Go map[] format"
     else
-      pass "AskUserQuestion ToolUse notification does not contain raw map[] format"
+      pass "AskUserQuestion notification does not contain raw map[] format"
     fi
   else
-    fail "AskUserQuestion ToolUse full_text not found in log"
+    fail "AskUserQuestion question message not found in log"
   fi
 
   # Typing continuity: inject → PreToolUse (text generation before AskUserQuestion)
-  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
+  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase5"
 
   # Verify Update notification sent BEFORE AskUserQuestion (tolerant to Claude skipping intermediate text)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
@@ -163,13 +165,13 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Stop notification log missing body content"
     fi
 
-    # Verify PostToolUse result format for AskUserQuestion (→ format instead of raw map)
-    AQ_POST_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "PostToolUse: updated msg_id=" || true)
-    if [ -n "$AQ_POST_LOG" ]; then
-      pass "PostToolUse updated AskUserQuestion ToolUse message"
+    # AskUserQuestion uses pending flow (not ToolUseMsgs), so PostToolUse won't find a stored msg to update.
+    # Verify AskUserQuestion was sent via pending flow instead.
+    AQ_SENT_LOG=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep "AskUserQuestion sent:" || true)
+    if [ -n "$AQ_SENT_LOG" ]; then
+      pass "AskUserQuestion sent via pending flow"
     else
-      # PostToolUse may not fire if AskUserQuestion ToolUse notification was not sent (e.g. not in toolNotifyList)
-      fail "PostToolUse update not detected for AskUserQuestion"
+      fail "AskUserQuestion sent log not found"
     fi
 
     # Extract transcript path from bot log (CC uses snake_case: transcript_path)

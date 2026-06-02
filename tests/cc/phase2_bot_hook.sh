@@ -8,6 +8,9 @@ echo "--- Bot notification test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-2"
+
 # Verify PreToolUse hook registration
 if grep "PreToolUse" "$TEST_SETTINGS" > /dev/null 2>&1; then
   pass "PreToolUse hook registered in settings"
@@ -64,15 +67,6 @@ else
   fail "1st TG notification (no notification within ${TIMEOUT}s)"
 fi
 
-# Extract test session ID for resume test
-set +eo pipefail
-TEST_SID=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -oP 'Session tracked: \K[^ ]+' | head -1)
-set -eo pipefail
-if [ -n "$TEST_SID" ]; then
-  echo "$TEST_SID" > /tmp/tg-cli-e2e-session-id.txt
-  echo "  Test session ID saved: $TEST_SID"
-fi
-
 # Verify hook included tmux target in debug log
 NEW_LOGS=$(tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE")
 if echo "$NEW_LOGS" | grep "Raw hook payload" > /dev/null 2>&1; then
@@ -102,5 +96,5 @@ else
   pass "Context window usage absent (statusline not triggered in short session — OK)"
 fi
 
-# Typing continuity skipped for phase1: "say hello" runs < 3s (shorter than tick interval),
+# Typing continuity skipped for phase2: "say hello" runs < 3s (shorter than tick interval),
 # not enough time for typing loop to fire. Real typing tests are in phase2/3/4.

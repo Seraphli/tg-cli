@@ -94,7 +94,8 @@ Interactive setup for whisper.cpp model download and language configuration.
 | `/bot_unbind` | Unbind a session from current group |
 | `/bot_capture` | Capture current tmux pane content |
 | `/bot_perm_plan` | Switch to plan permission mode |
-| `/bot_perm_auto` | Switch to auto-approve permission mode |
+| `/bot_perm_acceptEdits` | Switch to accept edits permission mode |
+| `/bot_perm_auto` | Switch to CC auto mode (auto-approve all actions) |
 | `/bot_perm_bypass` | Switch to bypass permission mode |
 | `/bot_perm_default` | Switch to default permission mode |
 | `/resume` | List and resume previous Claude Code sessions |
@@ -164,7 +165,8 @@ Multiple Claude Code sessions can run simultaneously. Each session is tracked by
 
 Switch Claude Code's permission mode from Telegram:
 - `/bot_perm_plan` — Requires approval for each action
-- `/bot_perm_auto` — Auto-approve safe actions
+- `/bot_perm_acceptEdits` — Accept edits permission mode
+- `/bot_perm_auto` — CC auto mode (auto-approve all actions)
 - `/bot_perm_bypass` — Skip all permission checks
 - `/bot_perm_default` — Reset to default mode
 

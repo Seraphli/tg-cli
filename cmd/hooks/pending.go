@@ -152,6 +152,8 @@ func ProcessPendingRequest(bs *types.BotState, cb Callbacks, uuid string) {
 		if updateBody := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath, true); updateBody != "" {
 			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 			cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updateBody, "", agentName, topicID)
+			// Reset compact tool message after Update is sent via pending handler path
+			bs.CompactTools.Reset(p.SessionID)
 			logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", uuid, chatIDInt))
 		} else {
 			logger.Info(fmt.Sprintf("PreToolUse Update skipped: uuid=%s reason=no_new_assistant_text", uuid))

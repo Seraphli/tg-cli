@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 18: tmux CLI commands test
+# Phase 3: tmux CLI commands test
 set -euo pipefail
 source "$(dirname "$0")/../e2e_common.sh"
 

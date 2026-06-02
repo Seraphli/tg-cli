@@ -17,13 +17,13 @@ ensure_infrastructure
 # "stopCooldown: waiting ... for target=..." when cooldown is active.
 
 LOG_BEFORE_B=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-pane_log "[phase28-B] BEFORE first inject"
+pane_log "[feature_verify-B] BEFORE first inject"
 
 inject_prompt "Reply with exactly: cooldown_test_ok"
 
 # Wait for CLI to become idle (Stop event recorded)
 wait_for_idle $TIMEOUT
-pane_log "[phase28-B] AFTER first idle"
+pane_log "[feature_verify-B] AFTER first idle"
 
 # Immediately inject a second prompt to trigger stopCooldown check
 LOG_BEFORE_B2=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
@@ -50,7 +50,7 @@ fi
 
 # Wait for second prompt to complete
 wait_for_idle $TIMEOUT
-pane_log "[phase28-B] AFTER second idle"
+pane_log "[feature_verify-B] AFTER second idle"
 
 # =============================================
 # Sub-test C: /session/send API injects text
@@ -73,15 +73,15 @@ if [ -n "$SESSION_ID" ]; then
   echo "  Named session $SESSION_ID as $SESSION_NAME"
 fi
 
-SEND_TOKEN="phase28_send_test_$RANDOM"
+SEND_TOKEN="feature_send_test_$RANDOM"
 LOG_BEFORE_C=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-pane_log "[phase28-C] BEFORE session/send"
+pane_log "[feature_verify-C] BEFORE session/send"
 
 # POST to /session/send API
 SEND_RESP=$(curl -s -w "\n%{http_code}" -X POST \
   "http://127.0.0.1:$TEST_PORT/session/send" \
   -H "Content-Type: application/json" \
-  -d "{\"name\":\"$SESSION_NAME\",\"text\":\"$SEND_TOKEN\",\"from\":\"phase28-test\"}")
+  -d "{\"name\":\"$SESSION_NAME\",\"text\":\"$SEND_TOKEN\",\"from\":\"feature-test\"}")
 echo "  DEBUG: SEND_RESP (${#SEND_RESP} chars): $SEND_RESP"
 SEND_CODE=$(echo "$SEND_RESP" | tail -1)
 
@@ -108,7 +108,7 @@ while [ $ELAPSED -lt 15 ]; do
   ELAPSED=$((ELAPSED + 1))
 done
 
-pane_log "[phase28-C] AFTER session/send"
+pane_log "[feature_verify-C] AFTER session/send"
 
 if [ "$SEND_FOUND" = true ]; then
   pass "session/send: API log recorded with text content"
@@ -117,29 +117,4 @@ else
 fi
 
 wait_for_idle $TIMEOUT
-pane_log "[phase28-C] AFTER CLI idle"
-
-# =============================================
-# Test D: tg-cli usage CLI command (CC-only, skip for Codex)
-# =============================================
-
-if [ "${E2E_BACKEND:-}" != "codex" ]; then
-  echo ""
-  echo "  --- Sub-test D: tg-cli usage CLI command ---"
-
-  USAGE_OUTPUT=$(./tg-cli usage 2>&1) || true
-
-  echo "  DEBUG: USAGE_OUTPUT (${#USAGE_OUTPUT} chars): $USAGE_OUTPUT"
-  set +eo pipefail
-  echo "$USAGE_OUTPUT" | grep -q "CC Usage"
-  _ps=("${PIPESTATUS[@]}")
-  set -eo pipefail
-  echo "  DEBUG: grep 'CC Usage' PIPESTATUS=${_ps[*]}"
-  if [ "${_ps[1]}" -eq 0 ]; then
-    pass "usage CLI: output contains CC Usage header"
-  else
-    fail "usage CLI: output missing CC Usage header - got: $USAGE_OUTPUT"
-  fi
-else
-  echo "  SKIP: usage CLI (Anthropic API, CC-only)"
-fi
+pane_log "[feature_verify-C] AFTER CLI idle"

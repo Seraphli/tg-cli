@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Seraphli/tg-cli/cmd/types"
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
@@ -108,6 +109,24 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			"chunks":    len(entry.Chunks),
 			"header":    entry.Header,
 			"collapsed": entry.Collapsed,
+		})
+	})
+
+	mux.HandleFunc("/test/config/compact", func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := config.LoadAppConfig()
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "error", "error": err.Error()})
+			return
+		}
+		cfg.ToolNotifyCompact = !cfg.ToolNotifyCompact
+		if err := config.SaveAppConfig(cfg); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "error", "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "ok",
+			"compact": cfg.ToolNotifyCompact,
 		})
 	})
 

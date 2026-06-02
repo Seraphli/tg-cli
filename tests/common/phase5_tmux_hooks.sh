@@ -77,7 +77,7 @@ fi
 LOG_BEFORE_CREATE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
 # Create a new tmux session on the test server
-$TMUX_TEST new-session -d -s "$HOOK_TEST_SESSION" -x 200 -y 50
+$TMUX_TEST new-session -d -s "$HOOK_TEST_SESSION"
 
 # Wait for hook to fire and bot to process
 ELAPSED=0

@@ -8,6 +8,9 @@ echo "--- PermissionRequest test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-4" "--allow-dangerously-skip-permissions"
+
 # Record log position
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
 TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
@@ -26,7 +29,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   if [ "$LOG_NOW" -gt "$LOG_BEFORE_PERM" ]; then
     if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Permission request sent" > /dev/null 2>&1; then
       PERM_FOUND=true
-      PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -oPm1 'msg_id=\K[0-9]+' || true)
+      PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -m1 "Permission request sent" | grep -oP 'msg_id=\K[0-9]+' || true)
       break
     fi
   fi
@@ -34,14 +37,13 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
   ELAPSED=$((ELAPSED + 2))
 done
 
-wait_for_idle
-pane_log "[permission] AFTER permission detected (idle)"
+pane_log "[permission] AFTER permission detected"
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
 
   # Typing continuity: inject → PreToolUse (text generation before tool call)
-  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase3"
+  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
 
   # Verify Update notification sent BEFORE PermissionRequest (tolerant to Claude skipping intermediate text)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")

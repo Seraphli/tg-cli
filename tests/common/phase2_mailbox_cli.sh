@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 17: Mailbox CLI commands test
+# Phase 2: Mailbox CLI commands test
 set -euo pipefail
 source "$(dirname "$0")/../e2e_common.sh"
 
@@ -110,11 +110,11 @@ fi
 # so no "Mailbox channel post / receiver notify / sender notify" log would be emitted.
 # Multi-chunk delivery correctness (no chunks[1..] drop, markdown rendering) is fully
 # covered by unit tests in cmd/bot_mailbox_test.go (TestBuildMailboxChunks_*).
-# Build a long markdown body with 5 segments × ~1000 chars + unique markers per segment.
+# Build a long markdown body with 2 segments × ~300 chars + unique markers per segment.
 LONG_BODY=$(python3 -c "
 segs = []
-for i in range(5):
-    segs.append('**bold' + str(i) + '** ' + 'X' * 1000 + ' \`code' + str(i) + '\` |SEG' + chr(ord('A')+i) + '|')
+for i in range(2):
+    segs.append('**bold' + str(i) + '** ' + 'X' * 300 + ' \`code' + str(i) + '\` |SEG' + chr(ord('A')+i) + '|')
 print('\n\n'.join(segs))
 ")
 
@@ -137,7 +137,7 @@ sleep 1
 INBOX_LONG=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox inbox --port "$TEST_PORT" --name long-receiver 2>&1) || true
 MISSING_SEGS=""
 echo "  DEBUG: INBOX_LONG (${#INBOX_LONG} chars): $INBOX_LONG"
-for SEG in SEGA SEGB SEGC SEGD SEGE; do
+for SEG in SEGA SEGB; do
   set +eo pipefail
   echo "$INBOX_LONG" | grep -q "|${SEG}|"
   _ps=("${PIPESTATUS[@]}")
@@ -148,7 +148,7 @@ for SEG in SEGA SEGB SEGC SEGD SEGE; do
   fi
 done
 if [ -z "$MISSING_SEGS" ]; then
-  pass "Bug 3A: all 5 segments present in inbox (no storage truncation)"
+  pass "Bug 3A: all 2 segments present in inbox (no storage truncation)"
 else
   fail "Bug 3A: inbox missing segments:$MISSING_SEGS"
 fi

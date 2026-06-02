@@ -61,7 +61,7 @@ func buildToolsMenu(selected []string) *tele.ReplyMarkup {
 			label = "✅ " + tool
 		}
 		pending = append(pending, menu.Data(label, "tools_toggle", tool))
-		if len(pending) == 2 {
+		if len(pending) == 3 {
 			rows = append(rows, menu.Row(pending...))
 			pending = nil
 		}

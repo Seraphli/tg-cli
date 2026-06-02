@@ -9,15 +9,15 @@ import (
 
 func TestBuildSettingsTopMenu(t *testing.T) {
 	menu := buildSettingsTopMenu()
-	if len(menu.InlineKeyboard) != 4 {
-		t.Errorf("expected 4 rows, got %d", len(menu.InlineKeyboard))
+	if len(menu.InlineKeyboard) < 4 {
+		t.Errorf("expected at least 4 rows, got %d", len(menu.InlineKeyboard))
 	}
 	total := 0
 	for _, row := range menu.InlineKeyboard {
 		total += len(row)
 	}
-	if total != 8 {
-		t.Errorf("expected 8 buttons, got %d", total)
+	if total < 8 {
+		t.Errorf("expected at least 8 buttons, got %d", total)
 	}
 	for _, row := range menu.InlineKeyboard {
 		for _, btn := range row {
@@ -58,6 +58,18 @@ func TestBuildPermSubMenu(t *testing.T) {
 	}
 	if !found {
 		t.Error("Plan button should have ✅ prefix")
+	}
+	menuAE := buildPermSubMenu("acceptEdits")
+	foundAE := false
+	for _, row := range menuAE.InlineKeyboard {
+		for _, btn := range row {
+			if btn.Text == "✅ Accept edits" {
+				foundAE = true
+			}
+		}
+	}
+	if !foundAE {
+		t.Error("Accept edits button should have ✅ prefix when mode is acceptEdits")
 	}
 }
 

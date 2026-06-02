@@ -211,6 +211,17 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 	return nil
 }
 
+// truncateQueueTexts joins queued texts and truncates to maxRunes if needed.
+// Appends a truncation marker showing item count when truncated.
+func truncateQueueTexts(texts []string, maxRunes int) string {
+	joined := strings.Join(texts, "\n")
+	r := []rune(joined)
+	if len(r) <= maxRunes {
+		return joined
+	}
+	return string(r[:maxRunes]) + fmt.Sprintf("\n… (%d items, truncated)", len(texts))
+}
+
 // safeInjectPhase1 handles state check + inject/answer/queue.
 // Returns injectResult; confirmation wait and CapturePane are deferred to safeInjectPhase2.
 func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, submit ...bool) injectResult {
@@ -244,7 +255,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if chat != nil {
 			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
 			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
+			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), truncateQueueTexts(allTexts, 3500))
 			var sendOpts []interface{}
 			if topicID > 0 {
 				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
@@ -316,7 +327,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if chat != nil {
 			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
 			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), strings.Join(allTexts, "\n"))
+			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), truncateQueueTexts(allTexts, 3500))
 			var sendOpts []interface{}
 			if topicID > 0 {
 				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})

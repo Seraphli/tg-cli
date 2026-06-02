@@ -36,6 +36,41 @@ var cronSkillDoc []byte
 //go:embed commands/tg-cli/agent.md
 var agentSkillDoc []byte
 
+func applyClaudeSettingsMigrations(settings map[string]interface{}) bool {
+	changed := false
+	if v, ok := settings["skipAutoPermissionPrompt"]; !ok || v != true {
+		settings["skipAutoPermissionPrompt"] = true
+		changed = true
+	}
+	return changed
+}
+
+func MigrateClaudeSettings(settingsPath string) error {
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return fmt.Errorf("create settings dir: %w", err)
+	}
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("invalid JSON in %s: %w", settingsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read settings %s: %w", settingsPath, err)
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+	if !applyClaudeSettingsMigrations(settings) {
+		return nil
+	}
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath, out, 0644)
+}
+
 var SetupCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install hooks and skill docs",
@@ -240,6 +275,9 @@ func runSetup(cmd *cobra.Command, args []string) {
 			}
 			// If already contains tg-cli statusline: skip (idempotent)
 		}
+	}
+	if !setupUninstallFlag {
+		applyClaudeSettingsMigrations(settings)
 	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {

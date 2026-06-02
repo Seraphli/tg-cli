@@ -11,11 +11,15 @@ ensure_credentials
 
 # Parse args
 PHASE_NUM=""
+PHASE_START=""
+PHASE_END=""
 SESSION_PREFIX=""
 BACKEND="all"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --phase) PHASE_NUM="$2"; shift 2;;
+    --start) PHASE_START="$2"; shift 2;;
+    --end) PHASE_END="$2"; shift 2;;
     --session) SESSION_PREFIX="$2"; shift 2;;
     --backend) BACKEND="$2"; shift 2;;
     *) shift;;
@@ -53,6 +57,26 @@ run_phase() {
   if [ $rc -ne 0 ]; then
     pane_log "[$(basename "$script")] CRASH capture"
     fail "Phase $(basename "$script") crashed with exit code $rc"
+  else
+    # Post-phase sanity checks
+    local stale_sessions
+    stale_sessions=$($TMUX_TEST list-sessions -F '#{session_name}' 2>/dev/null | grep -v "^${BOT_SESSION}$" || true)
+    if [ -n "$stale_sessions" ]; then
+      echo "  WARN: stale tmux sessions after $(basename "$script"): $stale_sessions"
+      for s in $stale_sessions; do
+        pane_log "[post-phase] stale session $s"
+        $TMUX_TEST kill-session -t "=$s" 2>/dev/null || true
+      done
+      fail "Phase $(basename "$script") left stale tmux sessions: $stale_sessions"
+    fi
+    local queue_status
+    queue_status=$(curl -s "http://127.0.0.1:$TEST_PORT/inject/queue-status" 2>/dev/null || echo '{"queues":{}}')
+    local pending_count
+    pending_count=$(echo "$queue_status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(d.get('queues',{}).values()))" 2>/dev/null || echo "0")
+    if [ "$pending_count" -gt 0 ]; then
+      echo "  WARN: inject queue not empty after $(basename "$script"): $queue_status"
+      fail "Phase $(basename "$script") left $pending_count items in inject queue"
+    fi
   fi
 }
 
@@ -111,11 +135,28 @@ if [ -n "$PHASE_NUM" ]; then
   setup_hooks
   if [ "$BACKEND" = "codex" ]; then
     start_codex
-  else
-    start_claude
   fi
   trap cleanup_sessions EXIT
   run_phase "$MATCHED"
+elif [ -n "$PHASE_START" ]; then
+  # Range: --start N [--end M]
+  echo "Building binary..."
+  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  start_bot
+  export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  setup_hooks
+  if [ "$BACKEND" = "codex" ]; then
+    start_codex
+  fi
+  trap cleanup_sessions EXIT
+  ALL_PHASES=( $(build_phase_list) )
+  for phase in "${ALL_PHASES[@]}"; do
+    num=$(basename "$phase" | grep -oP 'phase\K[0-9]+')
+    [ -z "$num" ] && continue
+    [ "$num" -lt "$PHASE_START" ] && continue
+    [ -n "$PHASE_END" ] && [ "$num" -gt "$PHASE_END" ] && continue
+    run_phase "$phase"
+  done
 else
   # Run all phases for selected backend
   echo "Building binary..."
@@ -132,15 +173,12 @@ else
 
   if [ "$BACKEND" = "all" ]; then
     # Run CC phases
-    start_claude
     for phase in $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done
     # Switch: kill CC session, start Codex
     echo ""
     echo "=== Switching backend: CC -> Codex ==="
-    $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
-    sleep 2
     export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
     start_codex
     for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
@@ -152,7 +190,6 @@ else
       [ -f "$phase" ] && run_phase "$phase"
     done
   else
-    start_claude
     for phase in $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done
@@ -164,9 +201,17 @@ echo ""
 echo "=== E2E Test Report ==="
 TOTAL_PASS=$(grep "^PASS|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
 TOTAL_FAIL=$(grep "^FAIL|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
-echo "  Passed: $TOTAL_PASS"
-echo "  Failed: $TOTAL_FAIL"
+TOTAL_OPT_PASS=$(grep "^OPT_PASS|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
+TOTAL_WARN=$(grep "^WARN|" "$E2E_RESULTS_FILE" 2>/dev/null | wc -l || true)
+echo "  Required: $TOTAL_PASS PASS / $TOTAL_FAIL FAIL"
+echo "  Optional: $TOTAL_OPT_PASS PASS / $TOTAL_WARN WARN"
 echo ""
+if [ "$TOTAL_OPT_PASS" -gt 0 ] || [ "$TOTAL_WARN" -gt 0 ]; then
+  echo "Optional tests:"
+  grep "^OPT_PASS|" "$E2E_RESULTS_FILE" | sed 's/^OPT_PASS|/  ✓ /' || true
+  grep "^WARN|" "$E2E_RESULTS_FILE" | sed 's/^WARN|/  ⚠ /' || true
+  echo ""
+fi
 if [ "$TOTAL_FAIL" -gt 0 ]; then
   echo "Failed tests:"
   grep "^FAIL|" "$E2E_RESULTS_FILE" | sed 's/^FAIL|/  - /' || true

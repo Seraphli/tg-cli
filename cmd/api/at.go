@@ -81,9 +81,12 @@ func registerAt(mux *http.ServeMux, bs *types.BotState) {
 				}
 			}
 
+			initEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, req.Initiator, req.Target)
+			targetReplyCmd := helpers.AtReplyCommand(bs.ConfigDir, bs.Port, req.Target, req.Initiator)
+			targetEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, req.Target, req.Initiator)
 			// Build initiator message (no-content variant: header + instructions only)
-			initiatorInstructions := fmt.Sprintf("`%s` opened a channel to `%s`. `%s` will receive the last %d rounds of your conversation and see your ongoing output until the channel is closed. `%s` can reply to you via this channel. Run `tg-cli session at end %s %s` to close the channel.",
-				req.Initiator, req.Target, req.Target, rounds, req.Target, req.Initiator, req.Target)
+			initiatorInstructions := fmt.Sprintf("`%s` opened a channel to `%s`. `%s` will receive the last %d rounds of your conversation and see your ongoing output until the channel is closed. `%s` can reply to you via this channel. Run `%s` to close the channel.",
+				req.Initiator, req.Target, req.Target, rounds, req.Target, initEndCmd)
 			initiatorContent := ""
 			if req.Message != "" {
 				initiatorContent = fmt.Sprintf("[%s → %s]: %s", req.Initiator, req.Target, req.Message)
@@ -91,8 +94,8 @@ func registerAt(mux *http.ServeMux, bs *types.BotState) {
 			initiatorMsg := helpers.BuildAtMsg(req.Initiator, req.Target, initiatorInstructions, initiatorContent)
 
 			// Build target instructions
-			targetInstructions := fmt.Sprintf("`%s` opened a channel to you via @ channel. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `tg-cli session at reply %s %s --text \"your message\"` to reply, or `tg-cli session at end %s %s` to close the channel.",
-				req.Initiator, rounds, req.Initiator, req.Initiator, req.Target, req.Initiator, req.Target, req.Initiator)
+			targetInstructions := fmt.Sprintf("`%s` opened a channel to you via @ channel. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `%s` to reply, or `%s` to close the channel.",
+				req.Initiator, rounds, req.Initiator, req.Initiator, targetReplyCmd, targetEndCmd)
 			// Build target message (full variant: header + instructions + content)
 			targetMsg := helpers.BuildAtMsg(req.Initiator, req.Target, targetInstructions, contextStr)
 
