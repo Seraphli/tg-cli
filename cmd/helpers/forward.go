@@ -44,11 +44,11 @@ func SendPagedForward(bot *tele.Bot, chat *tele.Chat, header, body string, pages
 	}
 	chunks := SplitBody(body, maxBody)
 	collapseMk := &tele.ReplyMarkup{}
-	collapseBtn := collapseMk.Data("📗 收起", "ce", "c")
+	collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
 	if len(chunks) <= 1 {
 		text := header + body
 		kb := &tele.ReplyMarkup{}
-		btn := kb.Data("📗 收起", "ce", "c")
+		btn := kb.Data("📗 Collapse", "ce", "c")
 		kb.Inline(tele.Row{btn})
 		sendOpts := append([]interface{}{kb}, opts...)
 		sent, err := RetrySend(bot, chat, text, sendOpts...)

@@ -57,6 +57,30 @@ func ParseMergeItems(text string) []string {
 	return items
 }
 
+// CollapseEntry collapses a collapsible PageEntry; returns the text to display (header first line).
+func CollapseEntry(entry *stores.PageEntry) string {
+	entry.Collapsed = true
+	return strings.SplitN(entry.Header, "\n", 2)[0]
+}
+
+// ExpandEntry expands a collapsible PageEntry to its last-viewed page (CurrentPage, bounds-checked);
+// returns the text to display and the page number used.
+func ExpandEntry(entry *stores.PageEntry) (string, int) {
+	entry.Collapsed = false
+	page := entry.CurrentPage
+	if page < 1 || page > len(entry.Chunks) {
+		page = 1
+	}
+	return entry.Header + entry.Chunks[page-1], page
+}
+
+// NavigateEntry records page navigation on a collapsible PageEntry (sets CurrentPage)
+// and returns the text to display for that page. Caller must validate pageNum range first.
+func NavigateEntry(entry *stores.PageEntry, pageNum int) string {
+	entry.CurrentPage = pageNum
+	return entry.Header + entry.Chunks[pageNum-1]
+}
+
 // RegisterCallbackHandlers registers all Telegram inline button callback handlers.
 func RegisterCallbackHandlers(bs *types.BotState) {
 	bot := bs.Bot
@@ -76,10 +100,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		var text string
 		var kb *tele.ReplyMarkup
 		if entry.Header != "" {
-			// @ forward message: show header + chunk with collapse button
-			text = entry.Header + entry.Chunks[pageNum-1]
+			// @ forward message or pane capture: show header + chunk with collapse button
+			text = NavigateEntry(entry, pageNum)
 			collapseMk := &tele.ReplyMarkup{}
-			collapseBtn := collapseMk.Data("📗 收起", "ce", "c")
+			collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
 			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), []tele.Row{{collapseBtn}})
 		} else if entry.PermRows != nil {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
@@ -107,7 +131,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		return c.Respond()
 	})
 
-	// "ce" callback: collapse/expand @ forward messages
+	// "ce" callback: collapse/expand collapsible messages (@ forward, pane capture, etc.)
 	bot.Handle(&tele.Btn{Unique: "ce"}, func(c tele.Context) error {
 		entry, ok := bs.Pages.Get(c.Message().ID)
 		logger.Info(fmt.Sprintf("ce callback: data=%s msgID=%d hasEntry=%v", c.Data(), c.Message().ID, entry != nil))
@@ -118,18 +142,17 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		var kb *tele.ReplyMarkup
 		if c.Data() == "c" {
 			// Collapse: show only the first line of the header (the link line)
-			entry.Collapsed = true
-			text = strings.SplitN(entry.Header, "\n", 2)[0]
+			text = CollapseEntry(entry)
 			kb = &tele.ReplyMarkup{}
-			expandBtn := kb.Data("📖 展开", "ce", "e")
+			expandBtn := kb.Data("📖 Expand", "ce", "e")
 			kb.Inline(tele.Row{expandBtn})
 		} else {
-			entry.Collapsed = false
-			text = entry.Header + entry.Chunks[0]
+			var page int
+			text, page = ExpandEntry(entry)
 			collapseMk := &tele.ReplyMarkup{}
-			collapseBtn := collapseMk.Data("📗 收起", "ce", "c")
+			collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
 			if len(entry.Chunks) > 1 {
-				kb = helpers.BuildPageKeyboardWithExtra(1, len(entry.Chunks), []tele.Row{{collapseBtn}})
+				kb = helpers.BuildPageKeyboardWithExtra(page, len(entry.Chunks), []tele.Row{{collapseBtn}})
 			} else {
 				kb = &tele.ReplyMarkup{}
 				kb.Inline(tele.Row{collapseBtn})

@@ -62,8 +62,9 @@ type PageEntry struct {
 	ContextUsedPct    int // -1 means no data
 	ContextUsedTokens int
 	ContextWindowSize int
-	Header            string // non-empty = @ forward message; stores the header prefix
-	Collapsed         bool   // current collapse state
+	Header      string // non-empty = collapsible message; stores the header prefix (@ forward, pane capture, etc.)
+	Collapsed   bool   // current collapse state
+	CurrentPage int    // last viewed page (1-based); used to restore on expand
 }
 
 // PageCacheStore stores paginated message entries indexed by Telegram message ID.

@@ -3,12 +3,16 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/Seraphli/tg-cli/cmd/handlers"
+	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
@@ -35,14 +39,9 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			}
 			var text string
 			if data == "c" {
-				entry.Collapsed = true
-				text = strings.SplitN(entry.Header, "\n", 2)[0]
+				text = handlers.CollapseEntry(entry)
 			} else {
-				entry.Collapsed = false
-				text = entry.Header + entry.Chunks[0]
-				if len(entry.Chunks) > 1 {
-					// Multi-page: would show pagination buttons too
-				}
+				text, _ = handlers.ExpandEntry(entry)
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":    "ok",
@@ -68,7 +67,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				})
 				return
 			}
-			text := entry.Header + entry.Chunks[pageNum-1]
+			text := handlers.NavigateEntry(entry, pageNum)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":      "ok",
 				"msg_id":      msgID,
@@ -104,11 +103,102 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"exists":    true,
-			"msg_id":    msgID,
-			"chunks":    len(entry.Chunks),
-			"header":    entry.Header,
-			"collapsed": entry.Collapsed,
+			"exists":       true,
+			"msg_id":       msgID,
+			"chunks":       len(entry.Chunks),
+			"header":       entry.Header,
+			"collapsed":    entry.Collapsed,
+			"current_page": entry.CurrentPage,
+			"raw_mode":     entry.RawMode,
+		})
+	})
+
+	mux.HandleFunc("/test/capture_message", func(w http.ResponseWriter, r *http.Request) {
+		// Accept both GET (with --data-urlencode via curl -G) and POST JSON
+		var target, content string
+		if r.Method == http.MethodPost {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "read body failed", http.StatusBadRequest)
+				return
+			}
+			var req map[string]string
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+			target = req["target"]
+			content = req["content"]
+		} else {
+			target = r.URL.Query().Get("target")
+			content = r.URL.Query().Get("content")
+		}
+		if target == "" {
+			http.Error(w, "target required", http.StatusBadRequest)
+			return
+		}
+		chat, _, _ := helpers.ResolveChat(bs.SessionState, target)
+		if chat == nil {
+			http.Error(w, "target not found", http.StatusNotFound)
+			return
+		}
+		if content == "" {
+			// Capture live pane content
+			t, err := injector.ParseTarget(target)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("invalid target: %v", err), http.StatusBadRequest)
+				return
+			}
+			content, err = injector.CapturePane(t)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("capture failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+		sent, err := handlers.SendCaptureReply(bs.Bot, chat, bs.Pages, content)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("send failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		entry, _ := bs.Pages.Get(sent.ID)
+		// Extract button metadata from the sent message's inline keyboard.
+		// telebot serializes Unique+Data into Data ("\f<unique>|<data>") on send and
+		// clears Unique; parse it back so tests can assert the real unique/data.
+		var buttons []map[string]string
+		if sent.ReplyMarkup != nil {
+			for _, row := range sent.ReplyMarkup.InlineKeyboard {
+				for _, btn := range row {
+					unique := btn.Unique
+					data := btn.Data
+					if unique == "" && strings.HasPrefix(data, "\f") {
+						parts := strings.SplitN(strings.TrimPrefix(data, "\f"), "|", 2)
+						unique = parts[0]
+						if len(parts) > 1 {
+							data = parts[1]
+						} else {
+							data = ""
+						}
+					}
+					buttons = append(buttons, map[string]string{
+						"text":   btn.Text,
+						"unique": unique,
+						"data":   data,
+					})
+				}
+			}
+		}
+		var chunks int
+		var currentPage int
+		if entry != nil {
+			chunks = len(entry.Chunks)
+			currentPage = entry.CurrentPage
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"msg_id":       sent.ID,
+			"chunks":       chunks,
+			"current_page": currentPage,
+			"buttons":      buttons,
 		})
 	})
 
@@ -130,5 +220,5 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		})
 	})
 
-	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry")
+	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message")
 }

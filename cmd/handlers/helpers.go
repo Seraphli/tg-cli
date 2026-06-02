@@ -127,6 +127,47 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 	return c.Reply(fmt.Sprintf("🔐 Switched to %s mode", finalMode))
 }
 
+// SendCaptureReply builds a pane-capture message (header + chunks + collapse button,
+// with pagination when multi-page), sends it, stores the PageEntry, and returns the sent message.
+// Shared by handleCaptureCommand (the /p TG path) and the /test/capture_message endpoint
+// so tests exercise the exact production message-building code.
+// Pagination threshold reads config.PaginationMaxRunes, matching helpers.SendPagedForward.
+func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
+	content = helpers.ShortenSeparators(content)
+	header := "📺 Pane Capture\n"
+	cfg, _ := config.LoadAppConfig()
+	paginationMax := 4000
+	if cfg.PaginationMaxRunes > 0 {
+		paginationMax = cfg.PaginationMaxRunes
+	}
+	maxBody := paginationMax - len([]rune(header)) - 100
+	if maxBody < 500 {
+		maxBody = 500
+	}
+	chunks := helpers.SplitBody(content, maxBody)
+	if len(chunks) == 1 {
+		kb := &tele.ReplyMarkup{}
+		btn := kb.Data("📗 Collapse", "ce", "c")
+		kb.Inline(tele.Row{btn})
+		sent, err := helpers.RetrySend(bot, chat, header+chunks[0], kb)
+		if err != nil {
+			return nil, err
+		}
+		pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, RawMode: true, CurrentPage: 1})
+		return sent, nil
+	}
+	lastPage := len(chunks)
+	collapseMk := &tele.ReplyMarkup{}
+	collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
+	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{{collapseBtn}})
+	sent, err := helpers.RetrySend(bot, chat, header+chunks[lastPage-1], kb)
+	if err != nil {
+		return nil, err
+	}
+	pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, RawMode: true, CurrentPage: lastPage})
+	return sent, nil
+}
+
 // handleCaptureCommand handles /bot_capture.
 func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
 	logger.Debug(fmt.Sprintf("handleCaptureCommand: target=%v", target))
@@ -138,27 +179,8 @@ func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.Tm
 	if content == "" {
 		return c.Reply("(empty pane)")
 	}
-	content = helpers.ShortenSeparators(content)
-	const maxRunes = 4000
-	chunks := helpers.SplitBody(content, maxRunes)
-	logger.Debug(fmt.Sprintf("handleCaptureCommand: sending reply (%d chunks)", len(chunks)))
-	if len(chunks) == 1 {
-		_, err := helpers.RetrySend(c.Bot(), c.Chat(), chunks[0])
-		return err
-	}
-	lastPage := len(chunks)
-	kb := helpers.BuildPageKeyboard(lastPage, len(chunks))
-	text := chunks[lastPage-1] + fmt.Sprintf("\n\n📄 %d/%d", lastPage, len(chunks))
-	sent, err := helpers.RetrySend(c.Bot(), c.Chat(), text, kb)
-	if err != nil {
-		return err
-	}
-	bs.Pages.Store(sent.ID, "", &stores.PageEntry{
-		Chunks:   chunks,
-		PermRows: []tele.Row{},
-		RawMode:  true,
-	})
-	return nil
+	_, err = SendCaptureReply(c.Bot(), c.Chat(), bs.Pages, content)
+	return err
 }
 
 // handleEscapeCommand handles /bot_escape.
