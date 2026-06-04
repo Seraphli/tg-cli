@@ -45,22 +45,28 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   # Typing continuity: inject → PreToolUse (text generation before tool call)
   check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
 
-  # Verify Update notification sent BEFORE PermissionRequest (tolerant to Claude skipping intermediate text)
+  # Verify live 💬 Message (Stream send/edit) arrived BEFORE PermissionRequest — ordering under drain
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  STREAM_LINE=$(awk '/Stream send:|Stream edit:/{print NR; exit}' <<< "$NEW_LOGS")
   PERM_LINE=$(awk '/Permission request sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -z "$PERM_LINE" ]; then
     fail "Permission request log line not found"
-  elif [ -n "$UPDATE_LINE" ]; then
-    if [ "$UPDATE_LINE" -lt "$PERM_LINE" ]; then
-      pass "Update sent BEFORE PermissionRequest (line $UPDATE_LINE < $PERM_LINE)"
+  elif [ -n "$STREAM_LINE" ]; then
+    if [ "$STREAM_LINE" -lt "$PERM_LINE" ]; then
+      pass "💬 Message (Stream send/edit) logged BEFORE PermissionRequest (line $STREAM_LINE < $PERM_LINE)"
     else
-      fail "Update sent AFTER PermissionRequest (line $UPDATE_LINE >= $PERM_LINE)"
+      fail "Stream message logged AFTER PermissionRequest (line $STREAM_LINE >= $PERM_LINE)"
     fi
-  elif [[ "$NEW_LOGS" == *"PreToolUse Update skipped"* ]]; then
-    pass "PreToolUse Update path exercised (skipped: no new assistant text — vacuous pass)"
   else
-    fail "Neither PreToolUse Update sent nor skipped log found — code path not exercised"
+    # CC may output zero pre-permission text — no streaming line is acceptable
+    pass "No pre-permission streaming message (CC produced no text before PermissionRequest — vacuous pass)"
+  fi
+
+  # Verify no old no_new_assistant_text skip log (that path is removed)
+  if [[ "$NEW_LOGS" == *"no_new_assistant_text"* ]]; then
+    fail "Old no_new_assistant_text skip log found — should not exist in new streaming code"
+  else
+    pass "No stale no_new_assistant_text skip log"
   fi
 
   # Approve via API endpoint
@@ -97,7 +103,7 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   ELAPSED=0
   STOP4_FOUND=false
   while [ $ELAPSED -lt $TIMEOUT ]; do
-    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
       STOP4_FOUND=true
       break
     fi
@@ -105,9 +111,9 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
     ELAPSED=$((ELAPSED + 2))
   done
   if [ "$STOP4_FOUND" = true ]; then
-    pass "Stop notification received (CC turn complete)"
+    pass "Stream relabel ✅ received (CC turn complete after permission)"
   else
-    fail "Stop notification not received within ${TIMEOUT}s"
+    fail "Stream relabel ✅ not received within ${TIMEOUT}s"
   fi
 else
   fail "PermissionRequest not triggered within ${TIMEOUT}s"

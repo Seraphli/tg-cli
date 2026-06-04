@@ -128,8 +128,7 @@ if [ -n "$PHASE_NUM" ]; then
     echo "ERROR: Phase $PHASE_NUM not found"
     exit 1
   fi
-  echo "Building binary..."
-  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  build_test_binary
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
@@ -140,8 +139,7 @@ if [ -n "$PHASE_NUM" ]; then
   run_phase "$MATCHED"
 elif [ -n "$PHASE_START" ]; then
   # Range: --start N [--end M]
-  echo "Building binary..."
-  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  build_test_binary
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
@@ -159,8 +157,7 @@ elif [ -n "$PHASE_START" ]; then
   done
 else
   # Run all phases for selected backend
-  echo "Building binary..."
-  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  build_test_binary
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks

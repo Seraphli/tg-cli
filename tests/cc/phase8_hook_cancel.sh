@@ -92,24 +92,9 @@ else
   fail "Pending files still exist after cancel: $PENDING_COUNT file(s) in $TEST_PENDING_DIR"
 fi
 
-# Wait for Stop notification to confirm CC completed the turn
-ELAPSED=0
-STOP_FOUND=false
-while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
-    STOP_FOUND=true
-    break
-  fi
-  sleep 2
-  ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
-done
-
-if [ "$STOP_FOUND" = true ]; then
-  pass "Stop notification received (CC turn complete after TUI answer)"
-else
-  fail "Stop notification not received within ${TIMEOUT}s"
-fi
+# Wait for CC turn to complete after TUI answer (use idle polling — no Stop log in new streaming code)
+wait_for_idle
+pass "CC turn complete after TUI answer (idle confirmed)"
 
 # Check TG message label changed to "⌨️ Answered on desktop"
 if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Permission TUI answer.*Answered on desktop" > /dev/null 2>&1; then

@@ -123,6 +123,7 @@ type AppConfig struct {
 	UsageSource         string `json:"usageSource,omitempty"`  // "tmux" (default) or "api"
 	ToolNotifyCompact   bool   `json:"toolNotifyCompact,omitempty"`
 	CompactToolMaxLen   int    `json:"compactToolMaxLen,omitempty"` // compact tool-line character (rune) budget; default 60
+	StreamThrottleMs    int    `json:"streamThrottleMs,omitempty"` // min ms between TG edits of a streaming message; default 1000
 }
 
 // appConfigCache stores the last loaded config for dynamic reload support.

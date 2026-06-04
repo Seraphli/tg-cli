@@ -31,9 +31,14 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			http.Error(w, "bad request", 400)
 			return
 		}
-		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
 		// Strip socket suffix so internal stores use bare pane IDs (e.g. %859 not %859@/tmp/...)
 		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
+		if event == "MessageDisplay" {
+			handleMessageDisplay(bs, cb, p)
+			w.WriteHeader(200)
+			return
+		}
+		logger.Info(fmt.Sprintf("Raw hook payload [%s]: %s", event, string(raw)))
 		// Re-register session on any hook event (survives bot restart)
 		// Exclude SessionStart (handled inside switch after filter) and SessionEnd
 		if event != "SessionEnd" && event != "SessionStart" && p.SessionID != "" && p.TmuxTarget != "" {
@@ -164,6 +169,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				bs.CompactTools.Reset(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
 				CleanPendingFilesBySession(p.SessionID)
+				bs.Streams.EndSession(p.SessionID) // TTL tombstone; straggler deltas after SessionEnd are dropped
 				logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
 				// Signal pending upgrade restart
 				if ch, ok := bs.PendingUpgradeRestart.Load(p.TmuxTarget); ok {
@@ -197,6 +203,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					cb.TypingLog("state: event=UserPromptSubmit target=%s", p.TmuxTarget)
 					bs.InjectConfirm.NotifyUserPromptSubmit(p.TmuxTarget, p.Prompt)
 				}
+				bs.Streams.Rotate(p.SessionID) // clear previous turn's entries for new user turn (keeps ClosedTurns tombstone)
 			case "Stop":
 				if p.TmuxTarget != "" {
 					bs.HookRunning.SetIdle(p.TmuxTarget)
@@ -237,8 +244,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						bs.SessionCounts.Counts[p.SessionID] = len(texts)
 						lock.Unlock()
 					}
-					if body != "" {
-						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+					// Codex uses transcript-based body; CC uses streaming flush
+					if p.Backend == "codex" {
+						if body != "" {
+							cb.SendEventNotification(bs, chat, chatID, p.SessionID, "Stop", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+						}
+					} else {
+						cb.StreamFlush(bs, p.SessionID, true) // drain final batch → finalize last 💬→✅ + table images → close turn
 					}
 					// Forward Stop output to @ channel targets
 					if hookAgentName != "" && body != "" {
@@ -326,25 +338,29 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.TmuxTarget != "" {
 					bs.ReactionTracker.PromotePending(bs.Bot, p.TmuxTarget)
 				}
-				// PreToolUse: send intermediate notification
-				// Skip processTranscriptUpdates for AskUserQuestion — /pending/notify handler will call it
-				// to avoid race condition where both paths compete for sessionCounts
+				// Codex uses transcript-based Update; CC uses streaming boundary flush
 				var body string
-				if chat != nil && p.ToolName != "AskUserQuestion" {
-					body = cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
-					if body != "" {
-						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
-						// Accumulate Update text for @ channel forwarding
-						if hookAgentName != "" {
-							bs.AtChannels.AppendBuffer(hookAgentName, body)
+				if p.Backend == "codex" {
+					if chat != nil && p.ToolName != "AskUserQuestion" {
+						body = cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath)
+						if body != "" {
+							cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+							// Accumulate Update text for @ channel forwarding
+							if hookAgentName != "" {
+								bs.AtChannels.AppendBuffer(hookAgentName, body)
+							}
+						} else {
+							logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 						}
-					} else {
-						logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 					}
-				}
-				// Reset compact tool message cycle when new assistant text arrives (independent of whitelist)
-				if body != "" {
-					bs.CompactTools.Reset(p.SessionID)
+					// Reset compact tool message cycle when new assistant text arrives (independent of whitelist)
+					if body != "" {
+						bs.CompactTools.Reset(p.SessionID)
+					}
+				} else {
+					if p.ToolName != "AskUserQuestion" {
+						cb.StreamFlush(bs, p.SessionID, false)
+					}
 				}
 				// Send tool detail notification if configured
 				toolCfg, _ := config.LoadAppConfig()
@@ -547,4 +563,60 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 		})
 		w.WriteHeader(200)
 	})
+}
+
+// handleMessageDisplay handles the MessageDisplay fast-path: appends delta to the stream store and returns
+// immediately — no Telegram I/O inline. The background worker and boundary flushes handle the I/O.
+func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPayload) {
+	if p.SessionID == "" || p.MessageID == "" {
+		return // final-with-empty-delta IS still recorded
+	}
+	logDelta := func() {
+		logger.Info(fmt.Sprintf("MessageDisplay delta: session=%s message_id=%s turn_id=%s index=%d final=%v delta=%s",
+			p.SessionID, p.MessageID, p.TurnID, p.Index, p.Final, helpers.TruncateStr(p.Delta, 200)))
+	}
+	// Hot path: existing message_id → append without resolving chat (no LoadCredentials per delta)
+	if handled, dropped := bs.Streams.AppendExisting(p.SessionID, p.MessageID, p.TurnID, p.Index, p.Delta, p.Final); handled {
+		if dropped {
+			logger.Info(fmt.Sprintf("MessageDisplay delta dropped: session=%s message_id=%s turn_id=%s index=%d reason=closed_stopped_or_sealed",
+				p.SessionID, p.MessageID, p.TurnID, p.Index))
+		} else {
+			logDelta()
+		}
+		return
+	}
+	// First delta of a new message_id: register session only if unknown (SessionState.Add writes sessions.json —
+	// keep disk I/O off the per-delta path) + resolve chat once.
+	if p.TmuxTarget != "" && bs.SessionState.FindInfoByTarget(p.TmuxTarget) == nil {
+		bs.SessionState.Add(p.SessionID, p.TmuxTarget, p.CWD, p.TranscriptPath)
+	}
+	chat, _, topicID := cb.ResolveChat(bs, p.TmuxTarget)
+	if chat == nil {
+		return
+	}
+	info := bs.SessionState.FindInfoByTarget(p.TmuxTarget)
+	agentName, cwd, backend := "", p.CWD, "cc"
+	if info != nil {
+		agentName = info.Name
+		if info.CWD != "" {
+			cwd = info.CWD
+		}
+		if info.Backend != "" {
+			backend = info.Backend
+		}
+	}
+	if bs.Streams.AppendDelta(p.SessionID, stores.StreamMeta{
+		MessageID:  p.MessageID,
+		TurnID:     p.TurnID,
+		TmuxTarget: p.TmuxTarget,
+		Project:    p.Project,
+		CWD:        cwd,
+		AgentName:  agentName,
+		Backend:    backend,
+		ChatID:     chat.ID,
+		TopicID:    topicID,
+	}, p.Index, p.Delta, p.Final) {
+		bs.CompactTools.Reset(p.SessionID) // new assistant text resets compact-tool cycle
+	}
+	logDelta()
 }

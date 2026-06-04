@@ -25,6 +25,11 @@ type HookPayload struct {
 	ToolUseID            string          `json:"tool_use_id"`
 	ToolResponse         json.RawMessage `json:"tool_response"`
 	Prompt               string          `json:"prompt"`
+	TurnID    string `json:"turn_id"`
+	MessageID string `json:"message_id"`
+	Index     int    `json:"index"`
+	Final     bool   `json:"final"`
+	Delta     string `json:"delta"`
 }
 
 // ParseHookPayload reads and parses the hook payload from an HTTP request body.

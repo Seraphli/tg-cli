@@ -35,6 +35,7 @@ type BotState struct {
 	SessionEvents   *stores.SessionEventStore
 	AtChannels      *stores.AtChannelStore
 	CompactTools    *stores.CompactToolStore
+	Streams         *stores.StreamStore
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map

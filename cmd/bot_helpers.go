@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -96,28 +95,8 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		// Raw mode: send body as-is without HTML conversion or table image rendering
 		parseMode = ""
 	} else if event != "ToolUse" {
-		tableMode := cfg.TableMode
-		if tableMode == "" {
-			tableMode = "image"
-		}
-		if tableMode == "image" {
-			tables := markdown.ExtractTableData(body)
-			if len(tables) > 0 {
-				body = markdown.RemoveTables(body)
-				for _, t := range tables {
-					img, err := markdown.RenderTableImageChromeFormatted(t.Headers, t.Rows, t.HeadersHTML, t.RowsHTML)
-					if err != nil {
-						logger.Info(fmt.Sprintf("Chrome table render failed (falling back to code): %v", err))
-						img, err = markdown.RenderTableImage(t.Headers, t.Rows)
-						if err != nil {
-							logger.Error(fmt.Sprintf("Table image render failed: %v", err))
-							continue
-						}
-					}
-					tableImages = append(tableImages, img)
-				}
-			}
-		}
+		tableImages = renderTableImages(body, cfg.TableMode)
+		logger.Info(fmt.Sprintf("Table render: event=%s tables=%d (text+image)", event, len(tableImages)))
 		body = markdown.RenderTelegramHTML(body)
 	}
 	logger.Debug(fmt.Sprintf("TG message [%s] full_body:\n%s", event, body))
@@ -178,22 +157,8 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
 	}
-	// Send table images as separate Photo messages
-	for i, imgBytes := range tableImages {
-		photo := &tele.Photo{
-			File: tele.FromReader(bytes.NewReader(imgBytes)),
-		}
-		var photoOpts []interface{}
-		if topicID > 0 {
-			photoOpts = append(photoOpts, &tele.SendOptions{ThreadID: topicID})
-		}
-		_, err := helpers.RetrySend(b, chat, photo, photoOpts...)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Failed to send table image %d: %v", i+1, err))
-		} else {
-			logger.Info(fmt.Sprintf("Table image %d sent to chat %s for event %s", i+1, chatID, event))
-		}
-	}
+	// Send table images as separate Photo messages (shared helper also used by streaming finalize)
+	sendTableImages(bs, chat, topicID, tableImages, "event="+event)
 	return sentMsgID
 }
 

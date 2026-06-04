@@ -16,27 +16,50 @@ start_codex() {
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   echo "Waiting for Codex to start..."
   local elapsed=0
-  local dialog_handled=false
+  local trust_handled=false
+  local hooks_handled=false
   while [ $elapsed -lt 60 ]; do
     PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
-    echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
     set +eo pipefail
-    echo "$PANE_CONTENT" | grep -qi "trust\|continue\|Press enter"
-    _ps=("${PIPESTATUS[@]}")
+    echo "$PANE_CONTENT" | grep -qi "Hooks need review"
+    _ps_hooks=("${PIPESTATUS[@]}")
+    echo "$PANE_CONTENT" | grep -qi "Do you trust"
+    _ps_trust=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'trust|continue|Press enter' PIPESTATUS=${_ps[*]}"
-    if [ "$dialog_handled" = false ] && [ "${_ps[1]}" -eq 0 ]; then
+    local title expected_title stage
+    title=$($TMUX_TEST display-message -t "${E2E_PANE%@*}" -p '#{pane_title}' 2>/dev/null || true)
+    expected_title=$(basename "$(pwd)")
+    # Determine which startup stage this snapshot is in (the loop handles 2 dialogs, then waits for idle).
+    if   [ "${_ps_trust[1]}" -eq 0 ]; then stage="trust-dialog (about to confirm 'Do you trust')"
+    elif [ "${_ps_hooks[1]}" -eq 0 ]; then stage="hooks-dialog (about to select 'Trust all and continue')"
+    elif [ "$title" = "$expected_title" ]; then stage="idle (codex ready -> will inject warmup)"
+    else stage="wait-idle (booted but title != dir -> idle NOT detected, spinning until 60s timeout)"
+    fi
+    echo "  === PANE: codex startup t=$elapsed stage=[$stage] title='$title'(${#title}c) expected='$expected_title'(${#expected_title}c) ==="
+    echo "$PANE_CONTENT"
+    echo "  === END PANE ==="
+    # "Hooks need review" dialog: cursor defaults to "1. Review hooks"; move Down to
+    # "2. Trust all and continue" then confirm. Checked before the trust dialog because the
+    # hooks dialog text also contains the word "continue".
+    if [ "$hooks_handled" = false ] && [ "${_ps_hooks[1]}" -eq 0 ]; then
+      $TMUX_TEST send-keys -t "$E2E_SESSION" Down
+      sleep 1
       $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
-      dialog_handled=true
-      echo "Codex dialog detected and confirmed at t=$elapsed"
+      hooks_handled=true
+      echo "Codex hooks-review dialog detected, selected 'Trust all and continue' at t=$elapsed"
       sleep 2
       elapsed=$((elapsed + 2))
       continue
     fi
-    local title
-    title=$($TMUX_TEST display-message -t "${E2E_PANE%@*}" -p '#{pane_title}' 2>/dev/null || true)
-    local expected_title
-    expected_title=$(basename "$(pwd)")
+    # "Do you trust the contents of this directory?" dialog: default option is "Yes, continue"; confirm.
+    if [ "$trust_handled" = false ] && [ "${_ps_trust[1]}" -eq 0 ]; then
+      $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
+      trust_handled=true
+      echo "Codex trust dialog detected and confirmed at t=$elapsed"
+      sleep 2
+      elapsed=$((elapsed + 2))
+      continue
+    fi
     if [ "$title" = "$expected_title" ]; then
       echo "Codex idle detected (title: $title)"
       sleep 2

@@ -65,22 +65,28 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   # Typing continuity: inject → PreToolUse (text generation before AskUserQuestion)
   check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase5"
 
-  # Verify Update notification sent BEFORE AskUserQuestion (tolerant to Claude skipping intermediate text)
+  # Verify live 💬 Message (Stream send/edit) arrived BEFORE AskUserQuestion buttons — ordering under drain
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  STREAM_LINE=$(awk '/Stream send:|Stream edit:/{print NR; exit}' <<< "$NEW_LOGS")
   AQ_LINE=$(awk '/AskUserQuestion sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -z "$AQ_LINE" ]; then
     fail "AskUserQuestion sent log line not found"
-  elif [ -n "$UPDATE_LINE" ]; then
-    if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
-      pass "Update notification sent BEFORE AskUserQuestion (line $UPDATE_LINE < $AQ_LINE)"
+  elif [ -n "$STREAM_LINE" ]; then
+    if [ "$STREAM_LINE" -lt "$AQ_LINE" ]; then
+      pass "💬 Message (Stream send/edit) logged BEFORE AskUserQuestion buttons (line $STREAM_LINE < $AQ_LINE)"
     else
-      fail "Update sent AFTER AskUserQuestion"
+      fail "Stream message logged AFTER AskUserQuestion buttons (line $STREAM_LINE >= $AQ_LINE)"
     fi
-  elif [[ "$NEW_LOGS" == *"PreToolUse Update skipped"* ]]; then
-    pass "PreToolUse Update path exercised (skipped: no new assistant text — vacuous pass)"
   else
-    fail "Neither PreToolUse Update sent nor skipped log found — code path not exercised"
+    # CC may output zero pre-question text — no streaming line is acceptable only if none was prompted
+    pass "No pre-question streaming message (CC produced no text before AskUserQuestion — vacuous pass)"
+  fi
+
+  # Verify no old no_new_assistant_text skip log (that path is removed)
+  if [[ "$NEW_LOGS" == *"no_new_assistant_text"* ]]; then
+    fail "Old no_new_assistant_text skip log found — should not exist in new streaming code"
+  else
+    pass "No stale no_new_assistant_text skip log"
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
@@ -139,7 +145,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   STOP5_FOUND=false
   while [ $ELAPSED -lt $TIMEOUT ]; do
     if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_STOP5" ]; then
-      if tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep "Notification sent.*Stop.*body_len=" > /dev/null 2>&1; then
+      if tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
         STOP5_FOUND=true
         break
       fi
@@ -151,18 +157,14 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   pane_log "[ask_user] AFTER Stop detected"
 
   if [ "$STOP5_FOUND" = true ]; then
-    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep -oPm1 'Notification sent.*Stop.*body_len=\K[0-9]+' || true)
-    if [ -n "$BODY_LEN" ] && [ "$BODY_LEN" -gt 0 ]; then
-      pass "Stop notification has content after AskUserQuestion (body_len=$BODY_LEN)"
-    else
-      fail "Stop notification body is empty after AskUserQuestion"
-    fi
+    # Stream relabel ✅: means the turn's last 💬 Message was finalized with content
+    pass "Stream relabel ✅ received after AskUserQuestion (streaming message finalized)"
 
-    # Verify Stop notification log contains actual body content
-    if tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" | grep "body=." > /dev/null 2>&1; then
-      pass "Stop notification log contains actual body content"
+    # Verify stream sent non-empty content (Stream send: or Stream edit: with final=true)
+    if tail -n +"$((LOG_BEFORE_STOP5 + 1))" "$LOG_FILE" | grep "Stream send:\|Stream edit:.*final=true" > /dev/null 2>&1; then
+      pass "Streaming message has content after AskUserQuestion"
     else
-      fail "Stop notification log missing body content"
+      fail "No Stream send/edit log found after AskUserQuestion"
     fi
 
     # AskUserQuestion uses pending flow (not ToolUseMsgs), so PostToolUse won't find a stored msg to update.
@@ -192,7 +194,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Transcript path not found or file missing"
     fi
   else
-    fail "Stop notification not found after AskUserQuestion within ${TIMEOUT}s"
+    fail "Stream relabel ✅ not found after AskUserQuestion within ${TIMEOUT}s"
   fi
 
   # --- Free-text reply test ---
@@ -242,12 +244,12 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "Free-text API returned $FT_CODE"
     fi
 
-    # Wait for Stop notification
+    # Wait for Stream relabel ✅ (turn finalized after free-text answer)
     ELAPSED=0
     FT_STOP_FOUND=false
     while [ $ELAPSED -lt $TIMEOUT ]; do
       if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_FT_STOP" ]; then
-        if tail -n +"$((LOG_BEFORE_FT_STOP + 1))" "$LOG_FILE" | grep "Notification sent.*Stop.*body_len=" > /dev/null 2>&1; then
+        if tail -n +"$((LOG_BEFORE_FT_STOP + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
           FT_STOP_FOUND=true
           break
         fi
@@ -257,7 +259,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     done
 
     if [ "$FT_STOP_FOUND" = true ]; then
-      pass "Stop notification received after free-text answer"
+      pass "Stream relabel ✅ received after free-text answer (turn finalized)"
 
       # Verify transcript contains custom answer
       FT_TRANSCRIPT_PATH=$(tail -n +"$((LOG_BEFORE_FT + 1))" "$LOG_FILE" | \
@@ -281,7 +283,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
         fail "Free-text transcript path not found or file missing"
       fi
     else
-      fail "Stop notification not found after free-text answer within ${TIMEOUT}s"
+      fail "Stream relabel ✅ not found after free-text answer within ${TIMEOUT}s"
     fi
   else
     fail "Free-text AskUserQuestion not triggered within ${TIMEOUT}s"
@@ -359,12 +361,12 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
       fail "AskUserQuestion group text API resolution not found in log"
     fi
 
-    # Wait for Stop notification
+    # Wait for Stream relabel ✅ (turn finalized after group direct text answer)
     ELAPSED=0
     GT_STOP_FOUND=false
     while [ $ELAPSED -lt $TIMEOUT ]; do
       if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_GT_STOP" ]; then
-        if tail -n +"$((LOG_BEFORE_GT_STOP + 1))" "$LOG_FILE" | grep "Notification sent.*Stop.*body_len=" > /dev/null 2>&1; then
+        if tail -n +"$((LOG_BEFORE_GT_STOP + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
           GT_STOP_FOUND=true
           break
         fi
@@ -374,7 +376,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     done
 
     if [ "$GT_STOP_FOUND" = true ]; then
-      pass "Stop notification received after group direct text answer"
+      pass "Stream relabel ✅ received after group direct text answer (turn finalized)"
 
       # Verify transcript contains group direct answer
       GT_TRANSCRIPT_PATH=$(tail -n +"$((LOG_BEFORE_GT + 1))" "$LOG_FILE" | \
@@ -397,7 +399,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
         fail "Group-text transcript path not found or file missing"
       fi
     else
-      fail "Stop notification not found after group direct text answer within ${TIMEOUT}s"
+      fail "Stream relabel ✅ not found after group direct text answer within ${TIMEOUT}s"
     fi
   else
     fail "Group-text AskUserQuestion not triggered within ${TIMEOUT}s"

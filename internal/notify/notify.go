@@ -26,6 +26,7 @@ type NotificationData struct {
 	ContextUsedPct    int // -1 means no data
 	ContextWindowSize int
 	ContextUsedTokens int
+	Finalized         bool
 }
 
 type PermissionData struct {
@@ -1272,6 +1273,13 @@ func BuildNotificationText(data NotificationData) string {
 	case data.Event == "CompactTool":
 		emoji = "🔧"
 		status = "Tool Activity"
+	case data.Event == "Message":
+		if data.Finalized {
+			emoji = "✅"
+		} else {
+			emoji = "💬"
+		}
+		status = "Message"
 	default:
 		emoji = "✅"
 		status = "Task Completed"

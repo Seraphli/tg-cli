@@ -43,21 +43,21 @@ def hello():
 
 pane_log "[format_render] AFTER format prompt"
 
-# Wait for Stop notification
+# Wait for Stream relabel ✅ (streaming finalize)
 ELAPSED=0
 FMT_STOP_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_FMT + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+  if tail -n +"$((LOG_BEFORE_FMT + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
     FMT_STOP_FOUND=true
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for format Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for streaming finalize (Stream relabel ✅)... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$FMT_STOP_FOUND" != true ]; then
-  fail "Format Stop notification not received within ${TIMEOUT}s"
+  fail "Stream relabel ✅ not received within ${TIMEOUT}s"
   wait_for_idle
   pane_log "[format_render] AFTER CC idle (timeout)"
   exit 0
@@ -66,10 +66,10 @@ fi
 # === Capture CC pane output (ground truth) ===
 PANE_RAW=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$(printf '%s' "$E2E_PANE" | jq -sRr @uri)" | jq -r '.content // "(empty)"')
 
-# === Extract TG full_text from bot log ===
+# === Reconstruct the finalized TG content (per continuation chunk, latest full_text) ===
 NEW_LOGS=$(tail -n +"$((LOG_BEFORE_FMT + 1))" "$LOG_FILE")
 TG_HTML_FILE="/tmp/tg-cli-e2e-tg-html.txt"
-echo "$NEW_LOGS" | awk '/TG message \[Stop\].*full_body:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{found=0; next} found{print}' > "$TG_HTML_FILE"
+reconstruct_tg_full_text "$NEW_LOGS" > "$TG_HTML_FILE"
 
 # Strip HTML tags to get plain text
 TG_PLAIN_FILE="/tmp/tg-cli-e2e-tg-plain.txt"
@@ -175,19 +175,19 @@ pane_log "[format_render] AFTER tab prompt"
 ELAPSED=0
 TAB_STOP_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+  if tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
     TAB_STOP_FOUND=true
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for tab test Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for tab test streaming finalize (Stream relabel ✅)... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$TAB_STOP_FOUND" = true ]; then
   TAB_NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TAB + 1))" "$LOG_FILE")
   TAB_HTML_FILE="/tmp/tg-cli-e2e-tab-html.txt"
-  echo "$TAB_NEW_LOGS" | awk '/TG message \[Stop\].*full_body:/{found=1; sub(/.*full_text:/, ""); print; next} found && /^\[[0-9]{4}-/{found=0; next} found{print}' > "$TAB_HTML_FILE"
+  reconstruct_tg_full_text "$TAB_NEW_LOGS" > "$TAB_HTML_FILE"
   if grep -q "<pre>" "$TAB_HTML_FILE" 2>/dev/null; then
     PRE_CONTENT=$(awk '/<pre>/{found=1} found{print} /<\/pre>/{found=0}' "$TAB_HTML_FILE")
     echo "  DEBUG: PRE_CONTENT (${#PRE_CONTENT} chars): $PRE_CONTENT"
@@ -206,7 +206,7 @@ if [ "$TAB_STOP_FOUND" = true ]; then
   fi
   rm -f "$TAB_HTML_FILE"
 else
-  fail "Tab test Stop notification not received within ${TIMEOUT}s"
+  fail "Tab test Stream relabel ✅ not received within ${TIMEOUT}s"
 fi
 
 wait_for_idle

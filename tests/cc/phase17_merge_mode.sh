@@ -116,33 +116,33 @@ fi
 wait_for_idle
 pane_log "[merge_mode] AFTER CC idle"
 
-# Verify Stop notification body contains both unique tokens
+# Verify streaming message contains both unique tokens (grep bot log for Stream send/edit content)
 ELAPSED=0
 STOP_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+  if tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
     STOP_FOUND=true
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for Stream relabel ✅ (turn complete)... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$STOP_FOUND" = true ]; then
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE")
   if echo "$NEW_LOGS" | grep "MERGE_TOKEN_ALPHA_7x9k" > /dev/null 2>&1; then
-    pass "CC output contains MERGE_TOKEN_ALPHA_7x9k"
+    pass "CC output contains MERGE_TOKEN_ALPHA_7x9k (in Stream send/edit log)"
   else
     fail "CC output missing MERGE_TOKEN_ALPHA_7x9k"
   fi
   if echo "$NEW_LOGS" | grep "MERGE_TOKEN_BETA_3m2p" > /dev/null 2>&1; then
-    pass "CC output contains MERGE_TOKEN_BETA_3m2p"
+    pass "CC output contains MERGE_TOKEN_BETA_3m2p (in Stream send/edit log)"
   else
     fail "CC output missing MERGE_TOKEN_BETA_3m2p"
   fi
 else
-  fail "Stop notification not received after merge within ${TIMEOUT}s"
+  fail "Stream relabel ✅ not received after merge within ${TIMEOUT}s"
 fi
 
 # Test edge cases: submit without active merge

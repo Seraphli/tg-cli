@@ -98,25 +98,10 @@ else
   fail "CC did not show decline message after escape"
 fi
 
-# 6. Wait for Stop notification after Esc (CC produces Stop after cancel)
-echo "  Waiting for Stop notification after escape..."
-ELAPSED=0
-STOP_FOUND=false
-while [ $ELAPSED -lt $TIMEOUT ]; do
-  NEW_LOGS=$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")
-  if echo "$NEW_LOGS" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
-    STOP_FOUND=true
-    break
-  fi
-  sleep 2
-  ELAPSED=$((ELAPSED + 2))
-done
-
-if [ "$STOP_FOUND" = true ]; then
-  pass "Stop notification received after escape"
-else
-  echo "  INFO: Stop notification not observed within ${TIMEOUT}s (non-fatal)"
-fi
+# 6. Wait for CC to become idle after Esc (Stop no longer sends a separate text notification)
+echo "  Waiting for CC idle after escape..."
+wait_for_idle
+pass "CC idle after escape (turn complete)"
 
 # 7. Wait for CC to be idle before sending follow-up
 wait_for_idle

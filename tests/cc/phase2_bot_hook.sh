@@ -49,7 +49,7 @@ FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
   LOG_AFTER=$(wc -l < "$LOG_FILE")
   if [ "$LOG_AFTER" -gt "$LOG_BEFORE_HELLO" ]; then
-    if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "Notification sent" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "Stream send" > /dev/null 2>&1; then
       FOUND=true
       break
     fi
@@ -62,9 +62,9 @@ done
 pane_log "[bot_hook] AFTER hook triggered"
 
 if [ "$FOUND" = true ]; then
-  pass "1st TG notification sent (hook → bot → TG)"
+  pass "1st TG streamed notification sent (hook → bot → TG)"
 else
-  fail "1st TG notification (no notification within ${TIMEOUT}s)"
+  fail "1st TG streamed notification (no Stream send within ${TIMEOUT}s)"
 fi
 
 # Verify hook included tmux target in debug log

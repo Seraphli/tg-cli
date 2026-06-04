@@ -59,49 +59,49 @@ else
   fail "ToolUse notification not received within ${TIMEOUT}s"
 fi
 
-# Wait for Stop notification to verify ordering and independence
+# Wait for Stream relabel ✅ to verify ordering: ToolUse notification before stream finalize
 LOG_BEFORE_STOP13=$(wc -l < "$LOG_FILE")
 ELAPSED=0
 STOP13_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
   if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_TOOL" ]; then
-    if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
       STOP13_FOUND=true
       break
     fi
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Stop notification... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for Stream relabel ✅... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$STOP13_FOUND" = true ]; then
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
 
-  # Extract line numbers for ToolUse and Stop notifications
+  # Extract line numbers for ToolUse notification and Stream relabel ✅
   TOOL_LINE=$(awk '/Notification sent.*ToolUse/{print NR; exit}' <<< "$NEW_LOGS")
-  STOP_LINE=$(awk '/Notification sent.*Stop/{print NR; exit}' <<< "$NEW_LOGS")
+  RELABEL_LINE=$(awk '/Stream relabel ✅:/{print NR; exit}' <<< "$NEW_LOGS")
 
   # Verify both lines exist and are different (independence)
-  if [ -n "$TOOL_LINE" ] && [ -n "$STOP_LINE" ] && [ "$TOOL_LINE" != "$STOP_LINE" ]; then
-    pass "ToolUse and Stop are independent notifications (line $TOOL_LINE != $STOP_LINE)"
+  if [ -n "$TOOL_LINE" ] && [ -n "$RELABEL_LINE" ] && [ "$TOOL_LINE" != "$RELABEL_LINE" ]; then
+    pass "ToolUse notification and Stream relabel are independent log lines (line $TOOL_LINE != $RELABEL_LINE)"
   else
-    fail "ToolUse and Stop notifications not independent (tool=$TOOL_LINE stop=$STOP_LINE)"
+    fail "ToolUse and Stream relabel not independent (tool=$TOOL_LINE relabel=$RELABEL_LINE)"
   fi
 
-  # Verify ToolUse line < Stop line (ordering)
-  if [ -n "$TOOL_LINE" ] && [ -n "$STOP_LINE" ] && [ "$TOOL_LINE" -lt "$STOP_LINE" ]; then
-    pass "ToolUse sent BEFORE Stop (line $TOOL_LINE < $STOP_LINE)"
+  # Verify ToolUse line < Stream relabel line (ordering: tool card before finalize)
+  if [ -n "$TOOL_LINE" ] && [ -n "$RELABEL_LINE" ] && [ "$TOOL_LINE" -lt "$RELABEL_LINE" ]; then
+    pass "ToolUse sent BEFORE Stream relabel ✅ (line $TOOL_LINE < $RELABEL_LINE)"
   else
-    fail "ToolUse not sent before Stop (tool=$TOOL_LINE stop=$STOP_LINE)"
+    fail "ToolUse not sent before Stream relabel (tool=$TOOL_LINE relabel=$RELABEL_LINE)"
   fi
 
-  # Verify ToolUse full TG message contains 🔧 header (not ✅ Task Completed)
+  # Verify ToolUse full TG message contains 🔧 header (not ✅ Message)
   TOOL_FULL_TEXT=$(echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" || true)
   if echo "$TOOL_FULL_TEXT" | grep "🔧" > /dev/null 2>&1; then
     pass "ToolUse notification contains correct 🔧 header"
   else
-    fail "ToolUse notification missing 🔧 header (may show wrong header like '✅ Task Completed')"
+    fail "ToolUse notification missing 🔧 header"
   fi
   if echo "$TOOL_FULL_TEXT" | grep "✅ Task Completed" > /dev/null 2>&1; then
     fail "ToolUse notification incorrectly shows '✅ Task Completed' header"
@@ -109,7 +109,7 @@ if [ "$STOP13_FOUND" = true ]; then
     pass "ToolUse notification does not show '✅ Task Completed' header"
   fi
 else
-  fail "Stop notification not received within ${TIMEOUT}s for ordering verification"
+  fail "Stream relabel ✅ not received within ${TIMEOUT}s for ordering verification"
 fi
 
 # Wait for CC to finish the turn

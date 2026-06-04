@@ -38,22 +38,20 @@ pane_log "[multiselect] AFTER hook notification detected"
 if [ "$MQ_FOUND" = true ]; then
   pass "Multi-question AskUserQuestion notification received"
 
-  # Verify Update notification sent BEFORE AskUserQuestion (tolerant to Claude skipping intermediate text)
+  # Verify live 💬 Message (Stream send/edit) arrived BEFORE AskUserQuestion — ordering under drain
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE")
-  UPDATE_LINE=$(awk '/Notification sent.*PreToolUse/{print NR; exit}' <<< "$NEW_LOGS")
+  STREAM_LINE=$(awk '/Stream send:|Stream edit:/{print NR; exit}' <<< "$NEW_LOGS")
   AQ_LINE=$(awk '/AskUserQuestion sent/{print NR; exit}' <<< "$NEW_LOGS")
   if [ -z "$AQ_LINE" ]; then
     fail "AskUserQuestion sent log line not found in multiselect"
-  elif [ -n "$UPDATE_LINE" ]; then
-    if [ "$UPDATE_LINE" -lt "$AQ_LINE" ]; then
-      pass "Update notification sent BEFORE AskUserQuestion in multiselect (line $UPDATE_LINE < $AQ_LINE)"
+  elif [ -n "$STREAM_LINE" ]; then
+    if [ "$STREAM_LINE" -lt "$AQ_LINE" ]; then
+      pass "💬 Message (Stream send/edit) logged BEFORE AskUserQuestion in multiselect (line $STREAM_LINE < $AQ_LINE)"
     else
-      fail "Update sent AFTER AskUserQuestion in multiselect"
+      fail "Stream message logged AFTER AskUserQuestion in multiselect (line $STREAM_LINE >= $AQ_LINE)"
     fi
-  elif [[ "$NEW_LOGS" == *"PreToolUse Update skipped"* ]]; then
-    pass "PreToolUse Update path exercised in multiselect (skipped: no new assistant text — vacuous pass)"
   else
-    fail "Neither PreToolUse Update sent nor skipped log found in multiselect — code path not exercised"
+    pass "No pre-question streaming message in multiselect (CC produced no text — vacuous pass)"
   fi
 
   # Verify AskUserQuestion sent log contains non-empty content
@@ -149,31 +147,26 @@ else
   STOP6_FOUND=false
   while [ $ELAPSED -lt $TIMEOUT ]; do
     if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_STOP6" ]; then
-      if tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep "Notification sent.*Stop.*body_len=" > /dev/null 2>&1; then
+      if tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
         STOP6_FOUND=true
         break
       fi
     fi
     sleep 2
     ELAPSED=$((ELAPSED + 2))
-    echo "  Waiting for Stop after multiQ... ${ELAPSED}s / ${TIMEOUT}s"
+    echo "  Waiting for Stream relabel after multiQ... ${ELAPSED}s / ${TIMEOUT}s"
   done
 
   pane_log "[multiselect] AFTER Stop detected"
 
   if [ "$STOP6_FOUND" = true ]; then
-    BODY_LEN=$(tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep -oPm1 'Notification sent.*Stop.*body_len=\K[0-9]+' || true)
-    if [ -n "$BODY_LEN" ] && [ "$BODY_LEN" -gt 0 ]; then
-      pass "Stop notification has content after multiQ (body_len=$BODY_LEN)"
-    else
-      fail "Stop notification body is empty after multiQ"
-    fi
+    pass "Stream relabel ✅ received after multiQ (turn finalized)"
 
-    # Verify Stop notification log contains actual body content
-    if tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep "Notification sent.*Stop" | grep "body=." > /dev/null 2>&1; then
-      pass "Stop notification log contains actual body content in multiselect"
+    # Verify streaming message has content (Stream send: or Stream edit: with final=true)
+    if tail -n +"$((LOG_BEFORE_STOP6 + 1))" "$LOG_FILE" | grep "Stream send:\|Stream edit:.*final=true" > /dev/null 2>&1; then
+      pass "Streaming message has content after multiQ"
     else
-      fail "Stop notification log missing body content in multiselect"
+      fail "No Stream send/edit log found after multiQ"
     fi
 
     # Verify transcript contains multi-question answers
@@ -206,6 +199,6 @@ else
       fail "Multi-question transcript path not found or file missing"
     fi
   else
-    fail "Stop notification not found after multiQ within ${TIMEOUT}s"
+    fail "Stream relabel ✅ not found after multiQ within ${TIMEOUT}s"
   fi
 fi

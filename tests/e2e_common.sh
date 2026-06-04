@@ -73,6 +73,31 @@ pane_log() {
   echo "  === END PANE ==="
 }
 
+# Reconstruct the final TG message content from bot-log Stream send/edit lines.
+# Streaming logs each TG message (continuation chunk) multiple times as it grows: a 'Stream send'
+# then one or more 'Stream edit ... full_text:'. Only the LAST continuation chunk of a turn is logged
+# 'final=true'; earlier chunks finalize as 'final=false'. To reconstruct what TG actually shows we must,
+# per chunk (msg_id), keep the LATEST full_text — NOT filter on final=true (that would drop every
+# non-last chunk's grown content). Chunks are emitted in order, so concatenate them in first-seen order.
+# Usage: reconstruct_tg_full_text "$NEW_LOGS" > out.html
+reconstruct_tg_full_text() {
+  printf '%s\n' "$1" | awk '
+    /Stream (send|edit):.*full_text:/ {
+      msg=""
+      for (i = 1; i <= NF; i++) if ($i ~ /^msg_id=/) { msg=$i; break }
+      if (!(msg in seen)) { order[++n]=msg; seen[msg]=1 }
+      body[msg]=""
+      sub(/.*full_text:/, "")
+      if ($0 != "") body[msg]=$0 "\n"
+      cur=msg
+      next
+    }
+    cur != "" && /^\[[0-9]{4}-/ { cur=""; next }
+    cur != "" { body[cur]=body[cur] $0 "\n" }
+    END { for (i = 1; i <= n; i++) printf "%s", body[order[i]] }
+  '
+}
+
 inject_prompt() {
   local text="$1"
   local image="${2:-}"
@@ -107,12 +132,36 @@ wait_for_bot_ready() {
   local elapsed=0
   while [ $elapsed -lt $timeout ]; do
     if curl -sf -o /dev/null "http://127.0.0.1:$TEST_PORT/session/idle" 2>/dev/null; then
+      echo "  bot ready after ${elapsed}s (port $TEST_PORT responding)"
       return 0
     fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
   echo "WARN: wait_for_bot_ready timed out after ${timeout}s"
+  # Boss directive: a non-starting bot MUST be diagnosable post-hoc. Capture the bot launch command,
+  # a live startup probe, the bot tmux pane, and the current bot.log into a per-run file BEFORE the
+  # next phase truncates the shared bot.log; also echo the pane so it lands in the tee'd run log.
+  local ts diag
+  ts=$(date +%Y%m%d-%H%M%S)
+  diag="$TEST_CONFIG_DIR/bot-startup-fail-${ts}.log"
+  {
+    echo "=== wait_for_bot_ready TIMEOUT (${timeout}s) at $ts ==="
+    echo "--- last bot launch command ---"
+    echo "${_LAST_BOT_LAUNCH_CMD:-<unknown>}"
+    echo "--- startup probe: curl http://127.0.0.1:$TEST_PORT/session/idle ---"
+    curl -sS -m 5 "http://127.0.0.1:$TEST_PORT/session/idle" 2>&1 || echo "(probe failed: rc=$?)"
+    echo ""
+    echo "--- bot tmux pane ($BOT_SESSION) ---"
+    $TMUX_TEST capture-pane -t "$BOT_SESSION" -p -S - 2>&1 || echo "(pane capture failed)"
+    echo ""
+    echo "--- bot.log ($LOG_FILE) ---"
+    cat "$LOG_FILE" 2>&1 || echo "(no bot.log)"
+  } > "$diag" 2>&1
+  echo "  Bot startup diagnostics saved to: $diag"
+  echo "  === BOT STARTUP FAIL PANE ($BOT_SESSION) ==="
+  $TMUX_TEST capture-pane -t "$BOT_SESSION" -p -S - 2>/dev/null || echo "  (pane capture failed)"
+  echo "  === END BOT STARTUP FAIL PANE ==="
   return 1
 }
 
@@ -246,15 +295,25 @@ ensure_credentials() {
 }
 
 start_bot() {
+  # Boss directive: preserve the previous phase's bot.log before truncating, so a prior phase's bot
+  # output survives across per-phase (separate-invocation) runs instead of being overwritten.
+  if [ -s "$LOG_FILE" ]; then
+    local prev_archive
+    prev_archive="$TEST_CONFIG_DIR/bot-prev-$(date +%Y%m%d-%H%M%S).log"
+    cp "$LOG_FILE" "$prev_archive" 2>/dev/null && echo "  Previous bot.log archived to: $prev_archive"
+  fi
   > "$LOG_FILE"
   > "$TYPING_LOG_FILE"
   # Clean stale state from previous runs
   rm -f /tmp/.tg-cli-test/pending/*.json 2>/dev/null || true
   rm -f "$TEST_CONFIG_DIR/inject-queue.json" "$TEST_CONFIG_DIR/merge-buffers.json" "$TEST_CONFIG_DIR/sessions.json" "$TEST_CONFIG_DIR/at-channels.json" 2>/dev/null || true
   rm -rf "$TEST_CONFIG_DIR/mailbox" 2>/dev/null || true
+  # Record the launch command so wait_for_bot_ready's failure diagnostics can report it.
+  _LAST_BOT_LAUNCH_CMD="cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1"
+  export _LAST_BOT_LAUNCH_CMD
+  echo "  Bot launch command: $_LAST_BOT_LAUNCH_CMD"
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
-  $TMUX_TEST send-keys -t "$BOT_SESSION" \
-    "cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1" Enter
+  $TMUX_TEST send-keys -t "$BOT_SESSION" "$_LAST_BOT_LAUNCH_CMD" Enter
   echo "Waiting for bot to start..."
   wait_for_bot_ready
 }
@@ -298,13 +357,24 @@ cleanup_sessions() {
   return $exit_code
 }
 
+# Build the test binary with diagnostics. Used by BOTH ensure_infrastructure (standalone-phase path)
+# and tests/e2e.sh's 3 build sites (orchestrated path), so cwd + binary info is logged at every entry
+# point — a wrong cwd (building the master binary instead of the worktree) is then visible post-hoc.
+build_test_binary() {
+  echo "build_test_binary: cwd=$(pwd)"
+  echo "build_test_binary: git toplevel=$(git rev-parse --show-toplevel 2>/dev/null || echo '<not a git repo>')"
+  echo "Building binary..."
+  go build -o tg-cli 2>&1 || { echo "Build failed (cwd=$(pwd))"; exit 1; }
+  echo "Built binary: $(pwd)/tg-cli"
+  ls -l tg-cli 2>/dev/null || echo "  WARN: tg-cli binary not found after build"
+}
+
 ensure_infrastructure() {
   if [ "${E2E_ORCHESTRATED:-}" = "1" ]; then
     return
   fi
   ensure_credentials
-  echo "Building binary..."
-  go build -o tg-cli 2>&1 || { echo "Build failed"; exit 1; }
+  build_test_binary
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks

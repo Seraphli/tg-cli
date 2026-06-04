@@ -203,6 +203,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		SessionEvents:   stores.NewSessionEventStore(),
 		AtChannels:      stores.NewAtChannelStore(configDir),
 		CompactTools:    stores.NewCompactToolStore(),
+		Streams:         stores.NewStreamStore(),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
@@ -256,6 +257,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		TypingLog:                typingLog,
 		FlushInjectQueue:         flushInjectQueue,
 		CheckSessionVersion:      checkSessionVersion,
+		StreamFlush:              streamFlush,
 	}
 	hooks.ScanPendingDir(bs, hookCB, func(bsArg *BotState) { handlers.ScanLaunchDir(bsArg) })
 	// Restore persisted sessions and clean up stale routes
@@ -304,6 +306,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	defer typingCancel()
 	go startTypingLoop(typingCtx, bs)
 	go startCronLoop(typingCtx, bs)
+	go startStreamLoop(typingCtx, bs)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

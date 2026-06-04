@@ -123,15 +123,43 @@ else
   fail "TC5: Compact toggle endpoint returned unexpected response: $RESP"
 fi
 
-# TC6: Verify Update-between-tools creates separate compact cycles (correct per SPEC)
-# CC outputs intermediate text before each Read, so each Read gets its own compact message
+# TC6: Verify a new MessageDisplay text block resets the compact cycle WITHIN one turn → separate
+# compact messages (register.go:619). The old prompt "Read these 3 files one by one" never told CC
+# to narrate before each read, so CC legally batched the 3 reads under one text block → 1 reset
+# boundary → only 1 "compact tool sent" (round-1 FAIL, /tmp/e2e-fix1-stage1.txt:2843). Fix per
+# project lesson [2026-02-12]: the prompt MUST explicitly instruct text-before-each-tool. The prompt
+# below spells out the operation flow step by step and forbids batching, so CC produces
+# text→read→text→read→text→read = 3 distinct MessageDisplay messages, each resetting the cycle.
+# Use FRESH, UNIQUE files (NOT the TC1 files, whose content is already in this CC session's context —
+# CC could otherwise answer from context and skip the Read tool, dropping the sent count). Unique
+# content forces a real Read of each file.
+python3 -c "
+import json
+f='$TEST_CONFIG_DIR/config.json'
+d=json.load(open(f))
+d['toolNotifyCompact']=True
+d['toolNotifyList']=['Read']
+json.dump(d,open(f,'w'))
+"
+TC6_FILE1="/tmp/tg-cli-test-compact-tc6-1-$$.txt"
+TC6_FILE2="/tmp/tg-cli-test-compact-tc6-2-$$.txt"
+TC6_FILE3="/tmp/tg-cli-test-compact-tc6-3-$$.txt"
+echo "compact tc6 unique 1 $RANDOM" > "$TC6_FILE1"
+echo "compact tc6 unique 2 $RANDOM" > "$TC6_FILE2"
+echo "compact tc6 unique 3 $RANDOM" > "$TC6_FILE3"
+LOG_BEFORE_TC6=$(wc -l < "$LOG_FILE" 2>/dev/null || true)
+pane_log "[compact_tc6] BEFORE inject"
+inject_prompt "Do these steps strictly in order, one at a time. Finish each step completely before starting the next. Do NOT read more than one file per step, and do NOT mention or read a later file before its own step. Step 1: first output the sentence \"Now reading file 1.\" then read $TC6_FILE1. Step 2: first output the sentence \"Now reading file 2.\" then read $TC6_FILE2. Step 3: first output the sentence \"Now reading file 3.\" then read $TC6_FILE3."
+wait_for_idle
+pane_log "[compact_tc6] AFTER idle"
 set +eo pipefail
-SENT_COUNT_TC6=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "compact tool sent" || true)
+SENT_COUNT_TC6=$(tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep -c "compact tool sent" || true)
 set -eo pipefail
+rm -f "$TC6_FILE1" "$TC6_FILE2" "$TC6_FILE3"
 if [ "$SENT_COUNT_TC6" -ge 2 ]; then
-  pass "TC6: Update-resets-cycle works (sent=$SENT_COUNT_TC6 compact messages for 3 reads)"
+  pass "TC6: new text resets compact cycle within a turn (sent=$SENT_COUNT_TC6 for 3 narrated reads)"
 else
-  fail "TC6: expected sent>=2 (intermediate text resets cycle), got sent=$SENT_COUNT_TC6"
+  fail "TC6: expected sent>=2 (each narrated text block resets compact cycle, register.go:619), got sent=$SENT_COUNT_TC6"
 fi
 
 # Restore config for subsequent phases

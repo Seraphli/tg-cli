@@ -27,6 +27,7 @@ type Callbacks struct {
 	TypingLog                func(format string, args ...interface{})
 	FlushInjectQueue         func(bs *types.BotState, tmuxTarget string)
 	CheckSessionVersion      func(bs *types.BotState, tmuxTarget string)
+	StreamFlush              func(bs *types.BotState, sessionID string, stop bool)
 }
 
 // GetHookSessionLock returns (or creates) the mutex for a session.
@@ -146,17 +147,19 @@ func ProcessPendingRequest(bs *types.BotState, cb Callbacks, uuid string) {
 		logger.Info(fmt.Sprintf("No chat for pending request %s, skipping", uuid))
 		return
 	}
-	// Send intermediate text (PreToolUse Update) before question/permission message
-	// Skip for subagent requests
 	if p.AgentID == "" {
-		if updateBody := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath, true); updateBody != "" {
-			chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
-			cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updateBody, "", agentName, topicID)
-			// Reset compact tool message after Update is sent via pending handler path
-			bs.CompactTools.Reset(p.SessionID)
-			logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", uuid, chatIDInt))
+		if p.Backend == "codex" {
+			if updateBody := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath, true); updateBody != "" {
+				chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
+				cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updateBody, "", agentName, topicID)
+				// Reset compact tool message after Update is sent via pending handler path
+				bs.CompactTools.Reset(p.SessionID)
+				logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", uuid, chatIDInt))
+			} else {
+				logger.Info(fmt.Sprintf("PreToolUse Update skipped: uuid=%s reason=no_new_assistant_text", uuid))
+			}
 		} else {
-			logger.Info(fmt.Sprintf("PreToolUse Update skipped: uuid=%s reason=no_new_assistant_text", uuid))
+			cb.StreamFlush(bs, p.SessionID, false) // drain+flush so pre-question 💬 lands before buttons
 		}
 	}
 	if p.ToolName == "AskUserQuestion" {
