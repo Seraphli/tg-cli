@@ -87,7 +87,7 @@ Shows the conversation history of a print mode job (user prompts and assistant r
 
 ## TG Management
 
-Send `/bot_cron` in Telegram to view all jobs with inline delete buttons. Named jobs show their name in the button label.
+Open `/bot_settings → ⏰ Cron` in Telegram to view all jobs with inline delete buttons. Named jobs show their name in the button label.
 
 ## Behavior Notes
 

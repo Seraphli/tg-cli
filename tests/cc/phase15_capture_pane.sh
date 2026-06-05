@@ -69,6 +69,12 @@ else
   fail "TC15-2-2: buttons missing collapse entry (buttons=$(echo "$CAP_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('buttons',[]))"))"
 fi
 
+# TC15-4: capture buttons include delete
+set +eo pipefail
+echo "$CAP_RESP" | python3 -c "import sys,json; sys.exit(0 if any(b.get('unique')=='del' for b in json.load(sys.stdin).get('buttons',[])) else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-4: capture buttons include del" || fail "TC15-4: capture missing del (resp=$CAP_RESP)"
+
 # Assert page_entry fields
 pane_log "[TC15-2] BEFORE page_entry check"
 PE_RESP=$(curl -sf "http://127.0.0.1:$TEST_PORT/test/page_entry?msg_id=$MID")
@@ -116,6 +122,12 @@ else
   fail "TC15-2-4: collapse wrong (collapsed=$(echo "$COLLAPSE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") text=$(echo "$COLLAPSE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(repr(d.get('text','?')))"))"
 fi
 
+# TC15-4b: del persists after collapse
+set +eo pipefail
+echo "$COLLAPSE_RESP" | python3 -c "import sys,json; sys.exit(0 if 'del' in json.load(sys.stdin).get('buttons',[]) else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-4b: del persists after collapse" || fail "TC15-4b: del lost after collapse (resp=$COLLAPSE_RESP)"
+
 # Expand via ce data=e
 pane_log "[TC15-2] BEFORE expand"
 EXPAND_RESP=$(curl -sf "http://127.0.0.1:$TEST_PORT/test/callback?msg_id=$MID&unique=ce&data=e")
@@ -137,6 +149,31 @@ if [ "$_rc" -eq 0 ]; then
 else
   fail "TC15-2-5: expand wrong (collapsed=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") has_content=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('hello-capture-single' in d.get('text',''))"))"
 fi
+
+# TC15-4c: del persists after expand
+set +eo pipefail
+echo "$EXPAND_RESP" | python3 -c "import sys,json; sys.exit(0 if 'del' in json.load(sys.stdin).get('buttons',[]) else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-4c: del persists after expand" || fail "TC15-4c: del lost after expand (resp=$EXPAND_RESP)"
+
+# TC15-5/6: delete and re-delete (LAST since they delete $MID)
+CHAT=$(echo "$CAP_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('chat_id',''))")
+DEL_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+DEL_RESP=$(curl -sf "http://127.0.0.1:$TEST_PORT/test/callback?msg_id=$MID&unique=del&chat_id=$CHAT")
+set +eo pipefail
+echo "$DEL_RESP" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('status')=='deleted' else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-5-1: del returns status=deleted" || fail "TC15-5-1: del failed (resp=$DEL_RESP)"
+sleep 1
+set +eo pipefail
+tail -n +"$((DEL_BEFORE + 1))" "$LOG_FILE" | grep -q "del callback: deleted msg_id=$MID"
+_ps=("${PIPESTATUS[@]}"); set -eo pipefail
+[ "${_ps[1]}" -eq 0 ] && pass "TC15-5-2: bot log 'del callback: deleted msg_id=$MID'" || fail "TC15-5-2: del log missing"
+DEL2_RESP=$(curl -sf "http://127.0.0.1:$TEST_PORT/test/callback?msg_id=$MID&unique=del&chat_id=$CHAT")
+set +eo pipefail
+echo "$DEL2_RESP" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('status')=='error' else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-6: re-delete returns error (msg removed)" || fail "TC15-6: re-delete did not error (resp=$DEL2_RESP)"
 
 # --- TC15-3: Multi-page capture CurrentPage restore (config threshold paginationMaxRunes=500) ---
 echo ""
@@ -252,6 +289,12 @@ if [ "$_rc" -eq 0 ]; then
 else
   fail "TC15-3-5: p=2 marker check failed (has_P2=$(echo "$P2_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('__P2_MARKER__' in d.get('text',''))") has_P1=$(echo "$P2_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('__P1_MARKER__' in d.get('text',''))"))"
 fi
+
+# TC15-4d: del persists after multi-page p-nav (capture del survives pagination)
+set +eo pipefail
+echo "$P2_RESP" | python3 -c "import sys,json; sys.exit(0 if 'del' in json.load(sys.stdin).get('buttons',[]) else 1)"
+_rc=$?; set -eo pipefail
+[ "$_rc" -eq 0 ] && pass "TC15-4d: del persists after multi-page p-nav" || fail "TC15-4d: del lost after p-nav (resp=$P2_RESP)"
 
 # Assert page_entry current_page==2
 pane_log "[TC15-3] BEFORE page_entry after p=2"

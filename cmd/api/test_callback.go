@@ -14,7 +14,16 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	tele "gopkg.in/telebot.v3"
 )
+
+func rowUniques(row tele.Row) []string {
+	var out []string
+	for _, b := range row {
+		out = append(out, b.Unique)
+	}
+	return out
+}
 
 // RegisterTestEndpoints registers test-only HTTP endpoints unconditionally.
 func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
@@ -43,6 +52,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			} else {
 				text, _ = handlers.ExpandEntry(entry)
 			}
+			row := handlers.CaptureExtraRow(entry.Header == handlers.CaptureHeader, data != "c")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":    "ok",
 				"msg_id":    msgID,
@@ -50,6 +60,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				"data":      data,
 				"collapsed": entry.Collapsed,
 				"text":      text,
+				"buttons":   rowUniques(row),
 			})
 		case "p":
 			entry, ok := bs.Pages.Get(msgID)
@@ -68,6 +79,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				return
 			}
 			text := handlers.NavigateEntry(entry, pageNum)
+			row := handlers.CaptureExtraRow(entry.Header == handlers.CaptureHeader, true)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":      "ok",
 				"msg_id":      msgID,
@@ -75,7 +87,26 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				"page":        pageNum,
 				"total_pages": len(entry.Chunks),
 				"text":        text,
+				"buttons":     rowUniques(row),
 			})
+		case "del":
+			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+			err := bs.Bot.Delete(&tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}})
+			if err != nil {
+				logger.Info(fmt.Sprintf("del callback: delete failed msg_id=%d err=%v", msgID, err))
+				json.NewEncoder(w).Encode(map[string]interface{}{"status": "error", "msg_id": msgID, "error": err.Error()})
+				return
+			}
+			logger.Info(fmt.Sprintf("del callback: deleted msg_id=%d", msgID))
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "deleted", "msg_id": msgID})
+		case "settings":
+			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+			msg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID, Type: tele.ChatPrivate}}
+			status := "ok"
+			if !handlers.RenderSettingsSubmenu(bs, msg, data) {
+				status = "unknown_submenu"
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": status, "msg_id": msgID, "unique": "settings", "data": data})
 		default:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "ok",
@@ -196,6 +227,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"msg_id":       sent.ID,
+			"chat_id":      chat.ID,
 			"chunks":       chunks,
 			"current_page": currentPage,
 			"buttons":      buttons,
@@ -220,5 +252,39 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		})
 	})
 
-	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message")
+	mux.HandleFunc("/test/settings_message", func(w http.ResponseWriter, r *http.Request) {
+		chatID, err := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid chat_id", http.StatusBadRequest)
+			return
+		}
+		sent, err := handlers.SendSettingsMenu(bs, &tele.Chat{ID: chatID})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("send failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+		var buttons []map[string]string
+		if sent.ReplyMarkup != nil {
+			for _, row := range sent.ReplyMarkup.InlineKeyboard {
+				for _, btn := range row {
+					unique := btn.Unique
+					data := btn.Data
+					if unique == "" && strings.HasPrefix(data, "\f") {
+						parts := strings.SplitN(strings.TrimPrefix(data, "\f"), "|", 2)
+						unique = parts[0]
+						if len(parts) > 1 {
+							data = parts[1]
+						} else {
+							data = ""
+						}
+					}
+					buttons = append(buttons, map[string]string{"text": btn.Text, "unique": unique, "data": data})
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": sent.ID, "chat_id": chatID, "buttons": buttons})
+	})
+
+	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message, /test/settings_message")
 }

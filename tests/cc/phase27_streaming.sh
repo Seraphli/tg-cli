@@ -9,7 +9,7 @@ echo "--- Streaming (MessageDisplay) behavior test ---"
 ensure_infrastructure
 
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-start_claude "e2e-cc-28"
+start_claude "e2e-cc-27"
 wait_for_idle
 
 # ============================================================

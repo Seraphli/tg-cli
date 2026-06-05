@@ -422,7 +422,9 @@ func Register(bs *types.BotState) {
 	})
 
 	bot.Handle("/start", func(c tele.Context) error {
-		return c.Reply("tg-cli bot is running. Use /bot_pair to pair this chat.")
+		kb := &tele.ReplyMarkup{}
+		appendDeleteButton(kb)
+		return c.Reply("tg-cli bot is running. Use /bot_pair to pair this chat.", kb)
 	})
 
 	bot.Handle("/bot_pair", func(c tele.Context) error {
@@ -433,28 +435,6 @@ func Register(bs *types.BotState) {
 		}
 		code := pairing.CreatePairingRequest(userID, chatID)
 		return c.Reply(fmt.Sprintf("Pairing code: %s\n\nEnter this code in the bot terminal to approve.\n\nCode expires in 10 minutes.", code))
-	})
-
-	bot.Handle("/bot_status", func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Reply("Not paired. Use /bot_pair first.")
-		}
-		return c.Reply("Bot is running and paired.")
-	})
-
-	bot.Handle("/bot_routes", func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Reply("❌ Not paired. Use /bot_pair first.")
-		}
-		sections := buildRoutesSections(bot, bs)
-		if len(sections) == 0 {
-			return c.Reply("No active route bindings or sessions.")
-		}
-		return c.Reply("🗺 Route bindings:\n" + strings.Join(sections, "\n\n"))
 	})
 
 	bot.Handle("/bot_bind", func(c tele.Context) error {
@@ -714,70 +694,9 @@ func Register(bs *types.BotState) {
 			rows = append(rows, sel.Row(sel.Data(label+rawNameTag, "names", sid)))
 		}
 		sel.Inline(rows...)
+		appendDeleteButton(sel)
 		_, err := helpers.RetrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel, tele.ModeHTML)
 		return err
-	})
-
-	bot.Handle("/bot_cwd", func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatIDStr := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatIDStr) {
-			return c.Reply("❌ Not paired.")
-		}
-		cfg, err := config.LoadAppConfig()
-		if err != nil {
-			return c.Reply("❌ Failed to load config")
-		}
-		current := cfg.CWDSource
-		if current == "" {
-			current = "tmux"
-		}
-		sel := buildCwdMenu()
-		return c.Reply(fmt.Sprintf("🔧 CWD source: %s\n\nSelect source for working directory:", current), sel)
-	})
-
-	bot.Handle("/bot_verbose", func(c tele.Context) error {
-		cfg, err := config.LoadAppConfig()
-		if err != nil {
-			return c.Reply("❌ Failed to load config")
-		}
-		enabled := cfg.ToolNotifyEnabled == nil || *cfg.ToolNotifyEnabled
-		var statusText string
-		if enabled {
-			statusText = "✅ ON"
-		} else {
-			statusText = "❌ OFF"
-		}
-		menu := &tele.ReplyMarkup{}
-		btnOn := menu.Data("✅ ON", "verbose", "on")
-		btnOff := menu.Data("❌ OFF", "verbose", "off")
-		menu.Inline(menu.Row(btnOn, btnOff))
-		return c.Reply(fmt.Sprintf("🔧 Tool Notifications: %s\n\nSelect to toggle:", statusText), menu)
-	})
-
-	bot.Handle("/bot_tools", func(c tele.Context) error {
-		if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-			creds, _ := config.LoadCredentials()
-			for key, route := range creds.NameRouteMap {
-				if route.ChatID == c.Chat().ID {
-					label := "✅ Tool Notify: ON"
-					if route.ToolNotifyOff {
-						label = "⬜ Tool Notify: OFF"
-					}
-					menu := &tele.ReplyMarkup{}
-					btn := menu.Data(label, "tools_route_toggle", key)
-					menu.Inline(menu.Row(btn))
-					return c.Reply("🔧 Tool notification for this group:", menu)
-				}
-			}
-			return c.Reply("❌ No route found for this group.")
-		}
-		cfg, err := config.LoadAppConfig()
-		if err != nil {
-			return c.Reply("❌ Failed to load config")
-		}
-		menu := buildToolsMenu(cfg.ToolNotifyList)
-		return c.Reply("🔧 Select tools for notifications:\n(Click to toggle)", menu)
 	})
 
 	bot.Handle("/bot_new", func(c tele.Context) error {
@@ -836,15 +755,6 @@ func Register(bs *types.BotState) {
 	bot.Handle("/cu", checkUpdateHandler)
 	bot.Handle("/check_update", checkUpdateHandler)
 
-	bot.Handle("/bot_voice", func(c tele.Context) error {
-		userID := strconv.FormatInt(c.Sender().ID, 10)
-		chatID := strconv.FormatInt(c.Chat().ID, 10)
-		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
-			return c.Reply("❌ Not paired.")
-		}
-		return handleVoiceCommand(c)
-	})
-
 	mergeHandler := func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
@@ -890,48 +800,14 @@ func Register(bs *types.BotState) {
 	bot.Handle("/bot_merge", mergeHandler)
 	bot.Handle("/m", mergeHandler)
 
-	bot.Handle("/bot_cron", func(c tele.Context) error {
-		jobs := bs.CronJobs.All()
-		if len(jobs) == 0 {
-			return c.Reply("📋 No cron jobs configured.")
-		}
-		markup := &tele.ReplyMarkup{}
-		body, rows := buildCronContent(jobs, markup)
-		fullText := "📋 <b>Cron Jobs</b>\n\n" + body
-		chunks := helpers.SplitBody(fullText, 3900)
-		if len(chunks) <= 1 {
-			markup.Inline(rows...)
-			return c.Reply(fullText, markup, tele.ModeHTML)
-		}
-		kb := helpers.BuildPageKeyboardWithExtra(1, len(chunks), rows)
-		sent, err := helpers.RetrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
-		if err != nil {
-			return err
-		}
-		bs.Pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, PermRows: rows, ChatID: c.Chat().ID})
-		return nil
-	})
-
-	bot.Handle("/bot_mailbox", func(c tele.Context) error {
-		creds, _ := config.LoadCredentials()
-		text, menu := buildMailboxContent(c.Chat().Type, c.Chat().ID, creds)
-		return c.Reply(text, menu, tele.ModeHTML)
-	})
-
 	bot.Handle("/bot_settings", func(c tele.Context) error {
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		chatID := strconv.FormatInt(c.Chat().ID, 10)
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
-		text := buildSettingsTopText()
-		menu := buildSettingsTopMenu()
-		sent, err := helpers.RetrySend(bot, c.Chat(), text, menu, tele.ModeHTML)
-		if err != nil {
-			return err
-		}
-		bs.SettingsMenuMsgs.Store(sent.ID, true)
-		return nil
+		_, err := SendSettingsMenu(bs, c.Chat())
+		return err
 	})
 
 	bot.Handle("/bot_at", func(c tele.Context) error {

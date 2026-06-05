@@ -30,9 +30,12 @@ echo "compact test 3" > /tmp/tg-cli-test-compact-3.txt
 
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || true)
 
-# TC1 + TC2 + TC3: Inject prompt that triggers multiple Read tool calls
+# TC1 + TC2 + TC3: Inject an EXPLICIT step-by-step prompt (per lesson [2026-02-12]/[2026-06-04]).
+# The old vague prompt "Read these 3 files one by one" let CC narrate / use other tools freely, which
+# made TC2's "no standard ToolUse notifications" assertion non-deterministic. Spell out the whole flow
+# (Read tool ONLY, one file per step, no other tool) so the asserted behavior is pinned, like TC6.
 pane_log "[compact] BEFORE inject"
-inject_prompt "Read these 3 files one by one and tell me their content: /tmp/tg-cli-test-compact-1.txt /tmp/tg-cli-test-compact-2.txt /tmp/tg-cli-test-compact-3.txt"
+inject_prompt "Do these steps strictly in order, one at a time. Finish each step completely before starting the next. Use only the Read tool and do not run any other tool (no Bash, no Grep, no Glob, no TodoWrite). Do not read more than one file per step. Step 1: read /tmp/tg-cli-test-compact-1.txt. Step 2: read /tmp/tg-cli-test-compact-2.txt. Step 3: read /tmp/tg-cli-test-compact-3.txt. After all three reads are done, tell me the contents of the three files."
 pane_log "[compact] AFTER inject"
 
 wait_for_idle

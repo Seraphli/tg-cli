@@ -102,9 +102,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if entry.Header != "" {
 			// @ forward message or pane capture: show header + chunk with collapse button
 			text = NavigateEntry(entry, pageNum)
-			collapseMk := &tele.ReplyMarkup{}
-			collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
-			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), []tele.Row{{collapseBtn}})
+			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), []tele.Row{CaptureExtraRow(entry.Header == CaptureHeader, true)})
 		} else if entry.PermRows != nil {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
 			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
@@ -144,18 +142,16 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			// Collapse: show only the first line of the header (the link line)
 			text = CollapseEntry(entry)
 			kb = &tele.ReplyMarkup{}
-			expandBtn := kb.Data("📖 Expand", "ce", "e")
-			kb.Inline(tele.Row{expandBtn})
+			kb.Inline(CaptureExtraRow(entry.Header == CaptureHeader, false))
 		} else {
 			var page int
 			text, page = ExpandEntry(entry)
-			collapseMk := &tele.ReplyMarkup{}
-			collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
+			extraRow := CaptureExtraRow(entry.Header == CaptureHeader, true)
 			if len(entry.Chunks) > 1 {
-				kb = helpers.BuildPageKeyboardWithExtra(page, len(entry.Chunks), []tele.Row{{collapseBtn}})
+				kb = helpers.BuildPageKeyboardWithExtra(page, len(entry.Chunks), []tele.Row{extraRow})
 			} else {
 				kb = &tele.ReplyMarkup{}
-				kb.Inline(tele.Row{collapseBtn})
+				kb.Inline(extraRow)
 			}
 		}
 		var editOpts []interface{}
@@ -168,6 +164,17 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if err != nil {
 			logger.Debug(fmt.Sprintf("ce edit error: %v", err))
 		}
+		return c.Respond()
+	})
+
+	// "del" callback: delete the transient message the button sits on
+	bot.Handle(&tele.InlineButton{Unique: "del"}, func(c tele.Context) error {
+		msgID := c.Message().ID
+		if err := c.Delete(); err != nil {
+			logger.Info(fmt.Sprintf("del callback: delete failed msg_id=%d err=%v", msgID, err))
+			return c.Respond(&tele.CallbackResponse{Text: "⚠️ Can't delete (>48h)"})
+		}
+		logger.Info(fmt.Sprintf("del callback: deleted msg_id=%d", msgID))
 		return c.Respond()
 	})
 
@@ -307,7 +314,9 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		cfg, _ := config.LoadAppConfig()
 		cfg.UsageSource = source
 		config.SaveAppConfig(cfg)
-		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("📊 Usage source → <b>%s</b>\n⏳ Fetching...", source), tele.ModeHTML)
+		fetchKb := &tele.ReplyMarkup{}
+		appendDeleteButton(fetchKb)
+		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("📊 Usage source → <b>%s</b>\n⏳ Fetching...", source), fetchKb, tele.ModeHTML)
 		if source == "api" {
 			return handleUsageCommandAPI(bs, c, c.Message())
 		}
@@ -970,28 +979,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "settings"}, func(c tele.Context) error {
-		switch c.Data() {
-		case "main":
-			helpers.RetryEdit(bot, c.Message(), buildSettingsTopText(), buildSettingsTopMenu(), tele.ModeHTML)
-		case "voice":
-			showSettingsVoice(bot, bs, c.Message())
-		case "cwd":
-			showSettingsCwd(bot, bs, c.Message())
-		case "toolnotify":
-			showSettingsToolNotify(bot, bs, c.Message())
-		case "perm":
-			showSettingsPerm(bot, bs, c.Message())
-		case "routes":
-			showSettingsRoutes(bot, bs, c.Message())
-		case "mailbox":
-			showSettingsMailbox(bot, bs, c.Message())
-		case "status":
-			showSettingsStatus(bot, bs, c.Message())
-		case "cron":
-			showSettingsCron(bot, bs, c.Message())
-		case "displayname":
-			showSettingsDisplayName(bot, bs, c.Message())
-		}
+		RenderSettingsSubmenu(bs, c.Message(), c.Data())
 		return c.Respond()
 	})
 

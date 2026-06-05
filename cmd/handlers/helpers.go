@@ -21,6 +21,9 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
+// CaptureHeader is the standard header prefix for pane capture messages.
+const CaptureHeader = "📺 Pane Capture\n"
+
 // safeInjectText is a convenience wrapper that builds SafeInjectTextParams from BotState.
 func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
 	p := helpers.SafeInjectTextParams{
@@ -134,7 +137,7 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 // Pagination threshold reads config.PaginationMaxRunes, matching helpers.SendPagedForward.
 func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
 	content = helpers.ShortenSeparators(content)
-	header := "📺 Pane Capture\n"
+	header := CaptureHeader
 	cfg, _ := config.LoadAppConfig()
 	paginationMax := 4000
 	if cfg.PaginationMaxRunes > 0 {
@@ -147,8 +150,7 @@ func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheSto
 	chunks := helpers.SplitBody(content, maxBody)
 	if len(chunks) == 1 {
 		kb := &tele.ReplyMarkup{}
-		btn := kb.Data("📗 Collapse", "ce", "c")
-		kb.Inline(tele.Row{btn})
+		kb.Inline(CaptureExtraRow(true, true))
 		sent, err := helpers.RetrySend(bot, chat, header+chunks[0], kb)
 		if err != nil {
 			return nil, err
@@ -157,9 +159,7 @@ func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheSto
 		return sent, nil
 	}
 	lastPage := len(chunks)
-	collapseMk := &tele.ReplyMarkup{}
-	collapseBtn := collapseMk.Data("📗 Collapse", "ce", "c")
-	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{{collapseBtn}})
+	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{CaptureExtraRow(true, true)})
 	sent, err := helpers.RetrySend(bot, chat, header+chunks[lastPage-1], kb)
 	if err != nil {
 		return nil, err
@@ -357,6 +357,7 @@ func handleUsageCommand(bs *types.BotState, c tele.Context) error {
 		sel.Data("📟 tmux", "usage_src", "tmux"),
 		sel.Data("🌐 api", "usage_src", "api"),
 	))
+	appendDeleteButton(sel)
 	_, err := helpers.RetrySend(bs.Bot, c.Chat(), "📊 Select usage source:", sel, tele.ModeHTML)
 	return err
 }
@@ -376,16 +377,18 @@ func handleUsageCommandAPI(bs *types.BotState, c tele.Context, existingMsg *tele
 			return err
 		}
 	}
+	delKb := &tele.ReplyMarkup{}
+	appendDeleteButton(delKb)
 	var apiErr error
 	var formatted string
 	formatted, usageCache, apiErr = helpers.FetchUsageFormatted(usageCache)
 	if apiErr != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: %v", apiErr))
-		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", apiErr.Error()), tele.ModeHTML)
+		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", apiErr.Error()), delKb, tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: usage fetched len=%d", len(formatted)))
-	helpers.RetryEdit(bot, msg, formatted, tele.ModeHTML)
+	helpers.RetryEdit(bot, msg, formatted, delKb, tele.ModeHTML)
 	logger.Info("handleUsageCommand: done")
 	return nil
 }
@@ -403,20 +406,26 @@ func handleUsageCommandTmux(bs *types.BotState, c tele.Context, existingMsg *tel
 			return err
 		}
 	}
+	delMk := &tele.ReplyMarkup{}
+	delRow := tele.Row{delMk.Data("🗑 Delete", "del")}
 	formatted, err := helpers.FetchUsageTmux()
 	if err != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: %v", err))
-		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", err.Error()), tele.ModeHTML)
+		errKb := &tele.ReplyMarkup{}
+		errKb.Inline(delRow)
+		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", err.Error()), errKb, tele.ModeHTML)
 		return nil
 	}
 	logger.Info(fmt.Sprintf("handleUsageCommand: parsed output len=%d", len(formatted)))
 	chunks := helpers.SplitBody(formatted, 4000)
 	if len(chunks) <= 1 {
-		helpers.RetryEdit(bot, msg, formatted, tele.ModeHTML)
+		okKb := &tele.ReplyMarkup{}
+		okKb.Inline(delRow)
+		helpers.RetryEdit(bot, msg, formatted, okKb, tele.ModeHTML)
 	} else {
-		kb := helpers.BuildPageKeyboard(1, len(chunks))
+		kb := helpers.BuildPageKeyboardWithExtra(1, len(chunks), []tele.Row{delRow})
 		helpers.RetryEdit(bot, msg, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
-		bs.Pages.Store(msg.ID, "", &stores.PageEntry{Chunks: chunks, PermRows: []tele.Row{}})
+		bs.Pages.Store(msg.ID, "", &stores.PageEntry{Chunks: chunks, PermRows: []tele.Row{delRow}})
 	}
 	logger.Info("handleUsageCommand: done")
 	return nil
@@ -475,22 +484,6 @@ func buildVoiceMenu(engine string) *tele.ReplyMarkup {
 	return menu
 }
 
-// handleVoiceCommand handles /bot_voice.
-func handleVoiceCommand(c tele.Context) error {
-	cfg, err := config.LoadAppConfig()
-	if err != nil {
-		return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-	}
-	engine := cfg.VoiceEngine
-	if engine == "" {
-		engine = "whisper"
-	}
-	text := buildVoiceText(cfg)
-	menu := buildVoiceMenu(engine)
-	_, err = helpers.RetrySend(c.Bot(), c.Chat(), text, menu, tele.ModeHTML)
-	return err
-}
-
 func buildSettingsTopText() string {
 	return "⚙️ <b>Bot Settings</b>\nSelect a category:"
 }
@@ -518,18 +511,88 @@ func buildSettingsTopMenu() *tele.ReplyMarkup {
 			menu.Data("👤 Display Name", "settings", "displayname"),
 		),
 	)
+	appendDeleteButton(menu)
 	return menu
 }
 
 func appendBackButton(menu *tele.ReplyMarkup) {
-	btn := menu.Data("⬅️ Back", "settings", "main")
+	back := menu.Data("⬅️ Back", "settings", "main")
+	del := menu.Data("🗑 Delete", "del")
+	menu.InlineKeyboard = append(menu.InlineKeyboard, []tele.InlineButton{*back.Inline(), *del.Inline()})
+}
+
+// appendDeleteButton appends a 🗑 Delete row (Unique "del").
+func appendDeleteButton(menu *tele.ReplyMarkup) {
+	btn := menu.Data("🗑 Delete", "del")
 	menu.InlineKeyboard = append(menu.InlineKeyboard, []tele.InlineButton{*btn.Inline()})
+}
+
+// CaptureExtraRow builds the collapse/expand row for capture/@-forward messages,
+// appending 🗑 Delete only for pane-capture entries (isCapture). Shared by the
+// ce/p callbacks, SendCaptureReply, and the test endpoint so all paths match.
+func CaptureExtraRow(isCapture, expanded bool) tele.Row {
+	mk := &tele.ReplyMarkup{}
+	var btn tele.Btn
+	if expanded {
+		btn = mk.Data("📗 Collapse", "ce", "c")
+	} else {
+		btn = mk.Data("📖 Expand", "ce", "e")
+	}
+	row := tele.Row{btn}
+	if isCapture {
+		row = append(row, mk.Data("🗑 Delete", "del"))
+	}
+	return row
+}
+
+// SendSettingsMenu sends the top-level settings menu to chat, records it in
+// SettingsMenuMsgs, and returns the sent message. Shared by the /bot_settings
+// handler and the /test/settings_message endpoint.
+func SendSettingsMenu(bs *types.BotState, chat *tele.Chat) (*tele.Message, error) {
+	sent, err := helpers.RetrySend(bs.Bot, chat, buildSettingsTopText(), buildSettingsTopMenu(), tele.ModeHTML)
+	if err != nil {
+		return nil, err
+	}
+	bs.SettingsMenuMsgs.Store(sent.ID, true)
+	return sent, nil
 }
 
 // IsSettingsMenu reports whether the given message ID is a settings menu message.
 func IsSettingsMenu(bs *types.BotState, msgID int) bool {
 	_, ok := bs.SettingsMenuMsgs.Load(msgID)
 	return ok
+}
+
+// RenderSettingsSubmenu renders the given settings sub-menu onto msg and reports
+// whether `data` matched a known sub-menu. Shared by the "settings" callback and
+// the /test/callback "settings" case (the bool lets the test catch an omitted/
+// typo'd case; a panic/broken builder surfaces as an HTTP 500).
+func RenderSettingsSubmenu(bs *types.BotState, msg *tele.Message, data string) bool {
+	switch data {
+	case "main":
+		helpers.RetryEdit(bs.Bot, msg, buildSettingsTopText(), buildSettingsTopMenu(), tele.ModeHTML)
+	case "voice":
+		showSettingsVoice(bs.Bot, bs, msg)
+	case "cwd":
+		showSettingsCwd(bs.Bot, bs, msg)
+	case "toolnotify":
+		showSettingsToolNotify(bs.Bot, bs, msg)
+	case "perm":
+		showSettingsPerm(bs.Bot, bs, msg)
+	case "routes":
+		showSettingsRoutes(bs.Bot, bs, msg)
+	case "mailbox":
+		showSettingsMailbox(bs.Bot, bs, msg)
+	case "status":
+		showSettingsStatus(bs.Bot, bs, msg)
+	case "cron":
+		showSettingsCron(bs.Bot, bs, msg)
+	case "displayname":
+		showSettingsDisplayName(bs.Bot, bs, msg)
+	default:
+		return false
+	}
+	return true
 }
 
 func buildPermSubMenu(currentMode string) *tele.ReplyMarkup {
@@ -826,7 +889,7 @@ func buildMailboxContent(chatType tele.ChatType, chatID int64, creds config.Cred
 	if creds.MailboxChatID != 0 {
 		return fmt.Sprintf("📬 <b>Mailbox</b>\nBound to chat %d", creds.MailboxChatID), menu
 	}
-	return "📬 <b>Mailbox</b>\nNo mailbox group bound. Send /bot_mailbox in a group to bind it.", menu
+	return "📬 <b>Mailbox</b>\nNo mailbox group bound. Open /bot_settings → 📬 Mailbox in a group to bind it.", menu
 }
 
 // showSettingsMailbox displays the mailbox binding settings sub-menu in the settings message.

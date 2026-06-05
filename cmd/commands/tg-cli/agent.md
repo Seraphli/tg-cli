@@ -141,7 +141,7 @@ tg-cli mailbox send --from agentA --to agentB \
 
 ## Mailbox Channel Binding
 
-To receive mailbox notifications in a Telegram channel, send `/bot_mailbox` in the channel. The bot will bind the mailbox to that channel and deliver new messages there.
+To receive mailbox notifications in a Telegram group, open `/bot_settings → 📬 Mailbox` in the group and tap "Bind as mailbox group". The bot will bind the mailbox to that group and deliver new messages there.
 
 ## Agent Collaboration Workflow
 

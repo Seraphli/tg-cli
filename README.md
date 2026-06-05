@@ -88,8 +88,6 @@ Interactive setup for whisper.cpp model download and language configuration.
 |---------|-------------|
 | `/start` | Welcome message |
 | `/bot_pair` | Start pairing flow |
-| `/bot_status` | Show bot and session status |
-| `/bot_routes` | List all active routes (tmux + project) |
 | `/bot_bind` | Bind a session to current group (tmux or project) |
 | `/bot_unbind` | Unbind a session from current group |
 | `/bot_capture` | Capture current tmux pane content |
