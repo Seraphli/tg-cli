@@ -171,6 +171,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	pref := tele.Settings{
 		Token:  creds.BotToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
+		Client: &http.Client{Timeout: 10 * time.Minute},
 	}
 	bot, err := tele.NewBot(pref)
 	if err != nil {

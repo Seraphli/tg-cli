@@ -24,24 +24,29 @@ func registerFile(mux *http.ServeMux, bs *types.BotState) {
 			Caption    string `json:"caption"`
 			TmuxTarget string `json:"tmux_target"`
 			CWD        string `json:"cwd"`
+			Async      bool   `json:"async"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			logger.Info("[File] rejected: invalid request body")
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid request"})
 			return
 		}
 		info, err := os.Stat(req.FilePath)
 		if err != nil {
+			logger.Info(fmt.Sprintf("[File] rejected: %s — file not found", req.FilePath))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file not found: %s", req.FilePath)})
 			return
 		}
 		if !info.Mode().IsRegular() {
+			logger.Info(fmt.Sprintf("[File] rejected: %s — not a regular file", req.FilePath))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not a regular file"})
 			return
 		}
 		if info.Size() > 50*1024*1024 {
+			logger.Info(fmt.Sprintf("[File] rejected: %s — too large (%d bytes, max 50MB)", req.FilePath, info.Size()))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("file too large: %d bytes (max 50MB for Telegram Bot API)", info.Size())})
 			return
@@ -72,18 +77,41 @@ func registerFile(mux *http.ServeMux, bs *types.BotState) {
 				Caption:  req.Caption,
 			}
 		}
+		if chat == nil {
+			logger.Info(fmt.Sprintf("[File] rejected: %s — no target chat resolved", req.FilePath))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no target chat resolved"})
+			return
+		}
 		var sendOpts []interface{}
 		if topicID > 0 {
 			sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
 		}
+		fileName := filepath.Base(req.FilePath)
+		fileSize := info.Size()
+		if req.Async {
+			go func() {
+				msg, err := helpers.RetrySend(bot, chat, sendable, sendOpts...)
+				if err != nil {
+					logger.Error(fmt.Sprintf("[File] send failed: %s (%d bytes) to chat %d: %v", fileName, fileSize, chat.ID, err))
+					helpers.RetrySend(bot, chat, fmt.Sprintf("❌ send-file failed: %s — %v", fileName, err), sendOpts...)
+					return
+				}
+				logger.Info(fmt.Sprintf("[File] File sent: %s to chat %d (msg_id=%d)", fileName, chat.ID, msg.ID))
+			}()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": fmt.Sprintf("queued: %s", fileName)})
+			return
+		}
 		msg, err := helpers.RetrySend(bot, chat, sendable, sendOpts...)
 		if err != nil {
+			logger.Error(fmt.Sprintf("[File] send failed: %s (%d bytes) to chat %d: %v", fileName, fileSize, chat.ID, err))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": fmt.Sprintf("telegram send failed: %v", err)})
 			return
 		}
-		logger.Info(fmt.Sprintf("[File] File sent: %s to chat %d (msg_id=%d)", filepath.Base(req.FilePath), chat.ID, msg.ID))
+		logger.Info(fmt.Sprintf("[File] File sent: %s to chat %d (msg_id=%d)", fileName, chat.ID, msg.ID))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": fmt.Sprintf("File sent: %s", filepath.Base(req.FilePath))})
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "message": fmt.Sprintf("File sent: %s", fileName)})
 	})
 }

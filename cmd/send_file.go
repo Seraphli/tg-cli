@@ -23,12 +23,14 @@ var (
 	sendFilePort int
 	sendFilePath string
 	sendCaption  string
+	sendAsync    bool
 )
 
 func init() {
 	SendFileCmd.Flags().IntVar(&sendFilePort, "port", 0, "HTTP server port (overrides config)")
 	SendFileCmd.Flags().StringVar(&sendFilePath, "file", "", "Absolute path to the file to send")
 	SendFileCmd.Flags().StringVar(&sendCaption, "caption", "", "Optional caption for the file")
+	SendFileCmd.Flags().BoolVar(&sendAsync, "async", false, "Send asynchronously: bot returns immediately and delivers the result via Telegram notification")
 	SendFileCmd.MarkFlagRequired("file")
 }
 
@@ -60,11 +62,12 @@ func runSendFile(cmd *cobra.Command, args []string) error {
 		}
 	}
 	cwd, _ := os.Getwd()
-	body, _ := json.Marshal(map[string]string{
+	body, _ := json.Marshal(map[string]interface{}{
 		"file_path":   sendFilePath,
 		"caption":     sendCaption,
 		"tmux_target": tmuxTarget,
 		"cwd":         cwd,
+		"async":       sendAsync,
 	})
 	resp, err := http.Post(
 		fmt.Sprintf("http://127.0.0.1:%d/file/send", port),
