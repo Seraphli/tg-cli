@@ -14,7 +14,6 @@ set +eo pipefail
 echo "$OUTPUT" | grep -q "%\|TARGET\|PANE"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '%|TARGET|PANE' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux list: output contains pane info"
 else
@@ -50,7 +49,6 @@ set +eo pipefail
 echo "$EVENT_RESP" | grep -qi "ok"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'ok' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "tmux event: /tmux/event API responded ok"
 else

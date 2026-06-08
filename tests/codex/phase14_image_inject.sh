@@ -6,6 +6,8 @@ echo ""
 echo "--- Image injection test ---"
 
 ensure_infrastructure
+
+start_codex "e2e-codex-14"
 pane_log "[image_inject] BEFORE test"
 
 TEST_IMG="/tmp/tg-cli-test-image-$$.jpg"
@@ -25,7 +27,6 @@ set +eo pipefail
 echo "$PANE_AFTER" | grep -q "\[Image\|tg-cli-test-image"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Image|tg-cli-test-image' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: Codex shows image in pane (image + caption)"
 else
@@ -36,7 +37,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image + caption)"
 else
@@ -55,7 +55,6 @@ set +eo pipefail
 echo "$PANE_AFTER2" | grep -q "\[Image\|tg-cli-test-image"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Image|tg-cli-test-image' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: Codex shows image in pane (image only)"
 else
@@ -66,7 +65,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE2 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image only)"
 else
@@ -87,7 +85,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE3 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Multi-line injection: UserPromptSubmit confirmed"
 else

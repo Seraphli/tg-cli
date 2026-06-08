@@ -26,7 +26,6 @@ set +eo pipefail
 echo "$SEND_OUTPUT" | grep -qi "sent\|ok\|delivered"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'sent|ok|delivered' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox file: send with attachment succeeded"
 else
@@ -35,7 +34,6 @@ else
   tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "Mailbox send:.*file"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'Mailbox send:.*file' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     pass "mailbox file: send with attachment confirmed in log"
   else
@@ -54,7 +52,6 @@ set +eo pipefail
 echo "$RECV_OUTPUT" | grep -qi "file test\|attachment\|Message with"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'file test|attachment|Message with' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox file: receive got message with attachment"
 else
@@ -70,13 +67,11 @@ set +eo pipefail
 echo "$INBOX_OUTPUT" | grep -q "File test"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'File test' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   set +eo pipefail
   echo "$INBOX_OUTPUT" | grep "File test" | grep -q "^\*\|Unread"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'File test...Unread' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[2]}" -eq 0 ]; then
     fail "mailbox file: attachment message still marked as unread after receive"
   else

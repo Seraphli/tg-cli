@@ -7,6 +7,8 @@ echo ""
 echo "--- CapturePane test ---"
 
 ensure_infrastructure
+
+start_codex "e2e-codex-10"
 pane_log "[capture_pane] BEFORE test"
 
 # Test CapturePane via HTTP API endpoint

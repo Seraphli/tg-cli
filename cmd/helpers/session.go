@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -90,11 +91,20 @@ func IsSessionRunning(tmuxTarget string) bool {
 	case "cc":
 		return !strings.HasPrefix(title, "✳")
 	case "codex":
-		cwd := GetPaneCWD(tmuxTarget)
-		return !(cwd != "" && title == filepath.Base(cwd))
+		return IsCodexBusyTitle(title)
 	default:
 		return false
 	}
+}
+
+// IsCodexBusyTitle reports whether a codex pane title indicates the CLI is busy.
+// Codex prefixes its pane title with a braille spinner frame (U+2800–U+28FF,
+// e.g. "⠙ project") while working, and shows just the (possibly truncated)
+// directory name when idle. Detecting the braille-block prefix is robust to
+// title truncation, unlike comparing against basename(cwd).
+func IsCodexBusyTitle(title string) bool {
+	r, _ := utf8.DecodeRuneInString(title)
+	return r >= 0x2800 && r <= 0x28FF
 }
 
 // RecordPending records a message for later ✍ reaction when UserPromptSubmit fires.

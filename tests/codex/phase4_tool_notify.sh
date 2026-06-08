@@ -8,6 +8,8 @@ echo "--- Codex tool notification test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-4"
+
 # Verify toolNotifyList is configured in test config
 TEST_APP_CONFIG="$TEST_CONFIG_DIR/config.json"
 if [ -f "$TEST_APP_CONFIG" ] && grep -q "Bash" "$TEST_APP_CONFIG" 2>/dev/null; then

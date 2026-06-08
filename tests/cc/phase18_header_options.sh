@@ -47,7 +47,6 @@ set +eo pipefail
 echo "$NEW_1A" | grep -q 'Session send via API:.*from=e2e-cli.*header_test_auto.*injectText=.*💬 Message from agent \[e2e-cli\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send via API...auto' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: auto-resolved from + header injected"
 else
@@ -57,7 +56,6 @@ set +eo pipefail
 echo "$NEW_1A" | grep -q 'Session send notification:.*from=e2e-cli.*header_test_auto'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification...auto' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification log includes auto-resolved from"
 else
@@ -76,7 +74,6 @@ set +eo pipefail
 echo "$STDERR_1B" | grep -q "cannot resolve sender"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'cannot resolve sender' PIPESTATUS=${_ps[*]}"
 if [ "$EXIT_1B" -ne 0 ] && [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: rejects anonymous send without from"
 else
@@ -87,7 +84,6 @@ set +eo pipefail
 echo "$NEW_1B" | grep -q 'Session send via API:.*header_test_noresolve'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send via API...noresolve' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   fail "session send: anonymous text reached bot log (inject should be blocked)"
 else
@@ -103,7 +99,6 @@ set +eo pipefail
 echo "$NEW_1C" | grep -q 'Session send via API:.*from=manual-sender.*header_test_explicit.*injectText=.*💬 Message from agent \[manual-sender\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send via API...explicit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --from: explicit sender used in inject header"
 else
@@ -113,7 +108,6 @@ set +eo pipefail
 echo "$NEW_1C" | grep -q 'Session send notification:.*from=manual-sender.*header_test_explicit'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification...explicit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --from: TG notification log includes from"
 else
@@ -131,7 +125,6 @@ set +eo pipefail
 echo "$NEW_1D" | grep -q 'Session send via API:.*noHeader=true.*header_test_noheader.*injectText="header_test_noheader'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send via API...noheader' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: inject has no header prefix"
 else
@@ -141,7 +134,6 @@ set +eo pipefail
 echo "$NEW_1D" | grep -q 'Session send notification:.*from=manual-sender.*header_test_noheader'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification...noheader' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: TG notification still sent with from"
 else
@@ -161,7 +153,6 @@ set +eo pipefail
 echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'tmux hook registered' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   fail "--skip-tmux: tmux hooks were registered despite --skip-tmux"
 else
@@ -195,7 +186,6 @@ else
     tail -n +"$((LOG_BEFORE_CRON + 1))" "$LOG_FILE" | grep -q "Cron inject job: injected to"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'Cron inject job: injected to' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       CRON_FIRED=true
       break
@@ -215,7 +205,6 @@ else
     echo "$PANE_CONTENT" | grep -q "Cron:"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'Cron:' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       pass "cron inject header: ⏰ Cron header found in pane"
     else

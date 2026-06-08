@@ -39,7 +39,6 @@ while [ $ELAPSED -lt 60 ]; do
   echo "$LIST" | grep -q "$CODEX_AGENT"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep '$CODEX_AGENT' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     SESSION_FOUND=true
     break

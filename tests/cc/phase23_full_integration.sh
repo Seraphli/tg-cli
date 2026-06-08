@@ -58,7 +58,6 @@ while [ $ELAPSED -lt 60 ]; do
   echo "$LIST" | grep -q "$INTEG_AGENT"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep '$INTEG_AGENT' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     SESSION_FOUND=true
     break
@@ -133,7 +132,6 @@ set +eo pipefail
 echo "$INBOX" | grep "$INTEG_AGENT" | grep -q "^\*"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'INTEG_AGENT...unread' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   fail "integration: mailbox inbox still shows unread (*) after receive"
 else
@@ -214,7 +212,6 @@ set +eo pipefail
 echo "$KILL_LOG" | grep -q "target=%"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'target=%' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "integration: SessionEnd kill-pane has pane target"
 else

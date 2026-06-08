@@ -38,7 +38,6 @@ set +eo pipefail
 echo "$LIST_OUTPUT" | grep -q "e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e-cli' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: contains agent name 'e2e-cli'"
 else
@@ -48,7 +47,6 @@ set +eo pipefail
 echo "$LIST_OUTPUT" | grep -q "target=\|%"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'target=|%' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: shows tmux target"
 else
@@ -65,7 +63,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: message injected and logged"
 else
@@ -76,7 +73,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "Session send notification\|CLI Message"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification sent"
 else
@@ -100,7 +96,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -q "📟"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '📟' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: header contains tmux target (📟)"
 else
@@ -112,7 +107,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -q "────────────────────────"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '────' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has separator lines between messages"
 else
@@ -124,7 +118,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'timestamp' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has timestamp format"
 else
@@ -138,7 +131,6 @@ set +eo pipefail
 echo "$NOTOOLS_OUTPUT" | grep -q "\[Bash\]"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Bash]' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   fail "session log --no-tools: still contains [Bash] entries"
 else
@@ -148,7 +140,6 @@ set +eo pipefail
 echo "$NOTOOLS_OUTPUT" | grep -q "\[assistant\]"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[assistant]' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log --no-tools: contains assistant text entries"
 else
@@ -158,7 +149,6 @@ set +eo pipefail
 echo "$NOTOOLS_OUTPUT" | grep -q "\[user\]"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[user]' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log --no-tools: contains user text entries"
 else
@@ -181,7 +171,6 @@ set +eo pipefail
 echo "$LOG_FULL" | grep -q "e2e_session_send_test_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: contains known content from transcript"
 else
@@ -204,7 +193,6 @@ set +eo pipefail
 echo "$ALL_TEXTS" | grep -q "e2e_session_send_test_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log accuracy: messages contain injected marker"
 else
@@ -214,7 +202,6 @@ else
   echo "$ALL_5" | grep -q "e2e_session_send_test_marker"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'e2e_session_send_test_marker (top5)' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     pass "session log accuracy: messages contain injected marker (in top 5)"
   else
@@ -234,7 +221,6 @@ set +eo pipefail
 echo "$MSG_TYPES" | grep -q "user\|assistant"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'user|assistant' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log accuracy: messages have valid user/assistant types"
 else

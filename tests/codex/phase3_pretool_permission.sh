@@ -8,6 +8,8 @@ echo "--- Codex PreToolUse permission test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-3"
+
 # Wait for Codex to settle
 wait_for_idle
 

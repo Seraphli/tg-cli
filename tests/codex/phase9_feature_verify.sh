@@ -9,6 +9,8 @@ echo "--- Feature verify: stopCooldown, session/send API ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-9"
+
 # =============================================
 # Sub-test B: stopCooldown triggers after Stop event
 # =============================================
@@ -36,7 +38,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_B2 + 1))" "$LOG_FILE" | grep -q "stopCooldown: waiting"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'stopCooldown: waiting' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   COOLDOWN_LOGGED=true
 fi
@@ -99,7 +100,6 @@ while [ $ELAPSED -lt 15 ]; do
   tail -n +"$((LOG_BEFORE_C + 1))" "$LOG_FILE" | grep -q "Session send via API:.*$SEND_TOKEN"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'Session send via API:.*SEND_TOKEN' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     SEND_FOUND=true
     break

@@ -26,7 +26,6 @@ start_claude() {
   echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'Bypass Permissions' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     $TMUX_TEST send-keys -t "$E2E_SESSION" Down
     sleep 1
@@ -37,7 +36,6 @@ start_claude() {
     echo "$PANE_CONTENT" | grep -qi "trust"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'trust' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
       echo "Trust dialog detected, confirmed."

@@ -8,6 +8,8 @@ echo "--- Codex long message pagination test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-2"
+
 # Wait for Codex to settle from previous phase
 echo "Waiting for Codex to settle..."
 wait_for_idle

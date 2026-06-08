@@ -132,9 +132,6 @@ if [ -n "$PHASE_NUM" ]; then
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  if [ "$BACKEND" = "codex" ]; then
-    start_codex
-  fi
   trap cleanup_sessions EXIT
   run_phase "$MATCHED"
 elif [ -n "$PHASE_START" ]; then
@@ -143,9 +140,6 @@ elif [ -n "$PHASE_START" ]; then
   start_bot
   export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
   setup_hooks
-  if [ "$BACKEND" = "codex" ]; then
-    start_codex
-  fi
   trap cleanup_sessions EXIT
   ALL_PHASES=( $(build_phase_list) )
   for phase in "${ALL_PHASES[@]}"; do
@@ -173,16 +167,14 @@ else
     for phase in $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done
-    # Switch: kill CC session, start Codex
+    # Switch: CC -> Codex (each codex phase self-starts its own codex instance)
     echo ""
     echo "=== Switching backend: CC -> Codex ==="
     export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-    start_codex
     for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done
   elif [ "$BACKEND" = "codex" ]; then
-    start_codex
     for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done

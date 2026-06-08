@@ -42,7 +42,6 @@ _e2e_on_error() {
   local pipestatus="$4"
   _e2e_last_error="rc=$rc line=$line cmd=$cmd pipestatus=$pipestatus"
   echo "ERROR|$_e2e_last_error" >> "$E2E_RESULTS_FILE"
-  echo "  ERROR: $_e2e_last_error"
 }
 
 _e2e_on_exit() {
@@ -207,7 +206,6 @@ wait_for_pane_content() {
     echo "$content" | grep -q "$pattern" 2>/dev/null
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep '$pattern' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       return 0
     fi

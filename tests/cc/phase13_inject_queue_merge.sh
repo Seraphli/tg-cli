@@ -49,7 +49,6 @@ while [ $ELAPSED -lt 30 ]; do
   echo "$PANE_TITLE" | grep -q '^✳'
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep '^✳' PIPESTATUS=${_ps[*]}"
   if [ -n "$PANE_TITLE" ] && [ "${_ps[1]}" -ne 0 ]; then
     CC_BUSY=true
     echo "  CC is busy at t=$ELAPSED: pane_title=\"$PANE_TITLE\""
@@ -81,7 +80,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_A"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'CC busy, queued MARKER_A' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   QUEUED_A=true
 fi
@@ -89,7 +87,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$MARKER_B"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'CC busy, queued MARKER_B' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   QUEUED_B=true
 fi
@@ -111,7 +108,6 @@ while [ $ELAPSED -lt 90 ]; do
   tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "flushInjectQueue.*merging"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'flushInjectQueue.*merging' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     MERGE_FOUND=true
     break
@@ -128,7 +124,6 @@ if [ "$MERGE_FOUND" = true ]; then
   echo "$MERGE_LINE" | grep -qE "items=[2-9]|items=[0-9][0-9]"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'items=...' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     pass "inject queue: merged 2+ items into single injection"
   else

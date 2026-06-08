@@ -8,6 +8,8 @@ echo "--- Codex PostToolUse notification test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-15"
+
 # Wait for Codex to settle
 wait_for_idle $TIMEOUT
 

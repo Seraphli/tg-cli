@@ -30,7 +30,6 @@ set +eo pipefail
 echo "$PANE_AFTER" | grep -q "\[Image"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Image' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: CC shows [Image] in pane (image + caption)"
 else
@@ -41,7 +40,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image + caption)"
 else
@@ -60,7 +58,6 @@ set +eo pipefail
 echo "$PANE_AFTER2" | grep -q "\[Image"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Image' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: CC shows [Image] in pane (image only)"
 else
@@ -71,7 +68,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE2 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Image injection: UserPromptSubmit confirmed (image only)"
 else
@@ -92,7 +88,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE3 + 1)) "$LOG_FILE" | grep -q "UserPromptSubmit"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'UserPromptSubmit' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Multi-line injection: UserPromptSubmit confirmed"
 else

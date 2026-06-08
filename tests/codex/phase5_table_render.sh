@@ -9,6 +9,8 @@ echo "--- Table rendering test (image) ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-5"
+
 wait_for_idle $TIMEOUT
 
 LOG_BEFORE_TABLE=$(wc -l < "$LOG_FILE")

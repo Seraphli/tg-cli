@@ -45,9 +45,21 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			result[sid] = sessionIdleEntry{Target: info.TmuxTarget, Idle: !running, Busy: running}
 		}
 
-		// If target filter specified but no match found, not idle
+		// If a target was specified but no registered session matched, check the
+		// tmux target directly (works before the session is registered, e.g. during
+		// codex startup). "idle" here means a known CLI (cc/codex) is up and not
+		// busy — NOT merely "nothing busy". IsSessionRunning returns false both when
+		// a CLI is idle AND when no CLI is running yet (empty title / unknown
+		// backend), so gate on a detected backend + non-empty title; otherwise a
+		// not-yet-started pane would be falsely reported idle and callers polling for
+		// readiness (start_codex) would proceed too early.
 		if targetFilter != "" && len(result) == 0 {
-			allIdle = false
+			title := helpers.GetPaneTitle(targetFilter)
+			ready := title != "" && helpers.DetectBackend(targetFilter) != ""
+			busy := ready && helpers.IsSessionRunning(targetFilter)
+			idle := ready && !busy
+			allIdle = idle
+			result[targetFilter] = sessionIdleEntry{Target: targetFilter, Idle: idle, Busy: busy}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

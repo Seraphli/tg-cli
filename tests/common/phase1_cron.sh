@@ -30,7 +30,6 @@ set +eo pipefail
 echo "$ADD_RESP" | grep -q '"ok":true'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
 if [ -n "$JOB_ID" ] && [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron add print job via API"
 else
@@ -59,7 +58,6 @@ set +eo pipefail
 echo "$LIST_RESP" | grep -q "$JOB_ID"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'JOB_ID' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron list contains added job ID"
 else
@@ -77,7 +75,6 @@ set +eo pipefail
 echo "$REMOVE_RESP" | grep -q '"ok":true'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron remove job via API"
 else
@@ -122,7 +119,6 @@ set +eo pipefail
 echo "$INJECT_ADD_RESP" | grep -q '"ok":true'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '\"ok\":true' PIPESTATUS=${_ps[*]}"
 if [ -n "$INJECT_JOB_ID" ] && [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron add inject job via API"
 else
@@ -179,7 +175,6 @@ set +eo pipefail
 echo "$CLI_OUTPUT" | grep -qi "job\|No cron\|id\|mode"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'job|No cron|id|mode' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Cron CLI list: command executed"
 else

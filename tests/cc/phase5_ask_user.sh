@@ -130,7 +130,6 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
     echo "$RESOLVE_LOG" | grep -q "answers=\|label="
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'answers=|label=' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       SELECTED_LABEL=$(echo "$RESOLVE_LOG" | grep -oP '(answers|label)=\K\S+')
       pass "AskUserQuestion option log contains label=$SELECTED_LABEL"

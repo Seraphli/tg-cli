@@ -14,7 +14,6 @@ set +eo pipefail
 echo "$SEND_OUTPUT" | grep -q "Message sent.*id:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Message sent.*id:' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox send: returned success with message id"
 else
@@ -28,7 +27,6 @@ set +eo pipefail
 echo "$NOSUB_OUTPUT" | grep -qi "subject.*required\|Error"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'subject.*required|Error' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox send: rejects missing --subject"
 else
@@ -43,7 +41,6 @@ set +eo pipefail
 echo "$INBOX_OUTPUT" | grep -q "e2e-sender"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e-sender' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox inbox: shows sender name"
 else
@@ -53,7 +50,6 @@ set +eo pipefail
 echo "$INBOX_OUTPUT" | grep -q "E2E mailbox body content"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'E2E mailbox body content' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "mailbox inbox: shows message content"
 else
@@ -66,7 +62,6 @@ set +eo pipefail
 echo "$INBOX_OUTPUT" | grep -qE '[0-9a-f]{16} \[e2e-sender\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '16-hex [e2e-sender]' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Round 1 Part 1: mailbox inbox human format contains 16-hex message ID"
 else
@@ -124,7 +119,6 @@ set +eo pipefail
 echo "$LONG_OUTPUT" | grep -q "Message sent.*id:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Message sent.*id:' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Bug 3A: long mailbox (>3500 chars) accepted by HTTP API"
 else
@@ -142,7 +136,6 @@ for SEG in SEGA SEGB; do
   echo "$INBOX_LONG" | grep -q "|${SEG}|"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep |${SEG}| PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -ne 0 ]; then
     MISSING_SEGS="$MISSING_SEGS $SEG"
   fi

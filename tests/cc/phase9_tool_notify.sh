@@ -121,7 +121,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -q "PostToolUse: updated msg_id="
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'PostToolUse: updated msg_id=' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "PostToolUse message update detected in bot log"
 else

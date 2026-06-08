@@ -8,6 +8,9 @@ echo "--- Codex bot notification test ---"
 
 ensure_infrastructure
 
+LOG_BEFORE=$(wc -l < "$LOG_FILE")
+start_codex "e2e-codex-1"
+
 # Check SessionStart notification fired during startup
 LOG_AFTER_START=$(wc -l < "$LOG_FILE")
 if [ "$LOG_AFTER_START" -gt "$LOG_BEFORE" ]; then

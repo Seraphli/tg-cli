@@ -293,7 +293,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-cli e2e-at-b --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-1: A ran 'session at e2e-cli e2e-at-b' itself (PostToolUse in bot log)"
 else
@@ -305,7 +304,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "@ channel opened:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC1-2: bot log contains '@ channel opened:'"
 else
@@ -319,7 +317,6 @@ set +eo pipefail
 echo "$AT_LIST" | grep -q "e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC1-3: /at/list shows channel with e2e-cli"
 else
@@ -331,7 +328,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "SendPagedForward:.*pages, msg_id="
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC1-4: pagination triggered (SendPagedForward log found)"
 else
@@ -343,7 +339,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "🔗"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-5 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC1-5: bot log contains 🔗 header"
 else
@@ -355,7 +350,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "e2e_at_open_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-6 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-6: B received e2e_at_open_marker (UserPromptSubmit payload)"
 else
@@ -367,7 +361,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "session at reply"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-7 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-7: B received reply instruction (session at reply)"
 else
@@ -379,7 +372,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "session at end"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-8 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-8: B received end instruction (session at end)"
 else
@@ -391,7 +383,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q '\[e2e-cli →'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-9 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-9: B received [e2e-cli → direction marker in UserPromptSubmit"
 else
@@ -403,7 +394,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "🔧"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-10 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-10: B received 🔧 tool_use summary"
 else
@@ -417,7 +407,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "$TC1_RESULT_MARKER"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-11 (tool_result filter, marker=$TC1_RESULT_MARKER) PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -ne 0 ]; then
   pass "TC1-11: tool_result filtered ($TC1_RESULT_MARKER absent from forward)"
 else
@@ -429,7 +418,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q "@"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-12 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-12: UserPromptSubmit contains @ prefix (open message text preserved)"
 else
@@ -461,7 +449,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q -- "--config-dir $TEST_CONFIG_DIR"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-14 (--config-dir $TEST_CONFIG_DIR) PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-14: forwarded reply instruction carries --config-dir $TEST_CONFIG_DIR (B reaches test bot)"
 else
@@ -473,7 +460,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "UserPromptSubmit" | grep -q -- "--port $TEST_PORT"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC1-15 (--port $TEST_PORT) PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC1-15: forwarded reply instruction carries --port $TEST_PORT"
 else
@@ -655,7 +641,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC3 + 1))" "$LOG_FILE" | grep "\[INFO\] @ forward:" | grep -q "\[e2e-cli\]"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC3-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC3-2: forward content contains [e2e-cli]: role marker"
 else
@@ -695,7 +680,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at reply e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC4-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC4-1: B ran 'session at reply e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
@@ -707,7 +691,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -q "@ reply:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC4-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC4-2: bot log contains '@ reply:'"
 else
@@ -719,7 +702,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -q "e2e_at_reply_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC4-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC4-3: reply text e2e_at_reply_marker found in bot log"
 else
@@ -731,7 +713,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -q '\[e2e-at-b → e2e-cli\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC4-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC4-4: [e2e-at-b → e2e-cli]: direction marker found in bot log"
 else
@@ -835,7 +816,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -q "🔗"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC5-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC5-1: bot log contains 🔗 header after AskQ forward"
 else
@@ -847,7 +827,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -q "is asking a question"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC5-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC5-2: bot log contains 'is asking a question'"
 else
@@ -859,7 +838,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -q "Below is the update and question"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC5-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC5-3: bot log contains 'Below is the update and question'"
 else
@@ -871,7 +849,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -q "❓"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC5-5 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC5-5: bot log contains ❓ (AskQ forwarded to target)"
 else
@@ -883,7 +860,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -q '\[e2e-cli →'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC5-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC5-4: [e2e-cli → direction marker in AskQ forward log"
 else
@@ -920,7 +896,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep -q "sent you a message via @ channel"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC6-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC6-2: 'sent you a message via @ channel' found in bot log (CLI existing channel path)"
 else
@@ -932,7 +907,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep -q "e2e_tc6_existing_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC6-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC6-3: message content marker in bot log"
 else
@@ -944,7 +918,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep -q '\[e2e-cli → e2e-at-b\]:'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC6-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC6-4: [e2e-cli → e2e-at-b]: direction marker found in bot log"
 else
@@ -956,7 +929,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep -qi "safeInjectText\|inject.*e2e-cli\|UserPromptSubmit.*e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC6-5 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC6-5: pane inject activity for initiator found in bot log (existing channel)"
 else
@@ -1000,7 +972,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-cli e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC7-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC7-1: A ran 'session at end e2e-cli e2e-at-b' itself (PostToolUse in bot log)"
 else
@@ -1012,7 +983,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep -q "@ channel closed:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC7-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC7-2: bot log contains '@ channel closed:'"
 else
@@ -1024,7 +994,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep -q "channel closed"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC7-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC7-3: bot log contains 'channel closed'"
 else
@@ -1048,7 +1017,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep -i "safeInjectText\|inject.*channel closed\|channel closed" | grep -q "."
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC7-6 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC7-6: close inject activity found in bot log"
 else
@@ -1089,7 +1057,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC8-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC8-1: B ran 'session at end e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
@@ -1100,7 +1067,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep -q "@ channel closed"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC8-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC8-2: bot log shows '@ channel closed' (target-side close succeeded)"
 else
@@ -1236,7 +1202,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC10" | grep -q "e2e_autoforward_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC10-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC10-1: B receives autoforward (e2e_autoforward_marker found)"
 else
@@ -1248,7 +1213,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC10" | grep -q "sent you a message via @ channel"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC10-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC10-2: instruction actor uses displayName ('sent you a message via @ channel')"
 else
@@ -1260,7 +1224,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC10" | grep -q '\[e2e-cli → e2e-at-b\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC10-3 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC10-3: content label has direction [e2e-cli → e2e-at-b]:"
 else
@@ -1297,7 +1260,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-at-b e2e-cli --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC11-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[2]}" -eq 0 ]; then
   pass "TC11-1: B ran 'session at e2e-at-b e2e-cli' itself (PostToolUse in bot log)"
 else
@@ -1309,7 +1271,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC11" | grep -q "@ channel opened:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC11-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC11-2: bot log contains '@ channel opened:'"
 else
@@ -1321,8 +1282,7 @@ set +eo pipefail
 echo "$AFTER_LOG_TC11" | grep -q 'e2e-at-b.*opened a channel to you'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC11-3 PIPESTATUS=${_ps[*]}"
-if [ "${_ps[0]}" -eq 0 ]; then
+if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC11-3: A target instruction uses session name actor (e2e-at-b opened a channel to you)"
 else
   fail "TC11-3: A target instruction missing 'e2e-at-b opened a channel to you' in log"
@@ -1333,7 +1293,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC11" | grep -q "e2e_agent_open_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC11-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC11-4: A receives e2e_agent_open_marker"
 else
@@ -1345,7 +1304,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC11" | grep -q '\[e2e-at-b → e2e-cli\]'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC11-5 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC11-5: A content label has direction [e2e-at-b → e2e-cli]:"
 else
@@ -1437,7 +1395,6 @@ set +eo pipefail
 echo "$AT_LIST_TC12" | grep -q "e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-1 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-1: /at/list shows e2e-at-b (two targets open)"
 else
@@ -1449,7 +1406,6 @@ set +eo pipefail
 echo "$AT_LIST_TC12" | grep -q "e2e-at-c"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-2 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-2: /at/list shows e2e-at-c (two targets open)"
 else
@@ -1507,7 +1463,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC12_STOP" | grep -q "@ forward: e2e-cli → e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-4 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-4: B receives Stop forward (@ forward: e2e-cli → e2e-at-b)"
 else
@@ -1519,7 +1474,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC12_STOP" | grep -q "@ forward: e2e-cli → e2e-at-c"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-5 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-5: C receives Stop forward (@ forward: e2e-cli → e2e-at-c)"
 else
@@ -1531,7 +1485,6 @@ set +eo pipefail
 echo "$AFTER_LOG_TC12_STOP" | grep -q "e2e_multi_stop_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-6 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-6: stop marker content (e2e_multi_stop_marker) forwarded"
 else
@@ -1587,7 +1540,6 @@ set +eo pipefail
 echo "$AT_LIST_TC12_AFTER" | grep -q "e2e-at-c"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-9 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "TC12-9: e2e-at-c still in /at/list after closing B"
 else
@@ -1599,7 +1551,6 @@ set +eo pipefail
 echo "$AT_LIST_TC12_AFTER" | grep -q "e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: TC12-10 PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -ne 0 ]; then
   pass "TC12-10: e2e-at-b removed from /at/list (channel closed)"
 else

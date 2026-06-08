@@ -8,6 +8,8 @@ echo "--- Merge mode test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-12"
+
 # Bind route for merge test
 AGENT_NAME="e2e-cli"
 SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
@@ -37,6 +39,9 @@ if [ -z "$SESSION_ID" ]; then
   fail "Could not extract session ID for merge test"
   exit 1
 fi
+
+# Name the fresh per-phase session so /route/bind name=e2e-cli resolves
+curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=$AGENT_NAME" > /dev/null 2>&1 || true
 
 BIND_PAYLOAD=$(jq -n --arg n "$AGENT_NAME" --argjson c "$DEFAULT_CHAT_ID" '{name: $n, chat_id: $c, topic_id: 0}')
 curl -s -X POST -H "Content-Type: application/json" -d "$BIND_PAYLOAD" "http://127.0.0.1:$TEST_PORT/route/bind" > /dev/null

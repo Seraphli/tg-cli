@@ -26,7 +26,6 @@ if [ "${E2E_BACKEND:-}" != "codex" ]; then
   echo "$USAGE_OUTPUT" | grep -q "CC Usage"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'CC Usage' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     pass_opt "usage CLI (tmux): output contains CC Usage header"
   else
@@ -63,7 +62,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_B2 + 1))" "$LOG_FILE" | grep -q "stopCooldown: waiting"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'stopCooldown: waiting' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   COOLDOWN_LOGGED=true
 fi
@@ -126,7 +124,6 @@ while [ $ELAPSED -lt 15 ]; do
   tail -n +"$((LOG_BEFORE_C + 1))" "$LOG_FILE" | grep -q "Session send via API:.*$SEND_TOKEN"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep 'Session send via API' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     SEND_FOUND=true
     break

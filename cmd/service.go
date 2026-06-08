@@ -245,6 +245,21 @@ var serviceUpgradeCmd = &cobra.Command{
 		} else {
 			fmt.Println("Claude settings migrated.")
 		}
+		// Apply Codex hook setup/migration so upgrades stay consistent with `tg-cli setup`
+		// (codex_hooks -> hooks in CODEX_HOME/config.toml + re-register hooks.json).
+		port := 12500
+		if creds, err := config.LoadCredentials(); err == nil && creds.Port != 0 {
+			port = creds.Port
+		}
+		hookCommand := fmt.Sprintf("%s hook --port %d", binPath, port)
+		if config.ConfigDir != "" {
+			hookCommand = fmt.Sprintf("%s --config-dir %s hook --port %d", binPath, config.ConfigDir, port)
+		}
+		if err := InstallCodexHooks(home, hookCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: codex hooks migration failed: %v\n", err)
+		} else {
+			fmt.Println("Codex hooks migrated.")
+		}
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
 		fmt.Printf("Upgrade complete (v%s)\n", newVersion)

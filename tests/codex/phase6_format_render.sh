@@ -9,6 +9,8 @@ echo "--- Format rendering test (lists, indentation, code blocks) ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-6"
+
 wait_for_idle $TIMEOUT
 
 LOG_BEFORE_FMT=$(wc -l < "$LOG_FILE")
@@ -98,7 +100,6 @@ set +eo pipefail
 echo "$PANE_RAW" | grep -q "Child item" 2>/dev/null
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Child item' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "CLI pane shows nested list content"
 else
@@ -133,7 +134,6 @@ set +eo pipefail
 echo "$PANE_RAW" | grep -q "Step one" 2>/dev/null
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Step one' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ] && grep -q "Step one" "$TG_PLAIN_FILE" 2>/dev/null; then
   pass "Both CLI and TG contain ordered list content"
 else
@@ -193,7 +193,6 @@ if [ "$TAB_STOP_FOUND" = true ]; then
     echo "$PRE_CONTENT" | grep -qP '\t'
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep '\\t' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       fail "TG code block still contains literal tab characters"
     else

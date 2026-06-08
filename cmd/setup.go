@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -69,6 +70,87 @@ func MigrateClaudeSettings(settingsPath string) error {
 		return err
 	}
 	return os.WriteFile(settingsPath, out, 0644)
+}
+
+// InstallCodexHooks registers the tg-cli Codex hooks in CODEX_HOME/hooks.json and
+// enables the stable `hooks` feature in config.toml (migrating the legacy experimental
+// `codex_hooks` flag). It is idempotent: existing tg-cli hook entries are replaced, and
+// the config.toml hooks/codex_hooks line is rewritten in place. home is the user home dir
+// (used only when CODEX_HOME is unset); hookCommand is the "<bin> hook --port <port>"
+// string substituted for the HOOK_CMD placeholder. Reused by both `tg-cli setup` and
+// `tg-cli service upgrade` so the two stay consistent.
+func InstallCodexHooks(home, hookCommand string) error {
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if err := os.MkdirAll(codexHome, 0755); err != nil {
+		return fmt.Errorf("create codex home: %w", err)
+	}
+	codexHooksPath := filepath.Join(codexHome, "hooks.json")
+	// Read template and replace HOOK_CMD placeholder
+	codexTemplate := strings.ReplaceAll(string(codexConfigJSON), "HOOK_CMD", hookCommand)
+	// Read existing hooks.json if present
+	var codexHooks map[string]interface{}
+	if data, err := os.ReadFile(codexHooksPath); err == nil {
+		json.Unmarshal(data, &codexHooks)
+	}
+	if codexHooks == nil {
+		codexHooks = make(map[string]interface{})
+	}
+	// Parse our template
+	var ourCodexHooks map[string]interface{}
+	json.Unmarshal([]byte(codexTemplate), &ourCodexHooks)
+	// Merge: for each event, remove existing tg-cli entries, add ours
+	if ourHooksMap, ok := ourCodexHooks["hooks"].(map[string]interface{}); ok {
+		existingHooksMap, _ := codexHooks["hooks"].(map[string]interface{})
+		if existingHooksMap == nil {
+			existingHooksMap = make(map[string]interface{})
+		}
+		for event, ourEntries := range ourHooksMap {
+			existing, _ := existingHooksMap[event].([]interface{})
+			// Filter out existing tg-cli entries
+			filtered := []interface{}{}
+			for _, e := range existing {
+				eJSON, _ := json.Marshal(e)
+				if !strings.Contains(string(eJSON), "tg-cli") {
+					filtered = append(filtered, e)
+				}
+			}
+			// Add our entries
+			if ourList, ok := ourEntries.([]interface{}); ok {
+				filtered = append(filtered, ourList...)
+			}
+			existingHooksMap[event] = filtered
+		}
+		codexHooks["hooks"] = existingHooksMap
+	}
+	codexData, _ := json.MarshalIndent(codexHooks, "", "  ")
+	if err := os.WriteFile(codexHooksPath, codexData, 0644); err != nil {
+		return fmt.Errorf("write codex hooks: %w", err)
+	}
+	fmt.Printf("Codex hooks installed to %s\n", codexHooksPath)
+	// Enable the stable `hooks` feature in config.toml. Codex renamed the old
+	// experimental `codex_hooks` flag to `hooks` (now stable, default-on).
+	// Remove any existing hooks / codex_hooks line at the line level (tolerant
+	// of spacing and `= false`), then add `hooks = true` — fully idempotent.
+	codexConfigPath := filepath.Join(codexHome, "config.toml")
+	configContent, _ := os.ReadFile(codexConfigPath)
+	configStr := string(configContent)
+	hooksLineRe := regexp.MustCompile(`(?m)^[ \t]*(codex_)?hooks[ \t]*=.*\n?`)
+	newConfig := hooksLineRe.ReplaceAllString(configStr, "")
+	if strings.Contains(newConfig, "[features]") {
+		newConfig = strings.Replace(newConfig, "[features]", "[features]\nhooks = true", 1)
+	} else {
+		newConfig += "\n[features]\nhooks = true\n"
+	}
+	if newConfig != configStr {
+		if err := os.WriteFile(codexConfigPath, []byte(newConfig), 0644); err != nil {
+			return fmt.Errorf("write codex config: %w", err)
+		}
+		fmt.Println("Codex hooks feature enabled in config.toml")
+	}
+	return nil
 }
 
 var SetupCmd = &cobra.Command{
@@ -320,65 +402,8 @@ func runSetup(cmd *cobra.Command, args []string) {
 	}
 	// Register Codex hooks (write to ~/.codex/hooks.json)
 	if !setupUninstallFlag {
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(home, ".codex")
-		}
-		os.MkdirAll(codexHome, 0755)
-		codexHooksPath := filepath.Join(codexHome, "hooks.json")
-		// Read template and replace HOOK_CMD placeholder
-		codexTemplate := string(codexConfigJSON)
-		codexTemplate = strings.ReplaceAll(codexTemplate, "HOOK_CMD", hookCommand)
-		// Read existing hooks.json if present
-		var codexHooks map[string]interface{}
-		if data, err := os.ReadFile(codexHooksPath); err == nil {
-			json.Unmarshal(data, &codexHooks)
-		}
-		if codexHooks == nil {
-			codexHooks = make(map[string]interface{})
-		}
-		// Parse our template
-		var ourCodexHooks map[string]interface{}
-		json.Unmarshal([]byte(codexTemplate), &ourCodexHooks)
-		// Merge: for each event, remove existing tg-cli entries, add ours
-		if ourHooksMap, ok := ourCodexHooks["hooks"].(map[string]interface{}); ok {
-			existingHooksMap, _ := codexHooks["hooks"].(map[string]interface{})
-			if existingHooksMap == nil {
-				existingHooksMap = make(map[string]interface{})
-			}
-			for event, ourEntries := range ourHooksMap {
-				existing, _ := existingHooksMap[event].([]interface{})
-				// Filter out existing tg-cli entries
-				filtered := []interface{}{}
-				for _, e := range existing {
-					eJSON, _ := json.Marshal(e)
-					if !strings.Contains(string(eJSON), "tg-cli") {
-						filtered = append(filtered, e)
-					}
-				}
-				// Add our entries
-				if ourList, ok := ourEntries.([]interface{}); ok {
-					filtered = append(filtered, ourList...)
-				}
-				existingHooksMap[event] = filtered
-			}
-			codexHooks["hooks"] = existingHooksMap
-		}
-		codexData, _ := json.MarshalIndent(codexHooks, "", "  ")
-		os.WriteFile(codexHooksPath, codexData, 0644)
-		fmt.Printf("Codex hooks installed to %s\n", codexHooksPath)
-		// Enable codex_hooks feature flag in config.toml
-		codexConfigPath := filepath.Join(codexHome, "config.toml")
-		configContent, _ := os.ReadFile(codexConfigPath)
-		configStr := string(configContent)
-		if !strings.Contains(configStr, "codex_hooks") {
-			if strings.Contains(configStr, "[features]") {
-				configStr = strings.Replace(configStr, "[features]", "[features]\ncodex_hooks = true", 1)
-			} else {
-				configStr += "\n[features]\ncodex_hooks = true\n"
-			}
-			os.WriteFile(codexConfigPath, []byte(configStr), 0644)
-			fmt.Println("Codex hooks feature enabled in config.toml")
+		if err := InstallCodexHooks(home, hookCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: codex hooks setup failed: %v\n", err)
 		}
 	} else {
 		// Uninstall: remove tg-cli entries from CODEX_HOME/hooks.json

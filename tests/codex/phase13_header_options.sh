@@ -8,6 +8,24 @@ echo "--- Header options test (session send --no-header, cron inject header, --s
 
 ensure_infrastructure
 
+start_codex "e2e-codex-13"
+
+# Name the fresh per-phase session so `session send --name e2e-cli` resolves
+SESSION_ID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+import sys, json
+pane = sys.argv[1]
+d = json.load(sys.stdin)
+for s in d.get("sessions", []):
+    t = s.get("target", "")
+    if t == pane or t.startswith(pane + "@"):
+        print(s.get("id", ""))
+        sys.exit(0)
+print("")
+' "$E2E_PANE" 2>/dev/null || echo "")
+if [ -n "$SESSION_ID" ]; then
+  curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=e2e-cli" > /dev/null 2>&1 || true
+fi
+
 # =============================================
 # Test 1: session send --no-header
 # =============================================
@@ -20,7 +38,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_H + 1))" "$LOG_FILE" | grep -q "Session send notification:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification:' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification sent (with header)"
 else
@@ -35,7 +52,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send via API:.*header_test_noheader"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send via API:.*header_test_noheader' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: API log recorded"
 else
@@ -45,7 +61,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send notification:"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification:' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send --no-header: TG notification still sent"
 else
@@ -65,7 +80,6 @@ set +eo pipefail
 echo "$INSTALL_OUTPUT" | grep -q "tmux hook registered"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'tmux hook registered' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   fail "--skip-tmux: tmux hooks were registered despite --skip-tmux"
 else
@@ -99,7 +113,6 @@ else
     tail -n +"$((LOG_BEFORE_CRON + 1))" "$LOG_FILE" | grep -q "Cron inject job: injected to"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'Cron inject job: injected to' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       CRON_FIRED=true
       break
@@ -119,7 +132,6 @@ else
     echo "$PANE_CONTENT" | grep -q "Cron:"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
-    echo "  DEBUG: grep 'Cron:' PIPESTATUS=${_ps[*]}"
     if [ "${_ps[1]}" -eq 0 ]; then
       pass "cron inject header: ⏰ Cron header found in pane"
     else

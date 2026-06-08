@@ -8,6 +8,8 @@ echo "--- Group routing test ---"
 
 ensure_infrastructure
 
+start_codex "e2e-codex-11"
+
 # Use a fixed agent name for testing
 AGENT_NAME="e2e-cli"
 
@@ -29,6 +31,9 @@ else
   fail "Could not extract session ID from session list API"
   exit 1
 fi
+
+# Name the fresh per-phase session so /route/bind name=e2e-cli resolves
+curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=$AGENT_NAME" > /dev/null 2>&1 || true
 
 # Call POST /route/bind
 echo "  Binding route: name=$AGENT_NAME → chat=$DEFAULT_CHAT_ID"

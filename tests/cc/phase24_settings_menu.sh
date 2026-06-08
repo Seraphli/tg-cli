@@ -17,13 +17,11 @@ set +eo pipefail
 echo "$RESP" | grep -q '"status"'
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '\"status\"' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   set +eo pipefail
   echo "$RESP" | grep -q '"ok"'
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
-  echo "  DEBUG: grep '\"ok\"' PIPESTATUS=${_ps[*]}"
   if [ "${_ps[1]}" -eq 0 ]; then
     pass "Test callback endpoint registered and responding"
   else
@@ -39,7 +37,6 @@ set +eo pipefail
 tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -q "Test callback"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Test callback' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "Settings callback logged"
 else

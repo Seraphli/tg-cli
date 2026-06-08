@@ -1,8 +1,11 @@
 #!/bin/bash
-# Phase 8: Session CLI commands + session log transcript tests (runs before exit to access full transcript)
+# Phase 8: Session CLI commands + session log transcript tests (self-contained per-phase session)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/codex_common.sh"
+
+ensure_infrastructure
+start_codex "e2e-codex-8"
 
 echo ""
 echo "--- Session CLI commands test ---"
@@ -32,7 +35,6 @@ set +eo pipefail
 echo "$LIST_OUTPUT" | grep -q "e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e-cli' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: contains agent name 'e2e-cli'"
 else
@@ -42,7 +44,6 @@ set +eo pipefail
 echo "$LIST_OUTPUT" | grep -q "target=\|%"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'target=|%' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session list: shows tmux target"
 else
@@ -59,7 +60,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "e2e_session_send_test_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: message injected and logged"
 else
@@ -70,7 +70,6 @@ set +eo pipefail
 tail -n +$((LOG_BEFORE+1)) "$LOG_FILE" | grep -q "Session send notification\|CLI Message"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'Session send notification|CLI Message' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session send: TG notification sent"
 else
@@ -84,7 +83,7 @@ echo ""
 echo "--- Session log transcript tests ---"
 pane_log "[session_log] BEFORE transcript tests"
 
-# Test session log — verify actual content from earlier phases
+# Test session log — verify actual content from this phase's own session
 wait_for_idle $TIMEOUT
 LOG_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session log --name e2e-cli --port "$TEST_PORT" --lines 20 2>&1) || true
 
@@ -94,7 +93,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -q "📟"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '📟' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: header contains tmux target (📟)"
 else
@@ -106,7 +104,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -q "────────────────────────"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '────' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has separator lines between messages"
 else
@@ -118,7 +115,6 @@ set +eo pipefail
 echo "$LOG_OUTPUT" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'timestamp' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: has timestamp format"
 else
@@ -132,7 +128,6 @@ set +eo pipefail
 echo "$NOTOOLS_OUTPUT" | grep -q "\[Bash\]"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep '[Bash]' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   fail "session log --no-tools: still contains [Bash] entries"
 else
@@ -155,7 +150,6 @@ set +eo pipefail
 echo "$LOG_FULL" | grep -q "e2e_session_send_test_marker"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'e2e_session_send_test_marker' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log: contains known content from transcript"
 else
@@ -185,7 +179,6 @@ set +eo pipefail
 echo "$MSG_TYPES" | grep -q "user\|assistant\|response_item"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-echo "  DEBUG: grep 'user|assistant|response_item' PIPESTATUS=${_ps[*]}"
 if [ "${_ps[1]}" -eq 0 ]; then
   pass "session log accuracy: messages have valid types"
 else
