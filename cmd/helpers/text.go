@@ -33,8 +33,14 @@ func findUnclosedTags(s string) []string {
 				}
 			}
 		} else {
-			// Self-closing or unknown — only track known Telegram tags
-			name := strings.ToLower(strings.Fields(tag)[0])
+			// Self-closing or unknown — only track known Telegram tags.
+			// Empty or whitespace-only pseudo-tags (e.g. "<>", "< >") produce
+			// no fields; skip them to avoid an index-out-of-range panic.
+			fields := strings.Fields(tag)
+			if len(fields) == 0 {
+				continue
+			}
+			name := strings.ToLower(fields[0])
 			for _, t := range htmlTags {
 				if name == t {
 					stack = append(stack, name)
