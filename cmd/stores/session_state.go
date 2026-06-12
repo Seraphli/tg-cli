@@ -198,14 +198,15 @@ func (s *SessionStateStore) All() map[string]SessionInfo {
 }
 
 // FindByTarget returns the session ID for a given tmux target.
-// Matching strips any "@socket_path" suffix from both sides so short-format
-// queries (e.g. "%5") can match long-format stored targets (e.g. "%5@/tmp/tmux-1000/default").
+// A full-format query (containing "@socket") must match a stored target
+// exactly, so the same pane id on different tmux sockets does not collide.
+// A bare short-format query (e.g. "%5", no "@") matches a stored target by
+// pane id only, preserving short-format lookups from the launch path.
 func (s *SessionStateStore) FindByTarget(target string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	normalized := stripSocketPath(target)
 	for sid, info := range s.sessions {
-		if stripSocketPath(info.TmuxTarget) == normalized {
+		if targetMatches(target, info.TmuxTarget) {
 			return sid, true
 		}
 	}
@@ -213,14 +214,13 @@ func (s *SessionStateStore) FindByTarget(target string) (string, bool) {
 }
 
 // FindInfoByTarget returns a pointer to the SessionInfo for a given tmux target.
-// Matching strips any "@socket_path" suffix from both sides so short-format
-// queries can match long-format stored targets.
+// Matching follows the same socket-aware rule as FindByTarget: a full-format
+// query must match exactly; a bare short-format query matches by pane id only.
 func (s *SessionStateStore) FindInfoByTarget(target string) *SessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	normalized := stripSocketPath(target)
 	for _, info := range s.sessions {
-		if stripSocketPath(info.TmuxTarget) == normalized {
+		if targetMatches(target, info.TmuxTarget) {
 			cp := info
 			return &cp
 		}
@@ -295,10 +295,22 @@ func (s *SessionStateStore) FindInfoByID(sessionID string) *SessionInfo {
 	return &cp
 }
 
+// targetMatches reports whether a query tmux target matches a stored target.
+// A full-format query (containing "@socket") must equal the stored target
+// exactly, so the same pane id on different tmux sockets does not collide.
+// A bare short-format query (no "@") matches against the stored target's
+// pane-id portion, preserving short-format lookups from the launch path.
+func targetMatches(query, stored string) bool {
+	if strings.Contains(query, "@") {
+		return query == stored
+	}
+	return query == stripSocketPath(stored)
+}
+
 // stripSocketPath removes the "@socket_path" suffix from a tmux target,
-// returning just the bare pane ID portion. Used by FindByTarget /
-// FindInfoByTarget to match short-format queries against long-format
-// stored targets (hook-originated sessions store the full pane@socket form).
+// returning just the bare pane ID portion. Used by targetMatches to compare
+// a bare short-format query against long-format stored targets (hook-originated
+// sessions store the full pane@socket form).
 func stripSocketPath(target string) string {
 	if idx := strings.Index(target, "@"); idx >= 0 {
 		return target[:idx]
