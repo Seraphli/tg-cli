@@ -20,7 +20,7 @@ echo "Waiting for Claude to settle..."
 wait_for_idle
 
 # Inject a long-output prompt to trigger pagination
-LONG_PROMPT="Without using any tools, write a comprehensive essay about the history and evolution of computer operating systems. Cover these topics in detail with at least 2 paragraphs each: 1) Early batch processing systems in the 1950s, 2) Time-sharing systems in the 1960s, 3) Unix and its philosophy, 4) The rise of personal computers and DOS/Windows, 5) Linux and open source movement, 6) Modern mobile operating systems iOS and Android, 7) Cloud operating systems and containers, 8) Future trends in OS design. You MUST write at least 1500 words total. Do not use any tools."
+LONG_PROMPT="Without using any tools, write a single flowing paragraph of between 180 and 240 words about the history and evolution of computer operating systems — touch on early batch processing, 1960s time-sharing, Unix and its philosophy, the rise of personal computers, Linux and open source, and modern mobile operating systems. Write it as one continuous prose response (no lists, no headings). Do not use any tools."
 pane_log "[pagination] BEFORE injecting long prompt"
 inject_prompt "$LONG_PROMPT"
 echo "Long prompt injected, waiting for Claude to respond and trigger pagination..."
@@ -73,5 +73,5 @@ else
   fi
 fi
 
-# Typing continuity: inject → Stop (long prompt, ~30s+ without tools)
+# Typing continuity: inject → Stop (180-240 word prose, no tools)
 check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase3"

@@ -727,89 +727,35 @@ pane_log "[TC5] BEFORE AskQ forward (B)" "$AT_PANE"
 
 LOG_BEFORE_TC5=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 
-# Get session A target and id for pending file
-SESSION_A_FOR_TC5=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
-import sys, json
-pane = sys.argv[1]
-d = json.load(sys.stdin)
-for s in d.get("sessions", []):
-    t = s.get("target", "")
-    if t == pane or t.startswith(pane + "@"):
-        print(s.get("id", ""), s.get("target", ""), sep="\t")
-        sys.exit(0)
-print("\t")
-' "$E2E_PANE" 2>/dev/null || echo "	")
-TC5_SESSION_ID=$(echo "$SESSION_A_FOR_TC5" | cut -f1)
-TC5_TMUX_TARGET=$(echo "$SESSION_A_FOR_TC5" | cut -f2)
-echo "  DEBUG: TC5 session_id=$TC5_SESSION_ID tmux_target=$TC5_TMUX_TARGET"
+# Drive a REAL AskUserQuestion from session A (e2e-cli) via the streaming /pending/connect path.
+# A's open @ channel to B (e2e-at-b, established in TC1-TC4) auto-forwards the question to B
+# (cmd/hooks/pending.go:210), producing the 🔗 / "is asking a question" / ❓ markers in the bot log
+# (via SafeInjectText's inject-text log line, cmd/helpers/ask.go:336).
+pane_log "[TC5] BEFORE AskQ inject (A)" "$E2E_PANE"
+inject_prompt "Use the AskUserQuestion tool to ask me a question with header 'TC5 Test', question 'E2E AskQ forward test?', and two options: 'Yes' with description 'Confirm TC5', and 'No' with description 'Deny TC5'. Ask only this one question and do nothing else — do not read files or explore." "" "$E2E_PANE"
 
-if [ -z "$TC5_SESSION_ID" ] || [ -z "$TC5_TMUX_TARGET" ]; then
-  fail "TC5: could not retrieve session A info from /session/list"
+# Wait for the AskUserQuestion to be posted + forwarded
+ELAPSED=0
+TC5_FOUND=false
+TC5_UUID=""
+while [ $ELAPSED -lt $AT_TIMEOUT ]; do
+  if tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep "AskUserQuestion sent:" > /dev/null 2>&1; then
+    TC5_FOUND=true
+    TC5_UUID=$(tail -n +"$((LOG_BEFORE_TC5 + 1))" "$LOG_FILE" | grep -oPm1 'AskUserQuestion sent:.*uuid=\K[^ ]+' || true)
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+if [ "$TC5_FOUND" = true ] && [ -n "$TC5_UUID" ]; then
+  pass "TC5: real AskUserQuestion posted via streaming path (uuid=$TC5_UUID)"
+else
+  fail "TC5: AskUserQuestion not posted within ${AT_TIMEOUT}s"
 fi
-
-# Create pending file for AskUserQuestion
-TC5_UUID="e2e-askq-tc5-$(date +%s)"
-PENDING_DIR="/tmp/.tg-cli-test/pending"
-mkdir -p "$PENDING_DIR"
-TC5_CWD="$(pwd)"
-export TC5_SESSION_ID TC5_TMUX_TARGET TC5_UUID PENDING_DIR TC5_CWD
-
-# Build and write pending file using python3 with env vars to avoid shell quoting issues
-python3 << PYEOF
-import json, os, sys
-
-session_id = os.environ.get('TC5_SESSION_ID', '')
-tmux_target = os.environ.get('TC5_TMUX_TARGET', '')
-uuid = os.environ.get('TC5_UUID', '')
-pending_dir = os.environ.get('PENDING_DIR', '')
-cwd = os.environ.get('TC5_CWD', '')
-
-tool_input = json.dumps({
-    'questions': [{
-        'header': 'TC5 Test',
-        'question': 'E2E AskQ forward test?',
-        'options': [
-            {'label': 'Yes', 'description': 'Confirm TC5'},
-            {'label': 'No', 'description': 'Deny TC5'}
-        ],
-        'multiSelect': False
-    }]
-})
-
-payload = {
-    'session_id': session_id,
-    'tmux_target': tmux_target,
-    'tool_name': 'AskUserQuestion',
-    'tool_input': json.loads(tool_input),
-    'cwd': cwd,
-    'project': 'tg-cli',
-    'transcript_path': ''
-}
-
-pf = {
-    'uuid': uuid,
-    'event': 'PreToolUse',
-    'tool_name': 'AskUserQuestion',
-    'status': 'pending',
-    'payload': payload,
-    'tg_msg_id': 0,
-    'tg_chat_id': 0,
-    'session_id': '',
-    'tmux_target': '',
-    'hook_pid': 0
-}
-path = os.path.join(pending_dir, uuid + '.json')
-with open(path, 'w') as f:
-    json.dump(pf, f, indent=2)
-print(f'Written pending file: {uuid}.json to {path}')
-PYEOF
-
-# Send pending/notify
-curl -s -X POST "http://127.0.0.1:$TEST_PORT/pending/notify?uuid=${TC5_UUID}" > /dev/null
 sleep 3
-
-pane_log "[TC5] AFTER pending/notify" "$E2E_PANE"
-pane_log "[TC5] AFTER pending/notify (B)" "$AT_PANE"
+pane_log "[TC5] AFTER AskQ posted" "$E2E_PANE"
+pane_log "[TC5] AFTER AskQ posted (B)" "$AT_PANE"
 
 # TC5-1: bot log contains 🔗 header in note-side notification
 set +eo pipefail
@@ -871,6 +817,7 @@ sleep 1
 pane_log "[TC5] BEFORE cancel" "$E2E_PANE"
 pane_log "[TC5] BEFORE cancel (B)" "$AT_PANE"
 curl -s -X POST "http://127.0.0.1:$TEST_PORT/pending/cancel?uuid=${TC5_UUID}" > /dev/null 2>&1 || true
+wait_for_idle $AT_TIMEOUT "$E2E_PANE" || true
 sleep 1
 pane_log "[TC5] AFTER cancel" "$E2E_PANE"
 pane_log "[TC5] AFTER cancel (B)" "$AT_PANE"

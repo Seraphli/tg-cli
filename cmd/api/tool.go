@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -47,7 +46,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				if len(entry.Questions) > 0 {
 					answers[entry.Questions[0].QuestionText] = value
 				}
-				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.ReactionTracker, msgID, answers, "✅ Text answer"); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, answers, "✅ Text answer"); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -61,12 +60,12 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 					http.Error(w, "already answered", 400)
 					return
 				}
-				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			} else if action == "chat" {
-				if err := helpers.DoChatAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.ReactionTracker, msgID); err != nil {
+				if err := helpers.DoChatAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -103,7 +102,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 						}
 					}
 					if !hasSubmit {
-						if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
+						if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
 							http.Error(w, err.Error(), 500)
 							return
 						}
@@ -138,6 +137,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				bot,
 				bs.PendingPerms,
 				bs.PendingFiles,
+				bs.PendingWait,
 				func(text string) (*injector.TmuxTarget, error) {
 					return helpers.ExtractTmuxTargetFromText(text)
 				},
@@ -180,13 +180,14 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		}
 		uuid, uuidOk := bs.PendingFiles.Get(msgID)
 		if !uuidOk {
-			http.Error(w, "pending file not found", 404)
+			http.Error(w, "pending entry not found", 404)
 			return
 		}
-		if helpers.HandleStalePending(msgID, uuid, func(mid int, u string, reason string) {
-			helpers.CleanupPendingState(bot, bs.ToolNotifs, bs.PendingPerms, bs.PendingFiles, mid, u, reason)
-		}) {
-			// Stale: hook dead or file missing, inject text instead
+		// Check wait store liveness instead of file-based stale check
+		waitEntry, waitOk := bs.PendingWait.Get(uuid)
+		if !waitOk {
+			// Stale: wait entry missing, inject text instead
+			helpers.CleanupPendingState(bot, bs.ToolNotifs, bs.PendingPerms, bs.PendingFiles, bs.PendingWait, msgID, uuid, "wait entry missing")
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -196,25 +197,16 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
 				return
 			}
-			logger.Info(fmt.Sprintf("Group text API injected: target=%s text=%s", target, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("Group text API injected (stale): target=%s text=%s", target, helpers.TruncateStr(text, 200)))
 			fmt.Fprintf(w, "injected")
-			return
-		}
-		path := filepath.Join(helpers.PendingDir(), uuid+".json")
-		pf, err := helpers.ReadPendingFile(path)
-		if err != nil {
-			http.Error(w, "failed to read pending file", 500)
 			return
 		}
 		answers := make(map[string]string)
 		if len(entry.Questions) > 0 {
 			answers[entry.Questions[0].QuestionText] = text
 		}
-		ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
-		if err := helpers.WritePendingAnswer(uuid, ccOutput); err != nil {
-			http.Error(w, "failed to write answer", 500)
-			return
-		}
+		ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
+		helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
 		bs.ToolNotifs.MarkResolved(msgID)
 		logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}

@@ -231,31 +231,33 @@ func FetchUsageTmux() (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create temp session: %w", err)
 	}
+	// Always clean up the temp session on return. On paths that successfully capture a pane dump,
+	// the capture + logging happen before this deferred kill runs, so debug screenshots are preserved.
+	defer injector.GlobalTmuxCmd("kill-session", "-t", sessionName).Run()
 	target, _ := injector.ParseTarget(sessionName)
 	injector.SendKeys(target, "claude", "Enter")
 	if !WaitForPaneContent(target, "❯", 30*time.Second) {
 		dump, _ := injector.CapturePane(target)
-		logger.Error(fmt.Sprintf("FetchUsageTmux: CC init timeout, session=%s kept alive for debugging, pane dump:\n%s", sessionName, dump))
-		return "", fmt.Errorf("CC failed to initialize (timeout waiting for ❯), session %s kept alive", sessionName)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: CC init timeout, session=%s (cleaned up after dump), pane dump:\n%s", sessionName, dump))
+		return "", fmt.Errorf("CC failed to initialize (timeout waiting for ❯), session %s cleaned up", sessionName)
 	}
 	injector.SendKeys(target, "/usage", "Enter")
 	if !WaitForPaneContent(target, "used", 10*time.Second) {
 		dump, _ := injector.CapturePane(target)
-		logger.Error(fmt.Sprintf("FetchUsageTmux: /usage timeout, session=%s kept alive for debugging, pane dump:\n%s", sessionName, dump))
-		return "", fmt.Errorf("failed to get usage data (timeout waiting for 'used'), session %s kept alive", sessionName)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: /usage timeout, session=%s (cleaned up after dump), pane dump:\n%s", sessionName, dump))
+		return "", fmt.Errorf("failed to get usage data (timeout waiting for 'used'), session %s cleaned up", sessionName)
 	}
 	time.Sleep(1 * time.Second)
 	content, err := injector.CapturePane(target)
 	if err != nil {
-		logger.Error(fmt.Sprintf("FetchUsageTmux: capture failed, session=%s kept alive", sessionName))
-		return "", fmt.Errorf("failed to capture pane: %w, session %s kept alive", err, sessionName)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: capture failed, session=%s (cleaned up)", sessionName))
+		return "", fmt.Errorf("failed to capture pane: %w, session %s cleaned up", err, sessionName)
 	}
 	formatted := ParseUsageOutput(content)
 	if formatted == "" {
-		logger.Error(fmt.Sprintf("FetchUsageTmux: parse empty, session=%s kept alive, raw pane:\n%s", sessionName, content))
-		return "", fmt.Errorf("failed to parse usage data (empty result), session %s kept alive", sessionName)
+		logger.Error(fmt.Sprintf("FetchUsageTmux: parse empty, session=%s (cleaned up), raw pane:\n%s", sessionName, content))
+		return "", fmt.Errorf("failed to parse usage data (empty result), session %s cleaned up", sessionName)
 	}
-	injector.GlobalTmuxCmd("kill-session", "-t", sessionName).Run()
 	return formatted, nil
 }
 

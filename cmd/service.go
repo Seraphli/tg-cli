@@ -3,11 +3,13 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
@@ -209,6 +211,10 @@ var serviceUpgradeCmd = &cobra.Command{
 		unitData, _ := os.ReadFile(unitFilePath())
 		hasDebug := strings.Contains(string(unitData), "--debug")
 		fmt.Printf("Upgrading from v%s to v%s\n", oldVersion, newVersion)
+		// Write upgrade sentinel before stopping so hooks can detect the in-progress state
+		flagPath := config.UpgradeFlagPath()
+		os.WriteFile(flagPath, []byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
+		defer os.Remove(flagPath)
 		fmt.Println("Stopping service...")
 		systemctl("stop", serviceName())
 		fmt.Printf("Replacing %s...\n", binPath)
@@ -262,6 +268,21 @@ var serviceUpgradeCmd = &cobra.Command{
 		}
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
+		// Poll /session/idle until the new bot is ready (up to 30s), then remove upgrade flag
+		idleURL := fmt.Sprintf("http://127.0.0.1:%d/session/idle", port)
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			resp, err := http.Get(idleURL)
+			if err == nil && resp.StatusCode == 200 {
+				resp.Body.Close()
+				break
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+			time.Sleep(1 * time.Second)
+		}
+		os.Remove(flagPath)
 		fmt.Printf("Upgrade complete (v%s)\n", newVersion)
 	},
 }

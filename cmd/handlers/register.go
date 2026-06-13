@@ -248,22 +248,17 @@ func Register(bs *types.BotState) {
 					if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
 						uuid, uuidOk := bs.PendingFiles.Get(msgID)
 						if uuidOk && !handleStalePending(bs, msgID, uuid) {
-							path := filepath.Join(helpers.PendingDir(), uuid+".json")
-							pf, pfErr := helpers.ReadPendingFile(path)
-							if pfErr == nil {
+							if waitEntry, wok := bs.PendingWait.Get(uuid); wok {
 								answers := make(map[string]string)
 								if len(entry.Questions) > 0 {
 									answers[entry.Questions[0].QuestionText] = text
 								}
-								ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
-								if werr := helpers.WritePendingAnswer(uuid, ccOutput); werr != nil {
-									logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
-								} else {
-									bs.ToolNotifs.MarkResolved(msgID)
-									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-									editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-									helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
-								}
+								ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
+								helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
+								bs.ToolNotifs.MarkResolved(msgID)
+								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
+								helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 							}
 						}
 						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
@@ -297,22 +292,17 @@ func Register(bs *types.BotState) {
 				if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
 					uuid, uuidOk := bs.PendingFiles.Get(msgID)
 					if uuidOk && !handleStalePending(bs, msgID, uuid) {
-						path := filepath.Join(helpers.PendingDir(), uuid+".json")
-						pf, pfErr := helpers.ReadPendingFile(path)
-						if pfErr == nil {
+						if waitEntry, wok := bs.PendingWait.Get(uuid); wok {
 							answers := make(map[string]string)
 							if len(entry.Questions) > 0 {
 								answers[entry.Questions[0].QuestionText] = text
 							}
-							ccOutput := helpers.BuildAskCCOutput(pf.Payload, answers)
-							if werr := helpers.WritePendingAnswer(uuid, ccOutput); werr != nil {
-								logger.Error(fmt.Sprintf("Failed to write pending answer for CC command: %v", werr))
-							} else {
-								bs.ToolNotifs.MarkResolved(msgID)
-								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-								helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
-							}
+							ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
+							helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
+							bs.ToolNotifs.MarkResolved(msgID)
+							logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
+							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
+							helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
 						}
 					}
 					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)

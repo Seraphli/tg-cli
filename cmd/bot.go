@@ -205,6 +205,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		AtChannels:      stores.NewAtChannelStore(configDir),
 		CompactTools:    stores.NewCompactToolStore(),
 		Streams:         stores.NewStreamStore(),
+		PendingWait:     stores.NewPendingWaitStore(),
 	}
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
@@ -299,6 +300,23 @@ func runBot(cmd *cobra.Command, args []string) {
 				}
 				bot.SetCommands(buildCommands())
 				logger.Info("Command menu re-sorted based on usage stats")
+			}
+		}
+	}()
+	// Periodic ticker: sweep undelivered terminal wait entries (Resolved but never collected by a
+	// reconnecting hook) so PendingWaitStore does not leak entries until restart.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, uuid := range bs.PendingWait.SweepUndelivered(60) {
+					bs.PendingWait.Remove(uuid)
+					logger.Info(fmt.Sprintf("Swept undelivered pending wait entry: uuid=%s", uuid))
+				}
 			}
 		}
 	}()

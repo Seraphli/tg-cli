@@ -19,7 +19,7 @@ pane_log "[hook_cancel] BEFORE permission prompt"
 inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo hook_cancel_test_ok > /tmp/tg-cli-hook-cancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[hook_cancel] AFTER sending permission prompt"
 
-# Wait for PermissionRequest notification in bot log (pending file created, hook blocking)
+# Wait for PermissionRequest notification in bot log (hook blocking on the streaming connection)
 ELAPSED=0
 PERM_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
@@ -41,7 +41,7 @@ if [ "$PERM_FOUND" = false ]; then
   fail "PermissionRequest not triggered within ${TIMEOUT}s"
   exit 1
 fi
-pass "PermissionRequest triggered (hook blocking, pending file created)"
+pass "PermissionRequest triggered (hook blocking)"
 
 # Instead of approving via API, approve via TUI: press Enter in Claude pane
 # This simulates user answering in TUI while hook is still blocking
@@ -49,56 +49,41 @@ pane_log "[hook_cancel] BEFORE TUI Enter (approve in TUI)"
 $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
 pane_log "[hook_cancel] AFTER TUI Enter"
 
-# Wait for CC to continue and reach idle state (Stop hook fired)
-wait_for_idle
-pane_log "[hook_cancel] AFTER CC reached idle"
-
-# Check bot log for "Cancelled pending file" — proves cancelPendingFilesBySession ran
+# Approve-in-TUI is detected by PostToolUse correlation: the Bash tool runs → bot freezes the
+# button to "✅ Allowed on desktop" and pushes a cancel so the blocked hook stands down.
+# (File-based pending mechanism removed in the file-free streaming refactor.)
 ELAPSED=0
-CANCEL_FOUND=false
+RESOLVED_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep -E "Cancelled pending file|Removed orphan pending file" > /dev/null 2>&1; then
-    CANCEL_FOUND=true
+  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Resolved on desktop:.*✅ Allowed on desktop" > /dev/null 2>&1; then
+    RESOLVED_FOUND=true
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for pending file cancel/cleanup log... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for desktop-resolve log... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
-if [ "$CANCEL_FOUND" = true ]; then
-  pass "Pending file cancel/cleanup log found (cancelPendingFilesBySession ran)"
+if [ "$RESOLVED_FOUND" = true ]; then
+  pass "TUI approve correlated via PostToolUse (Resolved on desktop: ✅ Allowed on desktop)"
 else
-  fail "Pending file cancel/cleanup log not found within ${TIMEOUT}s"
+  fail "Desktop-resolve log not found within ${TIMEOUT}s"
 fi
 
-# Check that pending files were cleaned up (removed by hook.go after status=cancelled)
-# Poll for cleanup — hook process needs time to detect cancelled status and exit
-TEST_PENDING_DIR="/tmp/.tg-cli-test/pending"
-ELAPSED=0
-PENDING_CLEANED=false
-while [ $ELAPSED -lt 15 ]; do
-  PENDING_COUNT=$(find "$TEST_PENDING_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
-  if [ "$PENDING_COUNT" -eq 0 ]; then
-    PENDING_CLEANED=true
-    break
-  fi
-  sleep 1
-  ELAPSED=$((ELAPSED + 1))
-done
-if [ "$PENDING_CLEANED" = true ]; then
-  pass "Pending files cleaned up from $TEST_PENDING_DIR"
+# TG button frozen to "✅ Allowed on desktop"
+if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "FreezeWaitEntry(Perm):.*✅ Allowed on desktop" > /dev/null 2>&1; then
+  pass "TG button frozen to '✅ Allowed on desktop'"
 else
-  fail "Pending files still exist after cancel: $PENDING_COUNT file(s) in $TEST_PENDING_DIR"
+  fail "FreezeWaitEntry(Perm) '✅ Allowed on desktop' not found in log"
 fi
 
-# Wait for CC turn to complete after TUI answer (use idle polling — no Stop log in new streaming code)
+# Blocked hook released by the bot after the TUI answer (session continued in TUI)
+if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep -F "[HOOK] cancelled by bot (session continued in TUI)" > /dev/null 2>&1; then
+  pass "Blocked hook released after TUI answer ([HOOK] cancelled by bot)"
+else
+  fail "Blocked hook release log not found ([HOOK] cancelled by bot)"
+fi
+
+# CC turn complete (idle polling — no Stop log in new streaming code)
 wait_for_idle
 pass "CC turn complete after TUI answer (idle confirmed)"
-
-# Check TG message label changed to "⌨️ Answered on desktop"
-if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "Permission TUI answer.*Answered on desktop" > /dev/null 2>&1; then
-  pass "TG message label updated to '⌨️ Answered on desktop'"
-else
-  fail "TG message label '⌨️ Answered on desktop' not found in log"
-fi

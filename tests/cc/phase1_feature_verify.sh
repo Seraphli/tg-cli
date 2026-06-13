@@ -31,6 +31,15 @@ if [ "${E2E_BACKEND:-}" != "codex" ]; then
   else
     warn "usage CLI (tmux): output missing CC Usage header (rate limit?) - got: $USAGE_OUTPUT"
   fi
+  # Regression guard (6ab3269 dropped the defer kill-session, leaking the temp session on the
+  # /usage failure path → run_phase stale-session check aborted the suite). The session MUST now
+  # be cleaned up on ALL paths, even when /usage fails — deterministic regardless of /usage outcome.
+  USAGE_LEFTOVER=$($TMUX_TEST list-sessions -F '#{session_name}' 2>/dev/null | grep '^tg-cli-usage-' || true)
+  if [ -z "$USAGE_LEFTOVER" ]; then
+    pass "usage CLI (tmux): temp session cleaned up (no tg-cli-usage-* leaked)"
+  else
+    fail "usage CLI (tmux): leaked tg-cli-usage-* session(s): $USAGE_LEFTOVER"
+  fi
 else
   echo "  SKIP: usage CLI (CC-only)"
 fi

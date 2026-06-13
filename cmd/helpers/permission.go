@@ -3,88 +3,14 @@ package helpers
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"syscall"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
-	"github.com/Seraphli/tg-cli/internal/config"
-	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
-// PendingFile represents a pending CC event stored as a file.
-type PendingFile struct {
-	UUID       string          `json:"uuid"`
-	Event      string          `json:"event"`
-	ToolName   string          `json:"tool_name"`
-	Status     string          `json:"status"`
-	Payload    json.RawMessage `json:"payload"`
-	TgMsgID    int             `json:"tg_msg_id"`
-	TgChatID   int64           `json:"tg_chat_id"`
-	SessionID  string          `json:"session_id"`
-	TmuxTarget string          `json:"tmux_target"`
-	CCOutput   json.RawMessage `json:"cc_output"`
-	CreatedAt  string          `json:"created_at"`
-	HookPID    int             `json:"hook_pid"`
-	TgMsgText  string          `json:"tg_msg_text"`
-}
-
-// PendingDir returns /tmp/<config-dir-basename>/pending, creating it if needed.
-func PendingDir() string {
-	base := filepath.Base(config.GetConfigDir())
-	dir := filepath.Join("/tmp", base, "pending")
-	os.MkdirAll(dir, 0755)
-	return dir
-}
-
-// ReadPendingFile reads and unmarshals a pending file.
-func ReadPendingFile(path string) (*PendingFile, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var pf PendingFile
-	if err := json.Unmarshal(data, &pf); err != nil {
-		return nil, err
-	}
-	return &pf, nil
-}
-
-// WritePendingFile atomically writes a pending file.
-func WritePendingFile(path string, pf *PendingFile) error {
-	data, err := json.MarshalIndent(pf, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
-}
-
-// WritePendingAnswer updates pending file with answer and status=answered.
-func WritePendingAnswer(uuid string, ccOutput json.RawMessage) error {
-	path := filepath.Join(PendingDir(), uuid+".json")
-	pf, err := ReadPendingFile(path)
-	if err != nil {
-		return fmt.Errorf("read pending file: %w", err)
-	}
-	pf.Status = "answered"
-	pf.CCOutput = ccOutput
-	return WritePendingFile(path, pf)
-}
-
-// IsHookAlive checks if the hook process with given PID is still running.
-func IsHookAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+// WritePendingAnswer pushes an answer event to the wait store.
+// The old file-IO variant is superseded; callers must now pass the wait store.
+func WritePendingAnswer(waitStore *stores.PendingWaitStore, uuid string, ccOutput json.RawMessage) {
+	waitStore.Push(uuid, stores.WaitEvent{Type: "answer", Output: ccOutput})
 }
 
 // BuildAskCCOutput builds CC output for AskUserQuestion.
@@ -168,51 +94,4 @@ func ResolvePermission(pendingPerms *stores.PendingPermStore, msgID int, decisio
 		return d, fmt.Errorf("no pending permission for msg_id %d", msgID)
 	}
 	return d, nil
-}
-
-// CleanupPendingStateFunc is a callback type for cleaning up pending state.
-type CleanupPendingStateFunc func(msgID int, uuid string, reason string)
-
-// HandleStalePending checks if a pending entry is stale (hook dead or file missing).
-// Returns true if stale (cleanup done), false if still alive.
-func HandleStalePending(msgID int, uuid string, cleanup CleanupPendingStateFunc) bool {
-	path := filepath.Join(PendingDir(), uuid+".json")
-	pf, err := ReadPendingFile(path)
-	if err != nil {
-		cleanup(msgID, uuid, "file missing")
-		return true
-	}
-	if pf.Status == "sent" && !IsHookAlive(pf.HookPID) {
-		os.Remove(path)
-		cleanup(msgID, uuid, fmt.Sprintf("hook dead (pid=%d)", pf.HookPID))
-		return true
-	}
-	return false
-}
-
-// CleanPendingFilesBySession removes all pending files for a session.
-func CleanPendingFilesBySession(sessionID string) {
-	dir := PendingDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() || !hasSuffix(e.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		pf, err := ReadPendingFile(path)
-		if err != nil {
-			continue
-		}
-		if pf.SessionID == sessionID {
-			os.Remove(path)
-			logger.Info(fmt.Sprintf("Cleaned pending file for session %s: %s", sessionID, e.Name()))
-		}
-	}
-}
-
-func hasSuffix(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }

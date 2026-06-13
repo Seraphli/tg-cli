@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,39 +67,45 @@ func detectTmuxTarget() string {
 	return tmuxPane
 }
 
-// generateUUID generates a random hex UUID using crypto/rand
+// generateUUID generates a random hex UUID using crypto/rand.
 func generateUUID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// PendingFileHook is a local copy of PendingFile struct for hook.go process
-type PendingFileHook struct {
-	UUID      string          `json:"uuid"`
-	Event     string          `json:"event"`
-	ToolName  string          `json:"tool_name"`
-	Status    string          `json:"status"`
-	Payload   json.RawMessage `json:"payload"`
-	TgMsgID   int             `json:"tg_msg_id"`
-	TgChatID  int64           `json:"tg_chat_id"`
-	SessionID string          `json:"session_id"`
-	CCOutput  json.RawMessage `json:"cc_output"`
-	CreatedAt time.Time       `json:"created_at"`
-	HookPID   int             `json:"hook_pid"`
+// ndjsonFrame is the parsed structure of each line from the /pending/connect stream.
+type ndjsonFrame struct {
+	Type    string          `json:"type"`
+	Output  json.RawMessage `json:"output"`
+	MsgID   int             `json:"msg_id"`
+	ChatID  int64           `json:"chat_id"`
+	TopicID int             `json:"topic_id"`
 }
 
-// writePendingFileHook atomically writes a pending file (hook.go local version)
-func writePendingFileHook(path string, pf *PendingFileHook) error {
-	data, err := json.MarshalIndent(pf, "", "  ")
-	if err != nil {
-		return err
+// postWithUpgradeRetry posts to url with body, retrying on ECONNREFUSED if an upgrade is active.
+// Retries every 2s up to a 25s cap. Returns the first successful response or the last error.
+func postWithUpgradeRetry(ctx context.Context, client *http.Client, url string, body []byte) (*http.Response, error) {
+	const retryCap = 25 * time.Second
+	start := time.Now()
+	for {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) || !config.UpgradeFlagActive() {
+			return nil, err
+		}
+		if time.Since(start) >= retryCap {
+			return nil, err
+		}
+		time.Sleep(2 * time.Second)
 	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
 
 func runHook(cmd *cobra.Command, args []string) {
@@ -142,85 +151,135 @@ func runHook(cmd *cobra.Command, args []string) {
 	// Marshal enriched payload
 	enrichedJSON, _ := json.Marshal(payload)
 
-	// PermissionRequest: use file-based communication instead of blocking HTTP
-	toolName, _ := payload["tool_name"].(string)
+	// PermissionRequest: use streaming long-connection to bot
 	if event == "PermissionRequest" {
 		uuid := generateUUID()
-		dir := filepath.Join("/tmp", filepath.Base(config.GetConfigDir()), "pending")
-		os.MkdirAll(dir, 0755)
-		pendingPath := filepath.Join(dir, uuid+".json")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-		// 1. Write pending file
-		pf := PendingFileHook{
-			UUID:      uuid,
-			Event:     event,
-			ToolName:  toolName,
-			Status:    "pending",
-			Payload:   enrichedJSON,
-			CreatedAt: time.Now(),
-			HookPID:   os.Getpid(),
-		}
-		if err := writePendingFileHook(pendingPath, &pf); err != nil {
-			hookExit(1, fmt.Sprintf("write pending file error: %v", err))
-		}
-		hookLog("pending file created: %s", pendingPath)
+		// Watch for parent process change (CC died → hook orphaned)
+		origPPID := os.Getppid()
+		go func() {
+			for {
+				time.Sleep(500 * time.Millisecond)
+				if ctx.Err() != nil {
+					return
+				}
+				if os.Getppid() != origPPID {
+					hookLog("parent process changed: orig=%d current=%d (CC exited)", origPPID, os.Getppid())
+					cancel()
+					return
+				}
+			}
+		}()
 
-		// 2. Signal handler for cleanup
+		// Signal handler: best-effort cancel then exit
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 		go func() {
 			sig := <-sigCh
-			hookLog("received signal: %v (ppid=%d)", sig, os.Getppid())
+			hookLog("received signal: %v", sig)
 			cancelClient := &http.Client{Timeout: 2 * time.Second}
 			cancelURL := fmt.Sprintf("http://127.0.0.1:%d/pending/cancel?uuid=%s", port, uuid)
-			hookLog("POST %s (cancel)", cancelURL)
 			cancelClient.Post(cancelURL, "", nil)
-			os.Remove(pendingPath)
+			cancel()
 			hookExit(0, "signal cleanup")
 		}()
 
-		// 3. Notify bot (fire-and-forget, 5s timeout)
-		notifyClient := &http.Client{Timeout: 5 * time.Second}
-		notifyURL := fmt.Sprintf("http://127.0.0.1:%d/pending/notify?uuid=%s", port, uuid)
-		hookLog("POST %s (fire-and-forget)", notifyURL)
-		notifyClient.Post(notifyURL, "application/json", bytes.NewReader(enrichedJSON))
+		// Reconnect state (populated after first registered frame)
+		var msgID int
+		var chatID int64
+		var topicID int
 
-		// 4. Poll for status=answered
-		origPPID := os.Getppid()
-		hookLog("polling for answer... (ppid=%d)", origPPID)
+		// Streaming connect loop with upgrade retry
+		const retryCap = 25 * time.Second
+		start := time.Now()
+		connectClient := &http.Client{Timeout: 0}
 		for {
-			if currentPPID := os.Getppid(); currentPPID != origPPID {
-				hookLog("parent process changed: orig=%d current=%d (CC exited, hook orphaned)", origPPID, currentPPID)
-				os.Remove(pendingPath)
+			if ctx.Err() != nil {
 				hookExit(0, "parent exited")
 			}
-			hookLog("poll tick: ppid=%d", os.Getppid())
-			data, err := os.ReadFile(pendingPath)
-			if err == nil && len(data) > 0 {
-				var pf PendingFileHook
-				if json.Unmarshal(data, &pf) == nil {
-					if pf.Status == "answered" && pf.CCOutput != nil {
-						hookLog("answered: %s", string(pf.CCOutput))
-						fmt.Print(string(pf.CCOutput))
-						os.Remove(pendingPath)
-						hookExit(0, "answered")
-					}
-					if pf.Status == "cancelled" {
-						hookLog("cancelled by bot (session continued in TUI)")
-						os.Remove(pendingPath)
-						hookExit(0, "cancelled")
-					}
+			connectURL := fmt.Sprintf("http://127.0.0.1:%d/pending/connect?uuid=%s", port, uuid)
+			if msgID != 0 {
+				connectURL = fmt.Sprintf("%s&msg_id=%d&chat_id=%d&topic_id=%d", connectURL, msgID, chatID, topicID)
+			}
+			req, reqErr := http.NewRequestWithContext(ctx, "POST", connectURL, bytes.NewReader(enrichedJSON))
+			if reqErr != nil {
+				hookExit(1, fmt.Sprintf("build request error: %v", reqErr))
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, respErr := connectClient.Do(req)
+			if respErr != nil {
+				if ctx.Err() != nil {
+					hookExit(0, "parent exited")
+				}
+				if errors.Is(respErr, syscall.ECONNREFUSED) && config.UpgradeFlagActive() && time.Since(start) < retryCap {
+					hookLog("connect ECONNREFUSED during upgrade, retrying: %v", respErr)
+					time.Sleep(2 * time.Second)
+					continue
+				}
+				hookExit(1, fmt.Sprintf("connect error: %v", respErr))
+			}
+
+			// Read ndjson frames line by line
+			scanner := bufio.NewScanner(resp.Body)
+			scanner.Buffer(make([]byte, 1<<20), 1<<20) // 1 MB buffer for large payloads
+			terminal := false
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				if len(line) == 0 {
+					continue
+				}
+				var frame ndjsonFrame
+				if err := json.Unmarshal(line, &frame); err != nil {
+					hookLog("frame parse error: %v line=%s", err, string(line))
+					continue
+				}
+				switch frame.Type {
+				case "registered":
+					msgID = frame.MsgID
+					chatID = frame.ChatID
+					topicID = frame.TopicID
+					hookLog("registered: uuid=%s msg_id=%d", uuid, msgID)
+				case "answer":
+					hookLog("answered: %s", string(frame.Output))
+					resp.Body.Close()
+					fmt.Print(string(frame.Output))
+					hookExit(0, "answered")
+				case "cancel":
+					hookLog("cancelled by bot (session continued in TUI)")
+					resp.Body.Close()
+					hookExit(0, "cancelled")
+				default:
+					hookLog("unknown frame type: %s", frame.Type)
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
+			resp.Body.Close()
+			if scanErr := scanner.Err(); scanErr != nil {
+				hookLog("scanner error: %v", scanErr)
+			}
+			if terminal {
+				break
+			}
+			if ctx.Err() != nil {
+				hookExit(0, "parent exited")
+			}
+			// Stream dropped (EOF without terminal) — reconnect if upgrade active
+			if config.UpgradeFlagActive() && time.Since(start) < retryCap {
+				hookLog("stream dropped during upgrade, reconnecting")
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			hookExit(1, "stream dropped without answer")
 		}
+		hookExit(0, "done")
 	}
 
-	// Other events: use existing HTTP POST
+	// Other events: POST with upgrade retry
 	url := fmt.Sprintf("http://127.0.0.1:%d/hook/%s", port, event)
 	hookLog("POST %s body: %s", url, string(enrichedJSON))
 	client := &http.Client{Timeout: 0}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(enrichedJSON))
+	resp, err := postWithUpgradeRetry(context.Background(), client, url, enrichedJSON)
 	if err != nil {
 		hookExit(1, fmt.Sprintf("HTTP error: %v", err))
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -41,6 +42,24 @@ func GetConfigDir() string {
 
 func GetCredentialsPath() string {
 	return filepath.Join(GetConfigDir(), "credentials.json")
+}
+
+// UpgradeFlagPath returns the path of the upgrade-in-progress sentinel file.
+func UpgradeFlagPath() string {
+	return filepath.Join(GetConfigDir(), "upgrading")
+}
+
+// UpgradeFlagActive returns true if an upgrade sentinel exists and was written within the last 60 seconds.
+func UpgradeFlagActive() bool {
+	data, err := os.ReadFile(UpgradeFlagPath())
+	if err != nil {
+		return false
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return false
+	}
+	return time.Now().Unix()-ts < 60
 }
 
 func ensureConfigDir() error {

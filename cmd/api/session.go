@@ -95,6 +95,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				bot,
 				bs.PendingPerms,
 				bs.PendingFiles,
+				bs.PendingWait,
 				func(text string) (*injector.TmuxTarget, error) {
 					return helpers.ExtractTmuxTargetFromText(text)
 				},
@@ -106,6 +107,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				bot,
 				bs.ToolNotifs,
 				bs.PendingFiles,
+				bs.PendingWait,
 				func(text string) (*injector.TmuxTarget, error) {
 					return helpers.ExtractTmuxTargetFromText(text)
 				},
@@ -394,6 +396,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				bot,
 				bs.PendingPerms,
 				bs.PendingFiles,
+				bs.PendingWait,
 				func(text string) (*injector.TmuxTarget, error) {
 					return helpers.ExtractTmuxTargetFromText(text)
 				},
@@ -410,6 +413,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				bot,
 				bs.ToolNotifs,
 				bs.PendingFiles,
+				bs.PendingWait,
 				func(text string) (*injector.TmuxTarget, error) {
 					return helpers.ExtractTmuxTargetFromText(text)
 				},
@@ -497,15 +501,16 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 // buildSafeInjectParams constructs SafeInjectTextParams from BotState.
 func buildSafeInjectParams(bs *types.BotState) helpers.SafeInjectTextParams {
 	return helpers.SafeInjectTextParams{
-		Bot:             bs.Bot,
-		ToolNotifs:      bs.ToolNotifs,
-		PendingFiles:    bs.PendingFiles,
-		PendingPerms:    bs.PendingPerms,
-		InjectQueue:     bs.InjectQueue,
-		InjectConfirm:   bs.InjectConfirm,
-		StopCooldown:    bs.StopCooldown,
-		ReactionTracker: bs.ReactionTracker,
-		SessionState:    bs.SessionState,
+		Bot:              bs.Bot,
+		ToolNotifs:       bs.ToolNotifs,
+		PendingFiles:     bs.PendingFiles,
+		PendingWait:      bs.PendingWait,
+		PendingPerms:     bs.PendingPerms,
+		InjectQueue:      bs.InjectQueue,
+		InjectConfirm:    bs.InjectConfirm,
+		StopCooldown:     bs.StopCooldown,
+		ReactionTracker:  bs.ReactionTracker,
+		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {

@@ -3,7 +3,6 @@ package helpers
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -55,7 +54,7 @@ func CleanDeadSession(
 		sessionState.Remove(sid)
 		pages.CleanupSession(sid)
 		sessionCounts.Cleanup(sid)
-		CleanPendingFilesBySession(sid)
+		// File-based pending cleanup removed; wait-store cleanup handled by CancelPendingWaitBySession
 	}
 }
 
@@ -65,6 +64,7 @@ func CleanupPendingState(
 	toolNotifs *stores.ToolNotifyStore,
 	pendingPerms *stores.PendingPermStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	msgID int,
 	uuid string,
 	reason string,
@@ -76,6 +76,9 @@ func CleanupPendingState(
 	}
 	if _, ok := pendingPerms.GetTarget(msgID); ok {
 		pendingPerms.Resolve(msgID, stores.PermDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
+	}
+	if uuid != "" {
+		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
 	}
 	pendingFiles.Remove(msgID)
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
@@ -112,23 +115,20 @@ func RecordPending(reactionTracker *stores.ReactionTrackerStore, tmuxTarget stri
 	reactionTracker.RecordPending(tmuxTarget, chatID, msgID)
 }
 
-// DoCancelPerm cancels a PermissionRequest: disk write + ESC + resolve + edit TG msg.
+// DoCancelPerm cancels a PermissionRequest: push cancel to wait store + ESC + resolve + edit TG msg.
 func DoCancelPerm(
 	bot *tele.Bot,
 	pendingPerms *stores.PendingPermStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 ) string {
 	sugLabel, _ := ParseSuggestionLabel(pendingPerms.GetSuggestions(msgID))
-	uuid, uuidOk := pendingFiles.Get(msgID)
-	if uuidOk {
-		path := filepath.Join(PendingDir(), uuid+".json")
-		pf, err := ReadPendingFile(path)
-		if err == nil {
-			pf.Status = "cancelled"
-			WritePendingFile(path, pf)
-		}
+	uuid, _ := pendingFiles.Get(msgID)
+	if uuid != "" {
+		// Push cancel to wait store (no Remove — live handler removes on delivery)
+		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
 	}
 	msgText := pendingPerms.GetMsgText(msgID)
 	chatID := pendingPerms.GetChatID(msgID)
@@ -179,11 +179,12 @@ func GetPrivateChat() (*tele.Chat, string, int) {
 	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
 }
 
-// DoDecidePerm resolves a PermissionRequest: resolve + writePendingAnswer + edit + recordPending.
+// DoDecidePerm resolves a PermissionRequest: resolve + push answer to wait store + edit + recordPending.
 func DoDecidePerm(
 	bot *tele.Bot,
 	pendingPerms *stores.PendingPermStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
 	checkAlive func(string) bool,
 	extractTarget func(string) (*injector.TmuxTarget, error),
@@ -212,9 +213,7 @@ func DoDecidePerm(
 			updatedPerms = perms
 		}
 		ccOutput := BuildPermCCOutput(d.Behavior, d.Message, updatedPerms)
-		if err := WritePendingAnswer(uuid, ccOutput); err != nil {
-			logger.Error(fmt.Sprintf("Failed to write pending answer for perm: %v", err))
-		}
+		WritePendingAnswer(pendingWait, uuid, ccOutput)
 	}
 	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 	if chatID != 0 && msgText != "" {

@@ -19,6 +19,7 @@ func registerPermission(mux *http.ServeMux, bs *types.BotState) {
 			bs.Bot,
 			bs.PendingPerms,
 			bs.PendingFiles,
+			bs.PendingWait,
 			bs.ReactionTracker,
 			func(target string) bool {
 				return helpers.CheckSessionAlive(target, func(t string) {

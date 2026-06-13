@@ -19,7 +19,7 @@ import (
 
 // Register registers all POST /hook/* and /pending/* endpoints on mux.
 func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
-	mux.HandleFunc("/pending/notify", pendingNotifyHandler(bs, cb))
+	mux.HandleFunc("/pending/connect", pendingConnectHandler(bs, cb))
 	mux.HandleFunc("/hook/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.NotFound(w, r)
@@ -148,6 +148,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								Bot:              bs.Bot,
 								ToolNotifs:       bs.ToolNotifs,
 								PendingFiles:     bs.PendingFiles,
+								PendingWait:      bs.PendingWait,
 								PendingPerms:     bs.PendingPerms,
 								InjectQueue:      bs.InjectQueue,
 								InjectConfirm:    bs.InjectConfirm,
@@ -168,7 +169,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				bs.Pages.CleanupSession(p.SessionID)
 				bs.CompactTools.Reset(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
-				CleanPendingFilesBySession(p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID) // cancel (resolve + push cancel) any still-pending hook waits for this session
 				bs.Streams.EndSession(p.SessionID) // TTL tombstone; straggler deltas after SessionEnd are dropped
 				logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
 				// Signal pending upgrade restart
@@ -190,7 +191,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 			case "UserPromptSubmit":
-				CancelPendingFilesBySession(bs, p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID)
 				if p.SessionID != "" && p.TranscriptPath != "" {
 					lock := bs.SessionCounts.GetLock(p.SessionID)
 					lock.Lock()
@@ -210,7 +211,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					cb.TypingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 					bs.StopCooldown.Record(p.TmuxTarget)
 				}
-				CancelPendingFilesBySession(bs, p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID)
 				if chat != nil {
 					body := p.LastAssistantMessage
 					// Auto-handle rate-limit popup
@@ -280,6 +281,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 									Bot:              bs.Bot,
 									ToolNotifs:       bs.ToolNotifs,
 									PendingFiles:     bs.PendingFiles,
+									PendingWait:      bs.PendingWait,
 									PendingPerms:     bs.PendingPerms,
 									InjectQueue:      bs.InjectQueue,
 									InjectConfirm:    bs.InjectConfirm,
@@ -330,7 +332,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					bs.HookRunning.SetRunning(p.TmuxTarget)
 					cb.TypingLog("state: event=PreToolUse target=%s state=running", p.TmuxTarget)
 				}
-				CancelPendingFilesBySession(bs, p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID)
 				// Skip TG notifications for subagent tool calls
 				if p.AgentID != "" {
 					break
@@ -468,7 +470,26 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						}
 					}
 				}
-			case "PostToolUse":
+			case "PostToolUse", "PostToolUseFailure":
+				// Correlate with pending wait entry and freeze TG button
+				if waitEntry, ok := bs.PendingWait.FindMatch(p.SessionID, p.ToolName, helpers.CanonicalToolInput(p.ToolInput), p.ToolUseID); ok {
+					label := "✅ Allowed on desktop"
+					if waitEntry.ToolName == "AskUserQuestion" {
+						var resp struct {
+							Answers map[string]string `json:"answers"`
+						}
+						json.Unmarshal(p.ToolResponse, &resp)
+						label = "⌨️ " + helpers.FormatAnswers(resp.Answers)
+					}
+					helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.ToolNotifs, bs.PendingPerms, waitEntry, label)
+					// Push cancel so hook stands down (no Remove here)
+					bs.PendingWait.Push(waitEntry.UUID, stores.WaitEvent{Type: "cancel"})
+					bs.PendingFiles.Remove(waitEntry.MsgID)
+					logger.Info(fmt.Sprintf("Resolved on desktop: uuid=%s tool=%s tool_use_id=%q label=%s", waitEntry.UUID, waitEntry.ToolName, p.ToolUseID, label))
+				}
+				if event == "PostToolUseFailure" {
+					break
+				}
 				if p.ToolUseID == "" {
 					break
 				}

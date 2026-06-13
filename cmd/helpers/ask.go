@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +22,12 @@ type AskStateAccessor struct {
 	PendingFiles *stores.PendingFileStore
 }
 
-// DoRespondAsk responds to AskUserQuestion: handleStalePending + writePendingAnswer + edit + recordPending.
+// DoRespondAsk responds to AskUserQuestion: push answer to wait store + edit TG msg.
 func DoRespondAsk(
 	bot *tele.Bot,
 	toolNotifs *stores.ToolNotifyStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
 	msgID int,
 	answers map[string]string,
@@ -35,24 +35,20 @@ func DoRespondAsk(
 ) error {
 	uuid, ok := pendingFiles.Get(msgID)
 	if !ok {
-		return fmt.Errorf("pending file not found")
+		// Fallback: look up entry from wait store by msg_id
+		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
+			uuid = waitEntry.UUID
+		} else {
+			return fmt.Errorf("pending entry not found")
+		}
 	}
-	if HandleStalePending(msgID, uuid, func(mid int, u string, reason string) {
-		cleanupAskState(bot, toolNotifs, pendingFiles, mid, u, reason)
-	}) {
+	waitEntry, wok := pendingWait.Get(uuid)
+	if !wok {
+		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "wait entry missing")
 		return fmt.Errorf("hook dead (stale pending)")
 	}
-	path := filepath.Join(PendingDir(), uuid+".json")
-	pf, err := ReadPendingFile(path)
-	if err != nil {
-		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "file missing on respond")
-		return fmt.Errorf("question expired")
-	}
-	ccOutput := BuildAskCCOutput(pf.Payload, answers)
-	if err := WritePendingAnswer(uuid, ccOutput); err != nil {
-		logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-		return fmt.Errorf("failed to save answer")
-	}
+	ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
+	WritePendingAnswer(pendingWait, uuid, ccOutput)
 	if entry, entryOk := toolNotifs.Get(msgID); entryOk {
 		toolNotifs.MarkResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
@@ -63,22 +59,24 @@ func DoRespondAsk(
 	return nil
 }
 
-// DoCancelAsk cancels an AskUserQuestion: disk write + ESC + resolve + edit TG msg.
+// DoCancelAsk cancels an AskUserQuestion: push cancel to wait store + ESC + edit TG msg.
 func DoCancelAsk(
 	bot *tele.Bot,
 	toolNotifs *stores.ToolNotifyStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 ) string {
-	uuid, uuidOk := pendingFiles.Get(msgID)
-	if uuidOk {
-		path := filepath.Join(PendingDir(), uuid+".json")
-		pf, err := ReadPendingFile(path)
-		if err == nil {
-			pf.Status = "cancelled"
-			WritePendingFile(path, pf)
+	uuid, _ := pendingFiles.Get(msgID)
+	if uuid == "" {
+		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
+			uuid = waitEntry.UUID
 		}
+	}
+	if uuid != "" {
+		// Push cancel to wait store (no Remove — live handler removes on delivery)
+		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
 	}
 	if entry, ok := toolNotifs.Get(msgID); ok {
 		targetPtr, err := extractTarget(entry.MsgText)
@@ -93,35 +91,31 @@ func DoCancelAsk(
 	return uuid
 }
 
-// DoChatAsk handles chat mode for AskUserQuestion: handleStalePending + write __chat answer + edit.
+// DoChatAsk handles chat mode for AskUserQuestion: push __chat answer to wait store + edit.
 func DoChatAsk(
 	bot *tele.Bot,
 	toolNotifs *stores.ToolNotifyStore,
 	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
 	msgID int,
 ) error {
 	uuid, ok := pendingFiles.Get(msgID)
 	if !ok {
-		return fmt.Errorf("pending file not found")
+		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
+			uuid = waitEntry.UUID
+		} else {
+			return fmt.Errorf("pending entry not found")
+		}
 	}
-	if HandleStalePending(msgID, uuid, func(mid int, u string, reason string) {
-		cleanupAskState(bot, toolNotifs, pendingFiles, mid, u, reason)
-	}) {
-		return fmt.Errorf("question expired")
-	}
-	path := filepath.Join(PendingDir(), uuid+".json")
-	pf, err := ReadPendingFile(path)
-	if err != nil {
-		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "file missing on chat button")
+	waitEntry, wok := pendingWait.Get(uuid)
+	if !wok {
+		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "wait entry missing on chat button")
 		return fmt.Errorf("question expired")
 	}
 	answers := map[string]string{"__chat": "true"}
-	ccOutput := BuildAskCCOutput(pf.Payload, answers)
-	if err := WritePendingAnswer(uuid, ccOutput); err != nil {
-		logger.Error(fmt.Sprintf("Failed to write pending answer: %v", err))
-		return fmt.Errorf("failed to save answer")
-	}
+	ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
+	WritePendingAnswer(pendingWait, uuid, ccOutput)
 	if entry, entryOk := toolNotifs.Get(msgID); entryOk {
 		toolNotifs.MarkResolved(msgID)
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
@@ -150,6 +144,7 @@ type SafeInjectTextParams struct {
 	Bot              *tele.Bot
 	ToolNotifs       *stores.ToolNotifyStore
 	PendingFiles     *stores.PendingFileStore
+	PendingWait      *stores.PendingWaitStore
 	PendingPerms     *stores.PendingPermStore
 	InjectQueue      *stores.InjectQueueStore
 	InjectConfirm    *stores.InjectConfirmStore
@@ -284,25 +279,18 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 			p.ToolNotifs.MarkResolved(msgID)
 			continue
 		}
-		if HandleStalePending(msgID, uuid, func(mid int, u string, reason string) {
-			cleanupAskState(p.Bot, p.ToolNotifs, p.PendingFiles, mid, u, reason)
-		}) {
-			continue
-		}
-		path := filepath.Join(PendingDir(), uuid+".json")
-		pf, pfErr := ReadPendingFile(path)
-		if pfErr != nil {
-			p.ToolNotifs.MarkResolved(msgID)
+		// Check wait store liveness instead of file-based stale check
+		waitEntry, waitOk := p.PendingWait.Get(uuid)
+		if !waitOk {
+			cleanupAskState(p.Bot, p.ToolNotifs, p.PendingFiles, msgID, uuid, "wait entry missing")
 			continue
 		}
 		answers := make(map[string]string)
 		if len(entry.Questions) > 0 {
 			answers[entry.Questions[0].QuestionText] = text
 		}
-		ccOutput := BuildAskCCOutput(pf.Payload, answers)
-		if writeErr := WritePendingAnswer(uuid, ccOutput); writeErr != nil {
-			logger.Error(fmt.Sprintf("safeInjectText: failed to write answer: %v", writeErr))
-		}
+		ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
+		WritePendingAnswer(p.PendingWait, uuid, ccOutput)
 		p.ToolNotifs.MarkResolved(msgID)
 		if sessionMu != nil { sessionMu.Unlock() }
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
@@ -487,20 +475,29 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 	return nil
 }
 
-// RebuildInMemoryState reconstructs in-memory maps from a status=sent pending file.
+// RebuildInMemoryState reconstructs in-memory button state for a reconnecting hook.
+// Accepts explicit fields (msgID, chatID, topicID, payload, toolName, uuid, tmuxTarget) so it
+// can be used by both ScanPendingDir (which reads from a PendingFile) and the new connect handler
+// (which has the payload from the HTTP body). msg_text is rebuilt from payload contents.
 func RebuildInMemoryState(
 	toolNotifs *stores.ToolNotifyStore,
 	pendingFiles *stores.PendingFileStore,
 	pendingPerms *stores.PendingPermStore,
-	pf *PendingFile,
+	msgID int,
+	chatID int64,
+	topicID int,
+	payload json.RawMessage,
+	toolName string,
+	uuid string,
+	tmuxTarget string,
 	formatPaneID func(string) string,
 ) error {
 	var p hookPayloadForRebuild
-	if err := json.Unmarshal(pf.Payload, &p); err != nil {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}
-	tmuxTarget := formatPaneID(pf.TmuxTarget)
-	if pf.ToolName == "AskUserQuestion" {
+	fmtTarget := formatPaneID(tmuxTarget)
+	if toolName == "AskUserQuestion" {
 		var askInput struct {
 			Questions []struct {
 				Header   string `json:"header"`
@@ -540,22 +537,29 @@ func RebuildInMemoryState(
 			qSummaries = append(qSummaries, fmt.Sprintf("%s:[%s]", q.Header, strings.Join(labels, ",")))
 		}
 		contentSummary := strings.Join(qSummaries, " | ")
-		toolNotifs.Store(pf.TgMsgID, &stores.ToolNotifyEntry{
-			TmuxTarget: tmuxTarget, ToolName: "AskUserQuestion",
-			Questions: qMetas, ChatID: pf.TgChatID, MsgText: pf.TgMsgText,
-			PendingUUID: pf.UUID,
+		// Rebuild msg_text from payload (no file read needed)
+		var msgText string
+		if p.MsgText != "" {
+			msgText = p.MsgText
+		}
+		toolNotifs.Store(msgID, &stores.ToolNotifyEntry{
+			TmuxTarget: fmtTarget, ToolName: "AskUserQuestion",
+			Questions: qMetas, ChatID: chatID, MsgText: msgText,
+			PendingUUID: uuid,
 		})
-		pendingFiles.Store(pf.TgMsgID, pf.UUID)
-		logger.Info(fmt.Sprintf("scanPendingDir: rebuilt AskUserQuestion state: msg_id=%d questions=%d tmux=%s content=%s uuid=%s", pf.TgMsgID, len(askInput.Questions), tmuxTarget, contentSummary, pf.UUID))
+		pendingFiles.Store(msgID, uuid)
+		logger.Info(fmt.Sprintf("RebuildInMemoryState: AskUserQuestion msg_id=%d questions=%d tmux=%s content=%s uuid=%s", msgID, len(askInput.Questions), fmtTarget, contentSummary, uuid))
 		return nil
 	}
 	// PermissionRequest: rebuild pendingPerms
 	var suggestions []json.RawMessage
 	json.Unmarshal(p.PermSuggestions, &suggestions)
 	suggestionsRaw, _ := json.Marshal(suggestions)
-	pendingPerms.Create(pf.TgMsgID, tmuxTarget, suggestionsRaw, pf.TgMsgText, pf.TgChatID, pf.UUID)
-	pendingFiles.Store(pf.TgMsgID, pf.UUID)
-	logger.Info(fmt.Sprintf("scanPendingDir: rebuilt PermissionRequest state: msg_id=%d tool=%s tmux=%s uuid=%s", pf.TgMsgID, pf.ToolName, tmuxTarget, pf.UUID))
+	// Rebuild msg_text from payload if stored
+	msgText := p.MsgText
+	pendingPerms.Create(msgID, fmtTarget, suggestionsRaw, msgText, chatID, uuid)
+	pendingFiles.Store(msgID, uuid)
+	logger.Info(fmt.Sprintf("RebuildInMemoryState: PermissionRequest msg_id=%d tool=%s tmux=%s uuid=%s", msgID, toolName, fmtTarget, uuid))
 	return nil
 }
 
@@ -563,6 +567,7 @@ func RebuildInMemoryState(
 type hookPayloadForRebuild struct {
 	ToolInput       json.RawMessage `json:"tool_input"`
 	PermSuggestions json.RawMessage `json:"permission_suggestions"`
+	MsgText         string          `json:"msg_text"` // stored in enriched payload for rebuild
 }
 
 // cleanupAskState cleans up bot memory state and freezes TG buttons.

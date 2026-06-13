@@ -226,6 +226,7 @@ func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, sub
 		Bot:              bs.Bot,
 		ToolNotifs:       bs.ToolNotifs,
 		PendingFiles:     bs.PendingFiles,
+		PendingWait:      bs.PendingWait,
 		PendingPerms:     bs.PendingPerms,
 		InjectQueue:      bs.InjectQueue,
 		InjectConfirm:    bs.InjectConfirm,

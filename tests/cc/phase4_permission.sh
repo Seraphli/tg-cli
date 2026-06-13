@@ -247,3 +247,81 @@ if [ "$PTXT_FOUND" = true ] && [ -n "$PTXT_TARGET" ]; then
 else
   fail "Permission text cancel test: PermissionRequest not triggered within ${TIMEOUT}s"
 fi
+
+# --- Permission TUI Esc cancel test (pure TUI Escape keypress, NOT /pending/cancel) ---
+echo ""
+echo "--- Permission TUI Esc cancel test ---"
+
+wait_for_idle
+LOG_BEFORE_PESC=$(wc -l < "$LOG_FILE")
+PESC_SENTINEL="/tmp/tg-cli-perm-esc-test.txt"
+rm -f "$PESC_SENTINEL"
+
+pane_log "[perm_esc] BEFORE permission esc prompt"
+inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo perm_esc_test > $PESC_SENTINEL. Run only this one command and nothing else, do not verify or cat the file."
+pane_log "[perm_esc] AFTER sending permission esc prompt"
+
+# Wait for PermissionRequest (hook blocking on the streaming connection)
+ELAPSED=0
+PESC_FOUND=false
+PESC_UUID=""
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  LOG_NOW=$(wc -l < "$LOG_FILE")
+  if [ "$LOG_NOW" -gt "$LOG_BEFORE_PESC" ]; then
+    if tail -n +"$((LOG_BEFORE_PESC + 1))" "$LOG_FILE" | grep "Permission request sent" > /dev/null 2>&1; then
+      PESC_FOUND=true
+      PESC_UUID=$(tail -n +"$((LOG_BEFORE_PESC + 1))" "$LOG_FILE" | grep -oPm1 'Permission request sent.*uuid=\K[^ ]+' || true)
+      break
+    fi
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+pane_log "[perm_esc] AFTER permission detected"
+
+if [ "$PESC_FOUND" = true ] && [ -n "$PESC_UUID" ]; then
+  pass "Permission Esc test: PermissionRequest triggered (hook blocking, uuid=$PESC_UUID)"
+
+  # Send a REAL Escape keypress to the Claude pane (TUI cancel — not /pending/cancel)
+  ENCODED_TARGET=$(printf '%s' "$E2E_PANE" | jq -sRr @uri)
+  pane_log "[perm_esc] BEFORE /escape API"
+  ESC_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/escape?target=$ENCODED_TARGET")
+  ESC_STATUS=$(echo "$ESC_RESP" | jq -r '.status // empty' 2>/dev/null)
+  if [ "$ESC_STATUS" = "ok" ]; then
+    pass "Permission Esc test: /escape API sent real Escape keypress"
+  else
+    fail "Permission Esc test: /escape API failed: $ESC_RESP"
+  fi
+
+  # Characterise the bot-side outcome — ALL recorded via pass_opt, NEVER hard-asserted.
+  # The label is path-dependent AND coarse: cmd/hooks/register.go:473-490 runs the SAME freeze
+  # block for BOTH PostToolUse and PostToolUseFailure, defaulting a non-AskQ tool to
+  # "✅ Allowed on desktop" (the `if event=="PostToolUseFailure" { break }` at line 490 is AFTER
+  # the freeze+log). So an Esc-cancel that fires PostToolUseFailure can STILL log
+  # "Resolved on desktop: ... ✅ Allowed on desktop" while the Bash tool never actually ran.
+  # That label is NOT an authorization fact → it must not gate pass/fail.
+  wait_for_idle
+  pane_log "[perm_esc] AFTER CC idle"
+  PESC_WINDOW=$(tail -n +"$((LOG_BEFORE_PESC + 1))" "$LOG_FILE")
+  for sig in \
+    "pendingConnect grace expired:.*cancelled" \
+    "Permission cancelled:" \
+    "CancelPendingWaitBySession:" \
+    "FreezeWaitEntry(Perm):.*❌ Cancelled" \
+    "FreezeWaitEntry(Perm):.*⌨️ Answered on desktop" \
+    "Resolved on desktop:.*✅ Allowed on desktop"; do
+    LINE=$(echo "$PESC_WINDOW" | grep -E "$sig" | tail -1 || true)
+    [ -n "$LINE" ] && pass_opt "Permission Esc test: observed -> $LINE"
+  done
+
+  # HARD GATE (only authoritative one, independent of the coarse bot-side label):
+  # Esc cancelled the permission ⇒ the Bash tool never ran ⇒ sentinel file absent.
+  if [ ! -f "$PESC_SENTINEL" ]; then
+    pass "Permission Esc test: Bash tool did NOT run — permission cancelled via TUI Esc (sentinel absent)"
+  else
+    fail "Permission Esc test: sentinel file exists — Bash ran despite Esc (permission NOT cancelled)"
+  fi
+else
+  fail "Permission Esc test: PermissionRequest not triggered within ${TIMEOUT}s"
+fi
