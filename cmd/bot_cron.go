@@ -176,6 +176,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		Bot:              bs.Bot,
 		ToolNotifs:       bs.ToolNotifs,
 		PendingFiles:     bs.PendingFiles,
+		PendingWait:      bs.PendingWait,
 		PendingPerms:     bs.PendingPerms,
 		InjectQueue:      bs.InjectQueue,
 		InjectConfirm:    bs.InjectConfirm,
