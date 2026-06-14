@@ -357,17 +357,27 @@ func handleReloadCommand(bs *types.BotState, c tele.Context, target injector.Tmu
 
 // handleUsageCommand handles /bot_usage.
 func handleUsageCommand(bs *types.BotState, c tele.Context) error {
-	sel := &tele.ReplyMarkup{}
-	sel.Inline(sel.Row(
-		sel.Data("📟 tmux", "usage_src", "tmux"),
-		sel.Data("🌐 api", "usage_src", "api"),
-	))
-	appendDeleteButton(sel)
-	_, err := helpers.RetrySend(bs.Bot, c.Chat(), "📊 Select usage source:", sel, tele.ModeHTML)
-	return err
+	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), "⏳ Fetching usage...", tele.ModeHTML)
+	if err != nil {
+		return err
+	}
+	delKb := &tele.ReplyMarkup{}
+	appendDeleteButton(delKb)
+	formatted, claudeCache, codexCache, apiErr := helpers.FetchMergedUsage(claudeUsageCache, codexUsageCache)
+	claudeUsageCache = claudeCache
+	codexUsageCache = codexCache
+	if apiErr != nil {
+		logger.Error(fmt.Sprintf("handleUsageCommand: %v", apiErr))
+		helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("❌ %s", apiErr.Error()), delKb, tele.ModeHTML)
+		return nil
+	}
+	logger.Info(fmt.Sprintf("handleUsageCommand: usage fetched len=%d", len(formatted)))
+	helpers.RetryEdit(bs.Bot, msg, formatted, delKb, tele.ModeHTML)
+	return nil
 }
 
-var usageCache *helpers.UsageCacheEntry
+var claudeUsageCache *helpers.UsageCacheEntry
+var codexUsageCache *helpers.UsageCacheEntry
 
 // handleUsageCommandAPI fetches CC usage from the Anthropic OAuth API.
 func handleUsageCommandAPI(bs *types.BotState, c tele.Context, existingMsg *tele.Message) error {
@@ -386,7 +396,7 @@ func handleUsageCommandAPI(bs *types.BotState, c tele.Context, existingMsg *tele
 	appendDeleteButton(delKb)
 	var apiErr error
 	var formatted string
-	formatted, usageCache, apiErr = helpers.FetchUsageFormatted(usageCache)
+	formatted, claudeUsageCache, apiErr = helpers.FetchUsageFormatted(claudeUsageCache)
 	if apiErr != nil {
 		logger.Error(fmt.Sprintf("handleUsageCommand: %v", apiErr))
 		helpers.RetryEdit(bot, msg, fmt.Sprintf("❌ %s", apiErr.Error()), delKb, tele.ModeHTML)

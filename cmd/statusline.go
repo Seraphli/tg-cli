@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -26,6 +27,7 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 		SessionID     string          `json:"session_id"`
 		Version       string          `json:"version"`
 		ContextWindow json.RawMessage `json:"context_window"`
+		RateLimits    json.RawMessage `json:"rate_limits"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil
@@ -34,7 +36,7 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	dir := "/tmp/tg-cli/context"
+	dir := filepath.Join(os.TempDir(), "tg-cli", "context")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -45,6 +47,12 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 	if payload.Version != "" {
 		saveData["cc_version"] = payload.Version
 	}
+	if len(payload.RateLimits) > 0 && string(payload.RateLimits) != "null" {
+		var rl map[string]interface{}
+		if json.Unmarshal(payload.RateLimits, &rl) == nil && len(rl) > 0 {
+			saveData["rate_limits"] = rl
+		}
+	}
 	out, _ := json.Marshal(saveData)
-	return os.WriteFile(dir+"/"+payload.SessionID+".json", out, 0644)
+	return os.WriteFile(filepath.Join(dir, payload.SessionID+".json"), out, 0644)
 }

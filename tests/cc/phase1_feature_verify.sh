@@ -23,13 +23,13 @@ if [ "${E2E_BACKEND:-}" != "codex" ]; then
 
   echo "  DEBUG: USAGE_OUTPUT (${#USAGE_OUTPUT} chars): $USAGE_OUTPUT"
   set +eo pipefail
-  echo "$USAGE_OUTPUT" | grep -q "CC Usage"
+  echo "$USAGE_OUTPUT" | grep -q "Claude Usage"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ]; then
-    pass_opt "usage CLI (tmux): output contains CC Usage header"
+    pass_opt "usage CLI (tmux): output contains Claude Usage header"
   else
-    warn "usage CLI (tmux): output missing CC Usage header (rate limit?) - got: $USAGE_OUTPUT"
+    warn "usage CLI (tmux): output missing Claude Usage header (rate limit?) - got: $USAGE_OUTPUT"
   fi
   # Regression guard (6ab3269 dropped the defer kill-session, leaking the temp session on the
   # /usage failure path → run_phase stale-session check aborted the suite). The session MUST now
