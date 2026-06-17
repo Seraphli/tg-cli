@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Seraphli/tg-cli/cmd/handlers"
 	"github.com/Seraphli/tg-cli/cmd/helpers"
@@ -29,7 +30,6 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 		type sessionIdleEntry struct {
 			Target string `json:"target"`
 			Idle   bool   `json:"idle"`
-			Busy   bool   `json:"busy"`
 		}
 		result := make(map[string]sessionIdleEntry)
 		allIdle := len(sessions) > 0 // empty sessions = not idle
@@ -42,7 +42,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			if running {
 				allIdle = false
 			}
-			result[sid] = sessionIdleEntry{Target: info.TmuxTarget, Idle: !running, Busy: running}
+			result[sid] = sessionIdleEntry{Target: info.TmuxTarget, Idle: !running}
 		}
 
 		// If a target was specified but no registered session matched, check the
@@ -55,11 +55,16 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 		// readiness (start_codex) would proceed too early.
 		if targetFilter != "" && len(result) == 0 {
 			title := helpers.GetPaneTitle(targetFilter)
-			ready := title != "" && helpers.DetectBackend(targetFilter) != ""
-			busy := ready && helpers.IsSessionRunning(targetFilter)
-			idle := ready && !busy
+			backend := helpers.DetectBackend(targetFilter)
+			var idle bool
+			if title != "" && backend != "" {
+				idle = !helpers.IsSessionRunning(targetFilter)
+			} else if title != "" {
+				r, _ := utf8.DecodeRuneInString(title)
+				idle = !(r >= 0x2800 && r <= 0x28FF)
+			}
 			allIdle = idle
-			result[targetFilter] = sessionIdleEntry{Target: targetFilter, Idle: idle, Busy: busy}
+			result[targetFilter] = sessionIdleEntry{Target: targetFilter, Idle: idle}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
