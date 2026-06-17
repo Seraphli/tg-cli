@@ -38,6 +38,7 @@ start_codex() {
   local elapsed=0
   local trust_handled=false
   local hooks_handled=false
+  local update_handled=false
   while [ $elapsed -lt 60 ]; do
     PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
     set +eo pipefail
@@ -45,12 +46,17 @@ start_codex() {
     _ps_hooks=("${PIPESTATUS[@]}")
     echo "$PANE_CONTENT" | grep -qi "Do you trust"
     _ps_trust=("${PIPESTATUS[@]}")
+    echo "$PANE_CONTENT" | grep -qi "Update now"
+    _ps_update_now=("${PIPESTATUS[@]}")
+    echo "$PANE_CONTENT" | grep -qi "2\. Skip"
+    _ps_update_skip=("${PIPESTATUS[@]}")
     set -eo pipefail
     local title api_idle stage
     title=$($TMUX_TEST display-message -t "${E2E_PANE%@*}" -p '#{pane_title}' 2>/dev/null || true)
     api_idle=$(codex_api_idle)
     # Determine which startup stage this snapshot is in (the loop handles 2 dialogs, then waits for idle).
-    if   [ "${_ps_trust[1]}" -eq 0 ]; then stage="trust-dialog (about to confirm 'Do you trust')"
+    if   [ "$update_handled" = false ] && [ "${_ps_update_now[1]}" -eq 0 ] && [ "${_ps_update_skip[1]}" -eq 0 ]; then stage="update-dialog (about to skip 'Update available')"
+    elif [ "${_ps_trust[1]}" -eq 0 ]; then stage="trust-dialog (about to confirm 'Do you trust')"
     elif [ "${_ps_hooks[1]}" -eq 0 ]; then stage="hooks-dialog (about to select 'Trust all and continue')"
     elif [ "$api_idle" = "True" ]; then stage="idle (codex ready -> will inject warmup)"
     else stage="wait-idle (booted, /session/idle=False, codex still busy)"
@@ -58,6 +64,21 @@ start_codex() {
     echo "  === PANE: codex startup t=$elapsed stage=[$stage] title='$title'(${#title}c) api_idle=$api_idle ==="
     echo "$PANE_CONTENT"
     echo "  === END PANE ==="
+    # "Update available" interactive selector: cursor defaults to "1. Update now";
+    # move Down to "2. Skip" then confirm. MUST be checked before idle — the API
+    # falsely reports idle while this dialog is displayed. Detected via TWO
+    # conditions ("Update now" + "2. Skip") to distinguish from the non-interactive
+    # banner (no menu) and trust dialog (has "Press enter" but no "Update now").
+    if [ "$update_handled" = false ] && [ "${_ps_update_now[1]}" -eq 0 ] && [ "${_ps_update_skip[1]}" -eq 0 ]; then
+      $TMUX_TEST send-keys -t "$E2E_SESSION" Down
+      sleep 1
+      $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
+      update_handled=true
+      echo "Codex update selector detected, selected 'Skip' at t=$elapsed"
+      sleep 2
+      elapsed=$((elapsed + 2))
+      continue
+    fi
     # "Hooks need review" dialog: cursor defaults to "1. Review hooks"; move Down to
     # "2. Trust all and continue" then confirm. Checked before the trust dialog because the
     # hooks dialog text also contains the word "continue".

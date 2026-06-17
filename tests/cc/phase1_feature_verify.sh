@@ -17,20 +17,34 @@ start_claude "e2e-cc-1"
 
 if [ "${E2E_BACKEND:-}" != "codex" ]; then
   echo ""
-  echo "  --- Sub-test A: tg-cli usage CLI command (tmux) ---"
+  echo "  --- Sub-test A: tg-cli usage CLI command ---"
 
-  USAGE_OUTPUT=$(./tg-cli usage --method tmux --tmux-server tg-cli-test 2>&1) || true
-
-  echo "  DEBUG: USAGE_OUTPUT (${#USAGE_OUTPUT} chars): $USAGE_OUTPUT"
+  # Primary: merged usage (default path, matches /u TG command)
+  USAGE_MERGED=$(./tg-cli usage --tmux-server $TMUX_SERVER_NAME 2>&1) || true
+  echo "  DEBUG: USAGE_MERGED (${#USAGE_MERGED} chars): $USAGE_MERGED"
   set +eo pipefail
-  echo "$USAGE_OUTPUT" | grep -q "Claude Usage"
+  echo "$USAGE_MERGED" | grep -q "Claude Usage"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  if [ "${_ps[1]}" -eq 0 ]; then
+    pass_opt "usage CLI (merged): output contains Claude Usage header"
+  else
+    warn "usage CLI (merged): output missing Claude Usage header (rate limit?) - got: $USAGE_MERGED"
+  fi
+
+  # Secondary: tmux-only method
+  USAGE_TMUX=$(./tg-cli usage --method tmux --tmux-server $TMUX_SERVER_NAME 2>&1) || true
+  echo "  DEBUG: USAGE_TMUX (${#USAGE_TMUX} chars): $USAGE_TMUX"
+  set +eo pipefail
+  echo "$USAGE_TMUX" | grep -q "Claude Usage"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ]; then
     pass_opt "usage CLI (tmux): output contains Claude Usage header"
   else
-    warn "usage CLI (tmux): output missing Claude Usage header (rate limit?) - got: $USAGE_OUTPUT"
+    warn "usage CLI (tmux): output missing Claude Usage header (rate limit?) - got: $USAGE_TMUX"
   fi
+
   # Regression guard (6ab3269 dropped the defer kill-session, leaking the temp session on the
   # /usage failure path → run_phase stale-session check aborted the suite). The session MUST now
   # be cleaned up on ALL paths, even when /usage fails — deterministic regardless of /usage outcome.

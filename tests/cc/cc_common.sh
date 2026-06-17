@@ -10,7 +10,7 @@ start_claude() {
   E2E_SESSION="$session_name"
   export E2E_SESSION
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
-  $TMUX_TEST new-session -d -s "$E2E_SESSION"
+  $TMUX_TEST new-session -d -s "$E2E_SESSION" -c "$CC_WORKDIR"
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
@@ -23,7 +23,7 @@ start_claude() {
   PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
   echo "  DEBUG: PANE_CONTENT (${#PANE_CONTENT} chars): $PANE_CONTENT"
   set +eo pipefail
-  echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"
+  echo "$PANE_CONTENT" | grep -q "Bypass Permissions"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ]; then
@@ -33,7 +33,7 @@ start_claude() {
     echo "Bypass Permissions dialog detected, accepted."
   else
     set +eo pipefail
-    echo "$PANE_CONTENT" | grep -qi "trust"
+    echo "$PANE_CONTENT" | grep -q "trust"
     _ps=("${PIPESTATUS[@]}")
     set -eo pipefail
     if [ "${_ps[1]}" -eq 0 ]; then

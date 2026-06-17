@@ -213,8 +213,8 @@ func runHook(cmd *cobra.Command, args []string) {
 				if ctx.Err() != nil {
 					hookExit(0, "parent exited")
 				}
-				if errors.Is(respErr, syscall.ECONNREFUSED) && config.UpgradeFlagActive() && time.Since(start) < retryCap {
-					hookLog("connect ECONNREFUSED during upgrade, retrying: %v", respErr)
+				if errors.Is(respErr, syscall.ECONNREFUSED) && time.Since(start) < retryCap {
+					hookLog("connect ECONNREFUSED, retrying: %v", respErr)
 					time.Sleep(2 * time.Second)
 					continue
 				}
@@ -264,13 +264,11 @@ func runHook(cmd *cobra.Command, args []string) {
 			if ctx.Err() != nil {
 				hookExit(0, "parent exited")
 			}
-			// Stream dropped (EOF without terminal) — reconnect if upgrade active
-			if config.UpgradeFlagActive() && time.Since(start) < retryCap {
-				hookLog("stream dropped during upgrade, reconnecting")
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			hookExit(1, "stream dropped without answer")
+			// Stream dropped (EOF without terminal) — reconnect if CC is alive
+			start = time.Now()
+			hookLog("stream dropped, reconnecting")
+			time.Sleep(2 * time.Second)
+			continue
 		}
 		hookExit(0, "done")
 	}

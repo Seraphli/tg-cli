@@ -4,17 +4,47 @@
 [ -n "${_E2E_COMMON_LOADED:-}" ] && return 0
 _E2E_COMMON_LOADED=1
 
-# Shared config (allow override via env)
-BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot}"
-E2E_SESSION="${E2E_SESSION:-tg-cli-e2e}"
-export TMUX_TEST="tmux -u -L tg-cli-test -f /dev/null"
-TEST_CONFIG_DIR="$HOME/.tg-cli-test"
+# Unset CC-injected env vars to prevent inheritance by E2E tmux server
+unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDECODE
+unset CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
+unset CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP
+unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL
+unset CLAUDE_EFFORT CLAUDE_PLUGIN_DATA
+unset AI_AGENT CODEX_COMPANION_SESSION_ID
+unset GIT_EDITOR COREPACK_ENABLE_AUTO_PIN
+
+# Per-run isolation via run ID (PID of top-level process, inherited by subprocesses)
+E2E_RUN_ID="${E2E_RUN_ID:-$$}"
+export E2E_RUN_ID
+TMUX_SERVER_NAME="${TMUX_SERVER_NAME:-tg-cli-test-${E2E_RUN_ID}}"
+export TMUX_SERVER_NAME
+BOT_SESSION="${BOT_SESSION:-tg-cli-e2e-bot-${E2E_RUN_ID}}"
+export BOT_SESSION
+E2E_SESSION="${E2E_SESSION:-tg-cli-e2e-${E2E_RUN_ID}}"
+export E2E_SESSION
+export TMUX_TEST="tmux -u -L $TMUX_SERVER_NAME -f /dev/null"
+TEST_CONFIG_DIR="${TEST_CONFIG_DIR:-$HOME/.tg-cli-test-${E2E_RUN_ID}}"
+export TEST_CONFIG_DIR
+_E2E_SHARED_CONFIG="$HOME/.tg-cli-test"
+mkdir -p "$TEST_CONFIG_DIR"
+if [ ! -f "$TEST_CONFIG_DIR/credentials.json" ] && [ -f "$_E2E_SHARED_CONFIG/credentials.json" ]; then
+  cp "$_E2E_SHARED_CONFIG/credentials.json" "$TEST_CONFIG_DIR/credentials.json"
+fi
 TEST_CLAUDE_CONFIG_DIR="${TEST_CLAUDE_CONFIG_DIR:-$TEST_CONFIG_DIR/claude-config}"
+export TEST_CLAUDE_CONFIG_DIR
 TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
-TEST_PORT=12501
+export TEST_SETTINGS
+TEST_PORT="${TEST_PORT:-$(python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()")}"
+export TEST_PORT
 LOG_FILE="$TEST_CONFIG_DIR/bot.log"
+export LOG_FILE
 TYPING_LOG_FILE="$TEST_CONFIG_DIR/typing.log"
+export TYPING_LOG_FILE
 CREDENTIALS="$TEST_CONFIG_DIR/credentials.json"
+export CREDENTIALS
+CC_WORKDIR="$TEST_CONFIG_DIR/cwd"
+mkdir -p "$CC_WORKDIR"
+export CC_WORKDIR
 # Codex is significantly slower than CC; use longer timeout
 if [ "${E2E_BACKEND:-}" = "codex" ]; then
   TIMEOUT=180
@@ -307,7 +337,7 @@ start_bot() {
   rm -f "$TEST_CONFIG_DIR/inject-queue.json" "$TEST_CONFIG_DIR/merge-buffers.json" "$TEST_CONFIG_DIR/sessions.json" "$TEST_CONFIG_DIR/at-channels.json" 2>/dev/null || true
   rm -rf "$TEST_CONFIG_DIR/mailbox" 2>/dev/null || true
   # Record the launch command so wait_for_bot_ready's failure diagnostics can report it.
-  _LAST_BOT_LAUNCH_CMD="cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server tg-cli-test --debug 2>&1"
+  _LAST_BOT_LAUNCH_CMD="cd $(pwd) && ./tg-cli --config-dir $TEST_CONFIG_DIR bot --port $TEST_PORT --tmux-server $TMUX_SERVER_NAME --debug 2>&1"
   export _LAST_BOT_LAUNCH_CMD
   echo "  Bot launch command: $_LAST_BOT_LAUNCH_CMD"
   $TMUX_TEST new-session -d -s "$BOT_SESSION" 2>/dev/null || true
@@ -327,10 +357,13 @@ setup_hooks() {
   cp "$HOME/.codex/auth.json" "$CODEX_HOME/auth.json" 2>/dev/null || true
   # Copy credentials (CLAUDE_CONFIG_DIR maps to ~/.claude)
   cp "$HOME/.claude/.credentials.json" "$TEST_CLAUDE_CONFIG_DIR/.credentials.json" 2>/dev/null || true
-  # Write minimal .claude.json (skip onboarding, no MCP leak)
-  cat > "$TEST_CLAUDE_CONFIG_DIR/.claude.json" << 'MINEOF'
-{"hasCompletedOnboarding":true,"hasInitOnboardingBeenShown":true,"numStartups":100,"autoUpdates":false}
-MINEOF
+  # Write minimal .claude.json (skip onboarding, no MCP leak, trust CWD + CC_WORKDIR)
+  local cwd_escaped ccwd_escaped
+  cwd_escaped=$(python3 -c "import json; print(json.dumps(\"$(pwd)\"))")
+  ccwd_escaped=$(python3 -c "import json; print(json.dumps(\"$CC_WORKDIR\"))")
+  cat > "$TEST_CLAUDE_CONFIG_DIR/.claude.json" << EOF
+{"hasCompletedOnboarding":true,"hasInitOnboardingBeenShown":true,"numStartups":100,"autoUpdates":false,"projects":{$cwd_escaped:{"hasTrustDialogAccepted":true},$ccwd_escaped:{"hasTrustDialogAccepted":true}}}
+EOF
   # Install hooks to user-level settings (CLAUDE_CONFIG_DIR/settings.json)
   TEST_SETTINGS="$TEST_CLAUDE_CONFIG_DIR/settings.json"
   echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install --port "$TEST_PORT" --settings "$TEST_SETTINGS" --skip-tmux
@@ -347,11 +380,15 @@ cleanup_sessions() {
   local exit_code=$?
   echo ""
   echo "Cleaning up..."
-  # Preserve config dirs for post-failure analysis (setup_hooks cleans at start of next run)
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   sleep 2
   $TMUX_TEST kill-session -t "=$BOT_SESSION" 2>/dev/null || true
-  # Do NOT kill-server — debug sessions (tg-cli-usage-*) may be kept alive for investigation
+  $TMUX_TEST kill-server 2>/dev/null || true
+  if [ $exit_code -eq 0 ]; then
+    rm -rf "$TEST_CONFIG_DIR" 2>/dev/null || true
+  else
+    echo "  Per-run config preserved for debugging: $TEST_CONFIG_DIR"
+  fi
   return $exit_code
 }
 

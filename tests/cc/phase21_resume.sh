@@ -85,7 +85,7 @@ $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
 sleep 5
 PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
 set +eo pipefail
-echo "$PANE_CONTENT" | grep -qi "Bypass Permissions"
+echo "$PANE_CONTENT" | grep -q "Bypass Permissions"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[1]}" -eq 0 ]; then
@@ -94,7 +94,7 @@ if [ "${_ps[1]}" -eq 0 ]; then
   $TMUX_TEST send-keys -t "$E2E_SESSION" C-m
 else
   set +eo pipefail
-  echo "$PANE_CONTENT" | grep -qi "trust"
+  echo "$PANE_CONTENT" | grep -q "trust"
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ]; then

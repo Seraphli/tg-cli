@@ -24,7 +24,7 @@ LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 INSTALL_OUTPUT=$(echo "" | ./tg-cli --config-dir "$TEST_CONFIG_DIR" install \
   --port "$TEST_PORT" \
   --settings "$TEST_CLAUDE_CONFIG_DIR/settings.json" \
-  --tmux-server tg-cli-test \
+  --tmux-server $TMUX_SERVER_NAME \
   --tmux-conf "$TMUX_CONF_TEST" 2>&1) || true
 
 echo "  DEBUG: INSTALL_OUTPUT (${#INSTALL_OUTPUT} chars): $INSTALL_OUTPUT"

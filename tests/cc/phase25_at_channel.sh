@@ -180,7 +180,7 @@ export E2E_SESSION E2E_PANE
 # Use longer timeout for @ channel tests (session B startup + SafeInjectText can be slow in full suite)
 AT_TIMEOUT=$((TIMEOUT * 2))
 # CC sessions must run tg-cli against the TEST bot (else bare tg-cli hits production).
-AT_CLI="./tg-cli --config-dir $TEST_CONFIG_DIR"
+AT_CLI="$(git rev-parse --show-toplevel)/tg-cli --config-dir $TEST_CONFIG_DIR"
 AT_PORT_FLAG="--port $TEST_PORT"
 
 # Bind routes so TG notifications are sent (required for pagination/collapse tests)
@@ -290,7 +290,7 @@ pane_log "[TC1] AFTER @ open (B)" "$AT_PANE"
 # (fresh-scoped via LOG_BEFORE_TC1; PostToolUse is logged only when the tool actually ran, so the
 # injected prompt's UserPromptSubmit line cannot satisfy this).
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-cli e2e-at-b --rounds 3"
+tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "Raw hook payload \[PostToolUse\]" | grep -q "session at e2e-cli e2e-at-b --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[2]}" -eq 0 ]; then
@@ -677,7 +677,7 @@ pane_log "[TC4] AFTER @ reply (B)" "$AT_PANE"
 
 # TC4-1: B's CC ran the reply command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at reply e2e-at-b e2e-cli"
+tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "Raw hook payload \[PostToolUse\]" | grep -q "session at reply e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[2]}" -eq 0 ]; then
@@ -916,7 +916,7 @@ pane_log "[TC7] AFTER @ end (B)" "$AT_PANE"
 
 # TC7-1: A's CC ran the end command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-cli e2e-at-b"
+tail -n +"$((LOG_BEFORE_TC7 + 1))" "$LOG_FILE" | grep "Raw hook payload \[PostToolUse\]" | grep -q "session at end e2e-cli e2e-at-b"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[2]}" -eq 0 ]; then
@@ -1001,7 +1001,7 @@ pane_log "[TC8] AFTER B closes channel (B)" "$AT_PANE"
 
 # TC8-1: B's CC ran the end command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at end e2e-at-b e2e-cli"
+tail -n +"$((LOG_BEFORE_TC8 + 1))" "$LOG_FILE" | grep "Raw hook payload \[PostToolUse\]" | grep -q "session at end e2e-at-b e2e-cli"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[2]}" -eq 0 ]; then
@@ -1204,7 +1204,7 @@ AFTER_LOG_TC11=$(tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE")
 
 # TC11-1: B's CC ran the open command itself (PostToolUse in bot log, fresh-scoped)
 set +eo pipefail
-tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -q "session at e2e-at-b e2e-cli --rounds 3"
+tail -n +"$((LOG_BEFORE_TC11 + 1))" "$LOG_FILE" | grep "Raw hook payload \[PostToolUse\]" | grep -q "session at e2e-at-b e2e-cli --rounds 3"
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 if [ "${_ps[2]}" -eq 0 ]; then
