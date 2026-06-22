@@ -184,6 +184,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			doCancelPerm(bs, c.Message().ID)
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Cancelled"})
 		}
+		// Use FindByMsgIDSnapshot — safe because msgID comes from real TG callback
 		d, err := doDecidePerm(bs, c.Message().ID, decision)
 		if err != nil {
 			if err.Error() == "session disconnected" {
@@ -207,15 +208,20 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		toolName := parts[0]
 		switch toolName {
 		case "AskUserQuestion":
-			entry, ok := bs.ToolNotifs.Get(c.Message().ID)
+			// Use FindByMsgIDSnapshot — safe because msgID comes from real TG callback
+			snap, ok := bs.PendingWait.FindByMsgIDSnapshot(c.Message().ID)
 			if !ok {
 				return c.Respond(&tele.CallbackResponse{Text: "Expired"})
 			}
+			// Only handle AskUserQuestion entries here
+			if snap.ToolName != "AskUserQuestion" {
+				return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+			}
 			// Check session alive before processing tool response
-			if entry.TmuxTarget != "" && !checkSessionAlive(bs, entry.TmuxTarget) {
+			if snap.TmuxTarget != "" && !checkSessionAlive(bs, snap.TmuxTarget) {
 				return c.Respond(&tele.CallbackResponse{Text: "⚠️ Session disconnected"})
 			}
-			if entry.Resolved {
+			if snap.Resolved {
 				return c.Respond(&tele.CallbackResponse{Text: "Already answered"})
 			}
 			if parts[1] == "cancel" {
@@ -227,7 +233,12 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				}
 				return c.Respond(&tele.CallbackResponse{Text: "Chat mode"})
 			} else if parts[1] == "submit" {
-				if err := doRespondAsk(bs, c.Message().ID, helpers.BuildAnswers(entry), ""); err != nil {
+				// Get current questions from store for building answers
+				questions, hasQ := bs.PendingWait.GetQuestions(snap.UUID)
+				if !hasQ {
+					return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+				}
+				if err := doRespondAsk(bs, c.Message().ID, helpers.BuildAnswers(questions), ""); err != nil {
 					return c.Respond(&tele.CallbackResponse{Text: "❌ " + err.Error()})
 				}
 				return c.Respond(&tele.CallbackResponse{Text: "✅ Submitted"})
@@ -235,35 +246,41 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				split := strings.SplitN(parts[1], ":", 2)
 				qIdx, _ := strconv.Atoi(split[0])
 				optIdx, _ := strconv.Atoi(split[1])
-				if qIdx >= len(entry.Questions) {
+				if qIdx >= len(snap.Questions) {
 					return c.Respond(&tele.CallbackResponse{Text: "Invalid question"})
 				}
-				qm := &entry.Questions[qIdx]
-				if qm.MultiSelect {
-					qm.SelectedOptions[optIdx] = !qm.SelectedOptions[optIdx]
-					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d state=%v label=%s", c.Message().ID, qIdx, optIdx, qm.SelectedOptions[optIdx], qm.OptionLabels[optIdx]))
-					newMarkup := helpers.RebuildAskMarkup(entry)
+				if snap.Questions[qIdx].MultiSelect {
+					// Toggle option — use store method for atomic update
+					questions, err := bs.PendingWait.ToggleQuestionOption(snap.UUID, qIdx, optIdx)
+					if err != nil {
+						return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+					}
+					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
+					newMarkup := helpers.RebuildAskMarkup(questions)
 					helpers.RetryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
 					return c.Respond(&tele.CallbackResponse{Text: "Toggled"})
 				} else {
-					qm.SelectedOption = optIdx
-					hasSubmit := len(entry.Questions) > 1
-					for _, q := range entry.Questions {
+					// Select option — use store method for atomic update
+					questions, err := bs.PendingWait.SelectQuestionOption(snap.UUID, qIdx, optIdx)
+					if err != nil {
+						return c.Respond(&tele.CallbackResponse{Text: "Expired"})
+					}
+					hasSubmit := len(questions) > 1
+					for _, q := range questions {
 						if q.MultiSelect {
 							hasSubmit = true
 						}
 					}
 					if !hasSubmit {
-						if err := doRespondAsk(bs, c.Message().ID, helpers.BuildAnswers(entry), ""); err != nil {
+						if err := doRespondAsk(bs, c.Message().ID, helpers.BuildAnswers(questions), ""); err != nil {
 							return c.Respond(&tele.CallbackResponse{Text: "❌ " + err.Error()})
 						}
 						return c.Respond(&tele.CallbackResponse{Text: "✅ Selected"})
-					} else {
-						logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, qm.OptionLabels[optIdx]))
-						newMarkup := helpers.RebuildAskMarkup(entry)
-						helpers.RetryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
-						return c.Respond(&tele.CallbackResponse{Text: "Selected"})
 					}
+					logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
+					newMarkup := helpers.RebuildAskMarkup(questions)
+					helpers.RetryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
+					return c.Respond(&tele.CallbackResponse{Text: "Selected"})
 				}
 			}
 		}

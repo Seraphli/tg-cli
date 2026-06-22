@@ -12,6 +12,9 @@ import (
 // ServerName is the tmux server socket name (-L flag). Empty = default server.
 var ServerName string
 
+// ErrSubmitAfterPaste is returned when send-keys C-m fails after paste-buffer succeeds.
+var ErrSubmitAfterPaste = fmt.Errorf("submit failed after paste")
+
 var injectMu sync.Map // key: formatted target string, value: *sync.Mutex
 
 func getInjectLock(target TmuxTarget) *sync.Mutex {
@@ -136,7 +139,7 @@ func InjectText(target TmuxTarget, text string, submit ...bool) error {
 	// Submit unless explicitly disabled
 	if len(submit) == 0 || submit[0] {
 		if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
-			return fmt.Errorf("submit failed: %w", err)
+			return fmt.Errorf("%w: %v", ErrSubmitAfterPaste, err)
 		}
 	}
 	return nil

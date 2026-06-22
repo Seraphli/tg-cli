@@ -71,11 +71,18 @@ else
 fi
 
 # TG button frozen to "✅ Allowed on desktop"
-if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "FreezeWaitEntry(Perm):.*✅ Allowed on desktop" > /dev/null 2>&1; then
+if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep "FreezeWaitEntry:.*✅ Allowed on desktop" > /dev/null 2>&1; then
   pass "TG button frozen to '✅ Allowed on desktop'"
 else
-  fail "FreezeWaitEntry(Perm) '✅ Allowed on desktop' not found in log"
+  fail "FreezeWaitEntry '✅ Allowed on desktop' not found in log"
 fi
+
+  # Freeze edit must actually succeed — ZERO 'message text is empty' errors
+  if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep -i "message text is empty" > /dev/null 2>&1; then
+    fail "Freeze edit failed: 'message text is empty' error in bot log (MsgText was empty)"
+  else
+    pass "Zero empty-text errors in freeze edits"
+  fi
 
 # Blocked hook released by the bot after the TUI answer (session continued in TUI)
 if tail -n +"$((LOG_BEFORE_CANCEL + 1))" "$LOG_FILE" | grep -F "[HOOK] cancelled by bot (session continued in TUI)" > /dev/null 2>&1; then

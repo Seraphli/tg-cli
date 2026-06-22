@@ -185,11 +185,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		Creds:           &creds,
 		Port:            port,
 		ConfigDir:       configDir,
-		Pages:           stores.NewPageCacheStore(),
-		PendingPerms:    stores.NewPendingPermStore(),
-		ToolNotifs:      stores.NewToolNotifyStore(),
-		PendingFiles:    stores.NewPendingFileStore(),
-		SessionState:    stores.NewSessionStateStore(configDir),
+		Pages:         stores.NewPageCacheStore(),
+		SessionState:  stores.NewSessionStateStore(configDir),
 		SessionCounts:   stores.NewSessionCountStore(),
 		MergeBuffers:    stores.NewMergeBufferStore(configDir),
 		InjectQueue:     stores.NewInjectQueueStore(configDir),
@@ -206,7 +203,9 @@ func runBot(cmd *cobra.Command, args []string) {
 		CompactTools:    stores.NewCompactToolStore(),
 		Streams:         stores.NewStreamStore(),
 		PendingWait:     stores.NewPendingWaitStore(),
+		NotifOpQueue:    stores.NewNotifOpQueue(),
 	}
+	defer bs.NotifOpQueue.Close()
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
 		logger.Error(fmt.Sprintf("Failed to load command stats: %v", err))

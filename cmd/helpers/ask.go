@@ -14,113 +14,173 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// AskStateAccessor provides access to bot state for ask operations.
-// Using individual fields avoids circular imports with cmd package.
-type AskStateAccessor struct {
-	Bot          *tele.Bot
-	ToolNotifs   *stores.ToolNotifyStore
-	PendingFiles *stores.PendingFileStore
-}
+// ErrInjectNotConfirmed is returned when inject confirmation fails (CapturePane miss + channel timeout).
+var ErrInjectNotConfirmed = fmt.Errorf("inject not confirmed")
 
-// DoRespondAsk responds to AskUserQuestion: push answer to wait store + edit TG msg.
+// DoRespondAsk responds to AskUserQuestion: resolve via ResolveIfUnresolved + TryEnqueue EDIT.
+// Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
+// EditFunc uses worker-provided msgID and chatID parameters.
 func DoRespondAsk(
 	bot *tele.Bot,
-	toolNotifs *stores.ToolNotifyStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
+	opQueue *stores.NotifOpQueue,
 	msgID int,
 	answers map[string]string,
 	frozenLabel string,
 ) error {
-	uuid, ok := pendingFiles.Get(msgID)
+	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
 	if !ok {
-		// Fallback: look up entry from wait store by msg_id
-		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
-			uuid = waitEntry.UUID
-		} else {
-			return fmt.Errorf("pending entry not found")
-		}
+		return fmt.Errorf("pending entry not found")
 	}
+	uuid := snap.UUID
 	waitEntry, wok := pendingWait.Get(uuid)
 	if !wok {
-		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "wait entry missing")
+		cleanupAskState(bot, pendingWait, msgID, uuid, "wait entry missing")
 		return fmt.Errorf("hook dead (stale pending)")
 	}
 	ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
-	WritePendingAnswer(pendingWait, uuid, ccOutput)
-	if entry, entryOk := toolNotifs.Get(msgID); entryOk {
-		toolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, frozenLabel), tele.ModeHTML)
-		reactionTracker.RecordPending(entry.TmuxTarget, entry.ChatID, msgID)
+	// Pre-build frozen markup before CAS using snap.Questions
+	var frozenMarkup *tele.ReplyMarkup
+	var msgText string
+	if len(snap.Questions) > 0 {
+		frozenMarkup = BuildFrozenMarkup(snap.Questions, frozenLabel)
+		msgText = snap.MsgText
+		reactionTracker.RecordPending(snap.TmuxTarget, snap.ChatID, msgID)
+	}
+	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{
+		Type:   "answer",
+		Output: ccOutput,
+	})
+	if !won {
+		return nil
+	}
+	if frozenMarkup != nil && opQueue != nil {
+		capturedMarkup := frozenMarkup
+		opQueue.TryEnqueue(stores.NotifOp{
+			Type:         stores.OpEDIT,
+			UUID:         uuid,
+			FreezeLabel:  frozenLabel,
+			FrozenMarkup: capturedMarkup,
+			EditFunc: func(eID int, chatID int64, editMsgText string) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
+				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+				logger.Info(fmt.Sprintf("DoRespondAsk: EDIT completed msg_id=%d", eID))
+			},
+		})
+	} else if frozenMarkup != nil {
+		// Fallback: direct edit using snap coordinates
+		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
+		RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion responded: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
 	return nil
 }
 
-// DoCancelAsk cancels an AskUserQuestion: push cancel to wait store + ESC + edit TG msg.
+// DoCancelAsk cancels an AskUserQuestion: ResolveIfUnresolved + ESC + TryEnqueue EDIT.
+// Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
+// EditFunc uses worker-provided msgID and chatID parameters.
 func DoCancelAsk(
 	bot *tele.Bot,
-	toolNotifs *stores.ToolNotifyStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
+	opQueue *stores.NotifOpQueue,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 ) string {
-	uuid, _ := pendingFiles.Get(msgID)
-	if uuid == "" {
-		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
-			uuid = waitEntry.UUID
-		}
+	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
+	if !ok {
+		return ""
 	}
-	if uuid != "" {
-		// Push cancel to wait store (no Remove — live handler removes on delivery)
-		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
-	}
-	if entry, ok := toolNotifs.Get(msgID); ok {
-		targetPtr, err := extractTarget(entry.MsgText)
+	uuid := snap.UUID
+	// Pre-build frozen markup before CAS using snap.Questions
+	var frozenMarkup *tele.ReplyMarkup
+	var msgText string
+	if len(snap.Questions) > 0 {
+		frozenMarkup = BuildFrozenMarkup(snap.Questions, "❌ Cancelled")
+		msgText = snap.MsgText
+		targetPtr, err := extractTarget(snap.MsgText)
 		if err == nil && targetPtr != nil {
 			injector.SendKeys(*targetPtr, "Escape")
 		}
-		toolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
+	}
+	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{Type: "cancel"})
+	if won && frozenMarkup != nil {
+		if opQueue != nil {
+			capturedMarkup := frozenMarkup
+			opQueue.TryEnqueue(stores.NotifOp{
+				Type:         stores.OpEDIT,
+				UUID:         uuid,
+				FreezeLabel:  "❌ Cancelled",
+				FrozenMarkup: capturedMarkup,
+				EditFunc: func(eID int, eChatID int64, editMsgText string) {
+					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+					RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+					logger.Info(fmt.Sprintf("DoCancelAsk: EDIT completed msg_id=%d", eID))
+				},
+			})
+		} else {
+			editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
+			RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+		}
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion cancelled: msg_id=%d uuid=%s", msgID, uuid))
 	return uuid
 }
 
-// DoChatAsk handles chat mode for AskUserQuestion: push __chat answer to wait store + edit.
+// DoChatAsk handles chat mode for AskUserQuestion: ResolveIfUnresolved + TryEnqueue EDIT.
+// Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
+// EditFunc uses worker-provided msgID and chatID parameters.
 func DoChatAsk(
 	bot *tele.Bot,
-	toolNotifs *stores.ToolNotifyStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
+	opQueue *stores.NotifOpQueue,
 	msgID int,
 ) error {
-	uuid, ok := pendingFiles.Get(msgID)
+	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
 	if !ok {
-		if waitEntry, wok := pendingWait.FindByMsgID(msgID); wok {
-			uuid = waitEntry.UUID
-		} else {
-			return fmt.Errorf("pending entry not found")
-		}
+		return fmt.Errorf("pending entry not found")
 	}
+	uuid := snap.UUID
 	waitEntry, wok := pendingWait.Get(uuid)
 	if !wok {
-		cleanupAskState(bot, toolNotifs, pendingFiles, msgID, uuid, "wait entry missing on chat button")
+		cleanupAskState(bot, pendingWait, msgID, uuid, "wait entry missing on chat button")
 		return fmt.Errorf("question expired")
 	}
 	answers := map[string]string{"__chat": "true"}
 	ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
-	WritePendingAnswer(pendingWait, uuid, ccOutput)
-	if entry, entryOk := toolNotifs.Get(msgID); entryOk {
-		toolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "💬 Chat mode selected"), tele.ModeHTML)
-		reactionTracker.RecordPending(entry.TmuxTarget, entry.ChatID, msgID)
+	// Pre-build frozen markup before CAS using snap.Questions
+	var frozenMarkup *tele.ReplyMarkup
+	var msgText string
+	if len(snap.Questions) > 0 {
+		frozenMarkup = BuildFrozenMarkup(snap.Questions, "💬 Chat mode selected")
+		msgText = snap.MsgText
+		reactionTracker.RecordPending(snap.TmuxTarget, snap.ChatID, msgID)
+	}
+	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{
+		Type:   "answer",
+		Output: ccOutput,
+	})
+	if !won {
+		return nil
+	}
+	if frozenMarkup != nil && opQueue != nil {
+		capturedMarkup := frozenMarkup
+		opQueue.TryEnqueue(stores.NotifOp{
+			Type:         stores.OpEDIT,
+			UUID:         uuid,
+			FreezeLabel:  "💬 Chat mode selected",
+			FrozenMarkup: capturedMarkup,
+			EditFunc: func(eID int, chatID int64, editMsgText string) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
+				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+				logger.Info(fmt.Sprintf("DoChatAsk: EDIT completed msg_id=%d", eID))
+			},
+		})
+	} else if frozenMarkup != nil {
+		// Fallback: direct edit using snap coordinates
+		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
+		RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion chat mode: msg_id=%d uuid=%s", msgID, uuid))
 	return nil
@@ -142,10 +202,7 @@ func CheckSessionAlive(tmuxTarget string, cleanDead func(string)) bool {
 // SafeInjectTextParams holds all parameters for SafeInjectText to avoid a large arg list.
 type SafeInjectTextParams struct {
 	Bot              *tele.Bot
-	ToolNotifs       *stores.ToolNotifyStore
-	PendingFiles     *stores.PendingFileStore
 	PendingWait      *stores.PendingWaitStore
-	PendingPerms     *stores.PendingPermStore
 	InjectQueue      *stores.InjectQueueStore
 	InjectConfirm    *stores.InjectConfirmStore
 	StopCooldown     *stores.StopCooldownStore
@@ -153,6 +210,7 @@ type SafeInjectTextParams struct {
 	SessionState     *stores.SessionStateStore
 	HookSessionLocks *sync.Map
 	SessionEvents    *stores.SessionEventStore
+	NotifOpQueue     *stores.NotifOpQueue // Op queue for async EDIT after AskQ answer
 	ResolveChat      func(string) (*tele.Chat, string, int)
 	FormatPaneID     func(string) string
 	Force            bool   // Skip busy check — used by flushInjectQueue
@@ -234,9 +292,10 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 	if err != nil {
 		return injectResult{err: err}
 	}
-	// PRE-INJECT: check if there's a pending AskUserQuestion
-	_, _, hasAskQ := p.ToolNotifs.FindByTmuxTarget(tmuxTarget)
-	if !p.Force && IsSessionRunning(tmuxTarget) && !hasAskQ {
+	// PRE-INJECT: check if there's a pending entry (AskQ or PermissionRequest) via PendingWait
+	pwSnap, hasPending := p.PendingWait.FindByTmuxTarget(tmuxTarget)
+	hasAskQ := hasPending && pwSnap != nil && pwSnap.ToolName == "AskUserQuestion"
+	if !p.Force && IsSessionRunning(tmuxTarget) && !hasPending {
 		chat, chatIDStr, topicID := p.ResolveChat(tmuxTarget)
 		chatIDInt := int64(0)
 		for _, c := range chatIDStr {
@@ -268,40 +327,66 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if sessionMu != nil { sessionMu.Unlock() }
 		return injectResult{}
 	}
-	// Answer pending AskUserQuestion with the text
-	for {
-		msgID, entry, ok := p.ToolNotifs.FindByTmuxTarget(tmuxTarget)
-		if !ok {
-			break
+	// Answer pending AskUserQuestion via PendingWait (atomic CAS)
+	if hasAskQ && pwSnap != nil {
+		waitEntry, wok := p.PendingWait.Get(pwSnap.UUID)
+		if !wok {
+			// Entry gone — fall through to direct inject
+		} else {
+			answers := make(map[string]string)
+			// Find question text from snap.Questions if available
+			if len(pwSnap.Questions) > 0 {
+				answers[pwSnap.Questions[0].QuestionText] = text
+			} else {
+				answers["question"] = text
+			}
+			ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
+			// Use ResolveIfUnresolved for atomic CAS
+			won, _, _ := p.PendingWait.ResolveIfUnresolved(pwSnap.UUID, stores.WaitEvent{
+				Type:   "answer",
+				Output: ccOutput,
+			})
+			if won {
+				if sessionMu != nil {
+					sessionMu.Unlock()
+				}
+				// TryEnqueue EDIT with pre-built frozen markup using snap.Questions
+				if p.NotifOpQueue != nil {
+					var frozenMarkup *tele.ReplyMarkup
+					if len(pwSnap.Questions) > 0 {
+						frozenMarkup = BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply")
+					}
+					if frozenMarkup != nil {
+						capturedMarkup := frozenMarkup
+						capturedUUID := pwSnap.UUID
+						p.NotifOpQueue.TryEnqueue(stores.NotifOp{
+							Type:         stores.OpEDIT,
+							UUID:         capturedUUID,
+							FreezeLabel:  "✅ Custom reply",
+							FrozenMarkup: capturedMarkup,
+							EditFunc: func(msgID int, chatID int64, editMsgText string) {
+								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+								RetryEdit(p.Bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+								logger.Info(fmt.Sprintf("safeInjectText: AskQ EDIT completed msg_id=%d", msgID))
+							},
+						})
+					}
+				} else {
+					// Fallback: direct edit using snap coordinates
+					if len(pwSnap.Questions) > 0 {
+						editMsg := &tele.Message{ID: pwSnap.MsgID, Chat: &tele.Chat{ID: pwSnap.ChatID}}
+						RetryEdit(p.Bot, editMsg, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"), tele.ModeHTML)
+					}
+				}
+				logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion uuid=%s text=%s", pwSnap.UUID, TruncateStr(text, 200)))
+				ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmAskAnswered, text)
+				return injectResult{ch: ch, confirmType: "askq"}
+			}
+			// CAS lost — another resolver won, fall through to direct inject
 		}
-		uuid, uuidOk := p.PendingFiles.Get(msgID)
-		if !uuidOk {
-			p.ToolNotifs.MarkResolved(msgID)
-			continue
-		}
-		// Check wait store liveness instead of file-based stale check
-		waitEntry, waitOk := p.PendingWait.Get(uuid)
-		if !waitOk {
-			cleanupAskState(p.Bot, p.ToolNotifs, p.PendingFiles, msgID, uuid, "wait entry missing")
-			continue
-		}
-		answers := make(map[string]string)
-		if len(entry.Questions) > 0 {
-			answers[entry.Questions[0].QuestionText] = text
-		}
-		ccOutput := BuildAskCCOutput(waitEntry.Payload, answers)
-		WritePendingAnswer(p.PendingWait, uuid, ccOutput)
-		p.ToolNotifs.MarkResolved(msgID)
-		if sessionMu != nil { sessionMu.Unlock() }
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(p.Bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "✅ Custom reply"), tele.ModeHTML)
-		logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion msg_id=%d uuid=%s text=%s", msgID, uuid, TruncateStr(text, 200)))
-		// Register confirmation channel — wait happens in phase2
-		ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmAskAnswered, text)
-		return injectResult{ch: ch, confirmType: "askq"}
 	}
-	// PermissionRequest pending — queue instead of injecting
-	if _, ok := p.PendingPerms.FindByTmuxTarget(tmuxTarget); ok {
+	// PermissionRequest pending — pwSnap exists but ToolName is not AskUserQuestion
+	if pwSnap != nil && pwSnap.ToolName != "AskUserQuestion" {
 		chat, chatIDStr, topicID := p.ResolveChat(tmuxTarget)
 		chatIDInt := int64(0)
 		for _, c := range chatIDStr {
@@ -467,7 +552,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		logger.Info(fmt.Sprintf("safeInjectText: inject confirmed, target=%s capturePane=%v", tmuxTarget, captureConfirmed))
 	} else {
 		logger.Info(fmt.Sprintf("safeInjectText: inject not confirmed, target=%s", tmuxTarget))
-		return fmt.Errorf("inject not confirmed for target=%s", tmuxTarget)
+		return fmt.Errorf("%w for target=%s", ErrInjectNotConfirmed, tmuxTarget)
 	}
 	if !res.shouldSubmit {
 		p.InjectConfirm.Cancel(tmuxTarget)
@@ -475,116 +560,24 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 	return nil
 }
 
-// RebuildInMemoryState reconstructs in-memory button state for a reconnecting hook.
-// Accepts explicit fields (msgID, chatID, topicID, payload, toolName, uuid, tmuxTarget) so it
-// can be used by both ScanPendingDir (which reads from a PendingFile) and the new connect handler
-// (which has the payload from the HTTP body). msg_text is rebuilt from payload contents.
-func RebuildInMemoryState(
-	toolNotifs *stores.ToolNotifyStore,
-	pendingFiles *stores.PendingFileStore,
-	pendingPerms *stores.PendingPermStore,
-	msgID int,
-	chatID int64,
-	topicID int,
-	payload json.RawMessage,
-	toolName string,
-	uuid string,
-	tmuxTarget string,
-	formatPaneID func(string) string,
-) error {
-	var p hookPayloadForRebuild
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return fmt.Errorf("unmarshal payload: %w", err)
-	}
-	fmtTarget := formatPaneID(tmuxTarget)
-	if toolName == "AskUserQuestion" {
-		var askInput struct {
-			Questions []struct {
-				Header   string `json:"header"`
-				Question string `json:"question"`
-				Options  []struct {
-					Label       string `json:"label"`
-					Description string `json:"description"`
-				} `json:"options"`
-				MultiSelect bool `json:"multiSelect"`
-			} `json:"questions"`
-		}
-		if err := json.Unmarshal(p.ToolInput, &askInput); err != nil {
-			return fmt.Errorf("unmarshal tool_input: %w", err)
-		}
-		if len(askInput.Questions) == 0 {
-			return fmt.Errorf("no questions in payload")
-		}
-		var qMetas []stores.QuestionMeta
-		for _, q := range askInput.Questions {
-			var labels []string
-			for _, o := range q.Options {
-				labels = append(labels, o.Label)
-			}
-			qMetas = append(qMetas, stores.QuestionMeta{
-				QuestionText: q.Question, Header: q.Header,
-				NumOptions: len(q.Options), OptionLabels: labels,
-				MultiSelect: q.MultiSelect, SelectedOptions: make(map[int]bool),
-				SelectedOption: -1,
-			})
-		}
-		var qSummaries []string
-		for _, q := range askInput.Questions {
-			var labels []string
-			for _, o := range q.Options {
-				labels = append(labels, o.Label)
-			}
-			qSummaries = append(qSummaries, fmt.Sprintf("%s:[%s]", q.Header, strings.Join(labels, ",")))
-		}
-		contentSummary := strings.Join(qSummaries, " | ")
-		// Rebuild msg_text from payload (no file read needed)
-		var msgText string
-		if p.MsgText != "" {
-			msgText = p.MsgText
-		}
-		toolNotifs.Store(msgID, &stores.ToolNotifyEntry{
-			TmuxTarget: fmtTarget, ToolName: "AskUserQuestion",
-			Questions: qMetas, ChatID: chatID, MsgText: msgText,
-			PendingUUID: uuid,
-		})
-		pendingFiles.Store(msgID, uuid)
-		logger.Info(fmt.Sprintf("RebuildInMemoryState: AskUserQuestion msg_id=%d questions=%d tmux=%s content=%s uuid=%s", msgID, len(askInput.Questions), fmtTarget, contentSummary, uuid))
-		return nil
-	}
-	// PermissionRequest: rebuild pendingPerms
-	var suggestions []json.RawMessage
-	json.Unmarshal(p.PermSuggestions, &suggestions)
-	suggestionsRaw, _ := json.Marshal(suggestions)
-	// Rebuild msg_text from payload if stored
-	msgText := p.MsgText
-	pendingPerms.Create(msgID, fmtTarget, suggestionsRaw, msgText, chatID, uuid)
-	pendingFiles.Store(msgID, uuid)
-	logger.Info(fmt.Sprintf("RebuildInMemoryState: PermissionRequest msg_id=%d tool=%s tmux=%s uuid=%s", msgID, toolName, fmtTarget, uuid))
-	return nil
-}
-
-// hookPayloadForRebuild is a minimal payload struct for RebuildInMemoryState.
-type hookPayloadForRebuild struct {
-	ToolInput       json.RawMessage `json:"tool_input"`
-	PermSuggestions json.RawMessage `json:"permission_suggestions"`
-	MsgText         string          `json:"msg_text"` // stored in enriched payload for rebuild
-}
-
 // cleanupAskState cleans up bot memory state and freezes TG buttons.
+// Uses GetSnapshot(uuid) to look up entry data.
 func cleanupAskState(
 	bot *tele.Bot,
-	toolNotifs *stores.ToolNotifyStore,
-	pendingFiles *stores.PendingFileStore,
+	pendingWait *stores.PendingWaitStore,
 	msgID int,
 	uuid string,
 	reason string,
 ) {
-	if entry, ok := toolNotifs.Get(msgID); ok && !entry.Resolved {
-		toolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
+	snap, ok := pendingWait.GetSnapshot(uuid)
+	if !ok {
+		logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s (entry not found)", msgID, uuid, reason))
+		return
 	}
-	pendingFiles.Remove(msgID)
+	if !snap.Resolved && len(snap.Questions) > 0 {
+		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
+		RetryEdit(bot, editMsg, snap.MsgText, BuildFrozenMarkup(snap.Questions, "❌ Cancelled"), tele.ModeHTML)
+	}
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }
 

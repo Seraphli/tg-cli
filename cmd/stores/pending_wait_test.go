@@ -2,8 +2,22 @@ package stores
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 )
+
+// pollGetReadyMsgID polls GetReadyMsgID until it returns ok or timeout.
+func pollGetReadyMsgID(q *NotifOpQueue, uuid string, timeout time.Duration) (int, int64, string, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if msgID, chatID, msgText, ok := q.GetReadyMsgID(uuid); ok {
+			return msgID, chatID, msgText, true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return 0, 0, "", false
+}
 
 func newEntry(uuid, sessionID, toolName, canonical, toolUseID string) *PendingWaitEntry {
 	return &PendingWaitEntry{
@@ -187,5 +201,736 @@ func TestPush_NeverBlocks(t *testing.T) {
 	default:
 		// done closed synchronously — also ok
 		<-done
+	}
+}
+
+// Test 11: ResolveIfUnresolved CAS — first resolver wins, second loses.
+func TestResolveIfUnresolved_CAS(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := newEntry("u1", "sess", "AskUserQuestion", `{}`, "")
+	s.Register(e)
+
+	// First resolver wins
+	won, snap, found := s.ResolveIfUnresolved("u1", WaitEvent{Type: "answer"})
+	if !won || !found || !snap.Resolved {
+		t.Fatalf("expected first resolver to win: won=%v found=%v resolved=%v", won, found, snap.Resolved)
+	}
+
+	// Second resolver loses
+	won2, snap2, found2 := s.ResolveIfUnresolved("u1", WaitEvent{Type: "cancel"})
+	if won2 || !found2 || !snap2.Resolved {
+		t.Fatalf("expected second resolver to lose: won=%v found=%v resolved=%v", won2, found2, snap2.Resolved)
+	}
+}
+
+func TestResolveIfUnresolved_NotFound(t *testing.T) {
+	s := NewPendingWaitStore()
+	won, _, found := s.ResolveIfUnresolved("nonexistent", WaitEvent{Type: "cancel"})
+	if won || found {
+		t.Fatal("expected not found")
+	}
+}
+
+// Test 12: FindByTmuxTarget FIFO.
+func TestFindByTmuxTarget_FIFO(t *testing.T) {
+	s := NewPendingWaitStore()
+	e1 := &PendingWaitEntry{UUID: "u1", TmuxTarget: "%5", SessionID: "s1"}
+	e2 := &PendingWaitEntry{UUID: "u2", TmuxTarget: "%5", SessionID: "s1"}
+	s.Register(e1)
+	s.Register(e2)
+
+	snap, ok := s.FindByTmuxTarget("%5")
+	if !ok || snap.UUID != "u1" {
+		t.Fatalf("expected FIFO u1 first, got %v", snap)
+	}
+
+	// Resolve u1
+	s.ResolveIfUnresolved("u1", WaitEvent{Type: "cancel"})
+	snap2, ok2 := s.FindByTmuxTarget("%5")
+	if !ok2 || snap2.UUID != "u2" {
+		t.Fatalf("expected u2 after u1 resolved, got %v", snap2)
+	}
+}
+
+func TestFindByTmuxTarget_SkipsResolved(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{UUID: "u1", TmuxTarget: "%5"}
+	s.Register(e)
+	s.ResolveIfUnresolved("u1", WaitEvent{Type: "cancel"})
+
+	_, ok := s.FindByTmuxTarget("%5")
+	if ok {
+		t.Fatal("expected no match for resolved entry")
+	}
+}
+
+// Test 13: BeginLive sets Live flag and returns channel + generation.
+func TestBeginLive(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := newEntry("u1", "sess", "Bash", `{}`, "")
+	s.Register(e)
+
+	snap, ch, gen, found := s.BeginLive("u1")
+	if !found || ch == nil || gen == 0 {
+		t.Fatalf("expected BeginLive success: found=%v gen=%d", found, gen)
+	}
+	if snap.UUID != "u1" {
+		t.Fatalf("expected snapshot UUID u1, got %s", snap.UUID)
+	}
+
+	// Entry should be Live
+	entry, _ := s.Get("u1")
+	if !entry.Live || entry.LiveGen != gen {
+		t.Fatalf("expected Live=true LiveGen=%d, got Live=%v LiveGen=%d", gen, entry.Live, entry.LiveGen)
+	}
+}
+
+// Test 14: PeekTerminal/ClearTerminal/RestoreTerminal round-trip.
+func TestPeekClearRestoreTerminal(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := newEntry("u1", "sess", "Bash", `{}`, "")
+	s.Register(e)
+
+	// No terminal yet
+	if s.PeekTerminal("u1") != nil {
+		t.Fatal("expected nil terminal")
+	}
+
+	// Push sets terminal (not live)
+	s.Push("u1", WaitEvent{Type: "cancel"})
+
+	// Peek returns copy without clearing
+	term := s.PeekTerminal("u1")
+	if term == nil || term.Type != "cancel" {
+		t.Fatalf("expected cancel terminal, got %v", term)
+	}
+	term2 := s.PeekTerminal("u1")
+	if term2 == nil {
+		t.Fatal("PeekTerminal cleared the terminal — should not")
+	}
+
+	// ClearTerminal removes it
+	s.ClearTerminal("u1")
+	if s.PeekTerminal("u1") != nil {
+		t.Fatal("expected nil after ClearTerminal")
+	}
+
+	// RestoreTerminal puts it back
+	ev := WaitEvent{Type: "answer"}
+	s.RestoreTerminal("u1", &ev)
+	restored := s.PeekTerminal("u1")
+	if restored == nil || restored.Type != "answer" {
+		t.Fatalf("expected answer terminal, got %v", restored)
+	}
+}
+
+// Test 15: Snapshot methods.
+func TestGetSnapshot(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{UUID: "u1", SessionID: "sess", ToolName: "Bash", MsgID: 42, ChatID: 100}
+	s.Register(e)
+
+	snap, ok := s.GetSnapshot("u1")
+	if !ok || snap.UUID != "u1" || snap.MsgID != 42 || snap.ChatID != 100 {
+		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+}
+
+func TestFindByMsgIDSnapshot(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{UUID: "u1", MsgID: 42}
+	s.Register(e)
+
+	snap, ok := s.FindByMsgIDSnapshot(42)
+	if !ok || snap.UUID != "u1" {
+		t.Fatalf("expected match by MsgID")
+	}
+
+	_, ok2 := s.FindByMsgIDSnapshot(999)
+	if ok2 {
+		t.Fatal("expected no match")
+	}
+}
+
+func TestFindBySessionSnapshots(t *testing.T) {
+	s := NewPendingWaitStore()
+	s.Register(&PendingWaitEntry{UUID: "u1", SessionID: "sess1"})
+	s.Register(&PendingWaitEntry{UUID: "u2", SessionID: "sess1"})
+	s.Register(&PendingWaitEntry{UUID: "u3", SessionID: "sess2"})
+
+	snaps := s.FindBySessionSnapshots("sess1")
+	if len(snaps) != 2 {
+		t.Fatalf("expected 2 snapshots for sess1, got %d", len(snaps))
+	}
+}
+
+// Test 16: Lifecycle — entry removed after delivery.
+func TestLifecycle_EntryRemovedAfterDelivery(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := newEntry("u1", "sess", "AskUserQuestion", `{}`, "")
+	s.Register(e)
+
+	// Resolve
+	won, _, _ := s.ResolveIfUnresolved("u1", WaitEvent{Type: "answer"})
+	if !won {
+		t.Fatal("expected to win CAS")
+	}
+
+	// Terminal should be set (not live)
+	term := s.PeekTerminal("u1")
+	if term == nil || term.Type != "answer" {
+		t.Fatal("expected answer terminal")
+	}
+
+	// Simulate delivery + cleanup
+	s.ClearTerminal("u1")
+	s.Remove("u1")
+
+	_, ok := s.Get("u1")
+	if ok {
+		t.Fatal("entry should be removed after delivery")
+	}
+}
+
+// Test 17: ResolveIfUnresolved while live delivers to channel.
+func TestResolveIfUnresolved_LiveDelivery(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := newEntry("u1", "sess", "AskUserQuestion", `{}`, "")
+	s.Register(e)
+
+	// BeginLive
+	_, ch, _, found := s.BeginLive("u1")
+	if !found || ch == nil {
+		t.Fatal("expected BeginLive success")
+	}
+
+	// Resolve while live — should deliver to channel
+	won, _, _ := s.ResolveIfUnresolved("u1", WaitEvent{Type: "answer"})
+	if !won {
+		t.Fatal("expected to win CAS")
+	}
+
+	// Check channel received it
+	select {
+	case ev := <-ch:
+		if ev.Type != "answer" {
+			t.Fatalf("expected answer event, got %s", ev.Type)
+		}
+	default:
+		t.Fatal("expected event on channel")
+	}
+}
+
+// Test 18: BackfillMsgID sets MsgID, ChatID, and TopicID on an existing entry.
+func TestBackfillMsgID(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{UUID: "u1", SessionID: "sess", MsgID: 0}
+	s.Register(e)
+
+	s.BackfillMsgID("u1", 42, 100, 5, "backfilled text")
+
+	snap, ok := s.FindByMsgIDSnapshot(42)
+	if !ok {
+		t.Fatal("expected entry found by MsgID=42")
+	}
+	if snap.MsgID != 42 {
+		t.Fatalf("expected MsgID=42, got %d", snap.MsgID)
+	}
+	if snap.ChatID != 100 {
+		t.Fatalf("expected ChatID=100, got %d", snap.ChatID)
+	}
+	if snap.TopicID != 5 {
+		t.Fatalf("expected TopicID=5, got %d", snap.TopicID)
+	}
+}
+
+// Test 19: Pre-send window — AskUserQuestion entry has Questions populated and MsgID==0.
+func TestPreSendWindowAskQ(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID:       "u1",
+		TmuxTarget: "%10",
+		ToolName:   "AskUserQuestion",
+		MsgID:      0,
+		Questions: []QuestionMeta{
+			{
+				QuestionText: "Confirm?",
+				Header:       "Confirmation",
+				NumOptions:   2,
+				OptionLabels: []string{"Yes", "No"},
+				MultiSelect:  false,
+			},
+		},
+	}
+	s.Register(e)
+
+	snap, ok := s.FindByTmuxTarget("%10")
+	if !ok {
+		t.Fatal("expected entry found by TmuxTarget")
+	}
+	if snap.ToolName != "AskUserQuestion" {
+		t.Fatalf("expected ToolName=AskUserQuestion, got %s", snap.ToolName)
+	}
+	if len(snap.Questions) == 0 {
+		t.Fatal("expected Questions to be non-empty")
+	}
+	if snap.MsgID != 0 {
+		t.Fatalf("expected MsgID=0, got %d", snap.MsgID)
+	}
+}
+
+// Test 20: Pre-send window — PermissionRequest entry has PermSuggestions populated and MsgID==0.
+func TestPreSendWindowPermReq(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID:            "u1",
+		TmuxTarget:      "%11",
+		ToolName:        "PermissionRequest",
+		MsgID:           0,
+		PermSuggestions: json.RawMessage(`[{"label":"Allow"}]`),
+	}
+	s.Register(e)
+
+	snap, ok := s.FindByTmuxTarget("%11")
+	if !ok {
+		t.Fatal("expected entry found by TmuxTarget")
+	}
+	if snap.ToolName != "PermissionRequest" {
+		t.Fatalf("expected ToolName=PermissionRequest, got %s", snap.ToolName)
+	}
+	if len(snap.PermSuggestions) == 0 {
+		t.Fatal("expected PermSuggestions to be non-empty")
+	}
+}
+
+// Test 21: ToggleQuestionOption toggles a multi-select option on and off.
+func TestToggleQuestionOption(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID: "u1",
+		Questions: []QuestionMeta{
+			{
+				QuestionText:    "Pick one or more",
+				MultiSelect:     true,
+				OptionLabels:    []string{"A", "B", "C"},
+				SelectedOptions: make(map[int]bool),
+			},
+		},
+	}
+	s.Register(e)
+
+	// Toggle option 0 on
+	qs, err := s.ToggleQuestionOption("u1", 0, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !qs[0].SelectedOptions[0] {
+		t.Fatal("expected option 0 selected after first toggle")
+	}
+
+	// Toggle option 0 off
+	qs, err = s.ToggleQuestionOption("u1", 0, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if qs[0].SelectedOptions[0] {
+		t.Fatal("expected option 0 deselected after second toggle")
+	}
+}
+
+// Test 22: SelectQuestionOption sets the SelectedOption for a single-choice question.
+func TestSelectQuestionOption(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID: "u1",
+		Questions: []QuestionMeta{
+			{
+				QuestionText: "Pick one",
+				MultiSelect:  false,
+				OptionLabels: []string{"X", "Y", "Z"},
+			},
+		},
+	}
+	s.Register(e)
+
+	qs, err := s.SelectQuestionOption("u1", 0, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if qs[0].SelectedOption != 2 {
+		t.Fatalf("expected SelectedOption=2, got %d", qs[0].SelectedOption)
+	}
+}
+
+// Test 23: FindByTmuxTarget normalizes via notify.FormatPaneID (identity) — same string finds entry.
+// FormatPaneID is an identity function, so storing and querying with the same string works correctly.
+func TestFindByTmuxTargetNormalization(t *testing.T) {
+	s := NewPendingWaitStore()
+	target := "%42"
+	e := &PendingWaitEntry{UUID: "u1", TmuxTarget: target}
+	s.Register(e)
+
+	// Both stored and queried values pass through FormatPaneID (identity), so they match.
+	snap, ok := s.FindByTmuxTarget(target)
+	if !ok {
+		t.Fatal("expected entry found by TmuxTarget")
+	}
+	if snap.UUID != "u1" {
+		t.Fatalf("expected UUID=u1, got %s", snap.UUID)
+	}
+}
+
+// Test 24: EntrySnapshot includes all 3 merged fields: Questions, MsgText, PermSuggestions.
+func TestEntrySnapshotMergedFields(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID:    "u1",
+		MsgText: "hello world",
+		Questions: []QuestionMeta{
+			{QuestionText: "Q1", OptionLabels: []string{"Opt1"}},
+		},
+		PermSuggestions: json.RawMessage(`[{"label":"Allow"}]`),
+	}
+	s.Register(e)
+
+	snap, ok := s.GetSnapshot("u1")
+	if !ok {
+		t.Fatal("expected snapshot found")
+	}
+	if snap.MsgText != "hello world" {
+		t.Fatalf("expected MsgText='hello world', got '%s'", snap.MsgText)
+	}
+	if len(snap.Questions) == 0 {
+		t.Fatal("expected Questions non-empty in snapshot")
+	}
+	if len(snap.PermSuggestions) == 0 {
+		t.Fatal("expected PermSuggestions non-empty in snapshot")
+	}
+}
+
+// Test 25: Concurrent ToggleQuestionOption and GetSnapshot must not data-race.
+func TestQuestionDeepCopyRace(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{
+		UUID: "u1",
+		Questions: []QuestionMeta{
+			{
+				QuestionText:    "Race?",
+				MultiSelect:     true,
+				OptionLabels:    []string{"A", "B"},
+				SelectedOptions: make(map[int]bool),
+			},
+		},
+	}
+	s.Register(e)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Goroutine A: repeatedly toggles option
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.ToggleQuestionOption("u1", 0, 0) //nolint:errcheck
+			}
+		}
+	}()
+
+	// Goroutine B: repeatedly snapshots
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.GetSnapshot("u1")
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// Test 26: SEND stores MsgText; EDIT receives that MsgText via the post-send path.
+func TestSendOpMsgText(t *testing.T) {
+	q := NewNotifOpQueue()
+	defer q.Close()
+
+	uuid := "test-msgtext"
+	sendDone := make(chan struct{})
+
+	q.TryEnqueue(NotifOp{
+		Type: OpSEND,
+		UUID: uuid,
+		SendFunc: func(frozen bool, frozenLabel string) SendResult {
+			return SendResult{MsgID: 7, ChatID: 200, MsgText: "original text"}
+		},
+		PostSend: func(result SendResult) {
+			close(sendDone)
+		},
+	})
+
+	<-sendDone
+
+	// Poll for Ready state — PostSend fires before MarkReady, so direct call may race
+	msgID, chatID, msgText, ok := pollGetReadyMsgID(q, uuid, 2*time.Second)
+	if !ok || msgID != 7 || chatID != 200 {
+		t.Fatalf("expected Ready msgID=7 chatID=200, got ok=%v msgID=%d chatID=%d", ok, msgID, chatID)
+	}
+	if msgText != "original text" {
+		t.Fatalf("expected msgText='original text', got '%s'", msgText)
+	}
+
+	// Enqueue EDIT — EditFunc must receive the MsgText from the SEND
+	editDone := make(chan struct{})
+	q.TryEnqueue(NotifOp{
+		Type: OpEDIT,
+		UUID: uuid,
+		EditFunc: func(mID int, cID int64, mText string) {
+			if mText != "original text" {
+				t.Errorf("EDIT received wrong MsgText: %q", mText)
+			}
+			close(editDone)
+		},
+	})
+
+	<-editDone
+}
+
+// Test 27: SeedReadyMsgID inserts a pre-known msgID; subsequent EDIT runs exactly once with correct args.
+func TestSeedReadyMsgID(t *testing.T) {
+	q := NewNotifOpQueue()
+	defer q.Close()
+
+	uuid := "test-seed"
+	q.SeedReadyMsgID(uuid, 42, 100, "hello")
+
+	editCount := 0
+	editDone := make(chan struct{})
+	q.TryEnqueue(NotifOp{
+		Type: OpEDIT,
+		UUID: uuid,
+		EditFunc: func(msgID int, chatID int64, msgText string) {
+			editCount++
+			if msgID != 42 {
+				t.Errorf("expected msgID=42, got %d", msgID)
+			}
+			if chatID != 100 {
+				t.Errorf("expected chatID=100, got %d", chatID)
+			}
+			if msgText != "hello" {
+				t.Errorf("expected msgText='hello', got '%s'", msgText)
+			}
+			close(editDone)
+		},
+	})
+
+	<-editDone
+	time.Sleep(50 * time.Millisecond)
+
+	if editCount != 1 {
+		t.Fatalf("expected EditFunc called exactly once, got %d", editCount)
+	}
+
+	// After EDIT execution, msgIDs entry should be removed (no leak)
+	_, _, _, ok := q.GetMsgID(uuid)
+	if ok {
+		t.Fatal("expected msgIDs entry removed after EDIT")
+	}
+}
+
+// Test 28: Concurrent BackfillMsgID and GetSnapshot must not data-race.
+func TestBackfillMsgIDRace(t *testing.T) {
+	s := NewPendingWaitStore()
+	e := &PendingWaitEntry{UUID: "u1", SessionID: "sess", MsgID: 0}
+	s.Register(e)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Multiple goroutines call BackfillMsgID
+	for i := 0; i < 3; i++ {
+		msgID := i + 1
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					s.BackfillMsgID("u1", msgID, int64(msgID*10), msgID, "")
+				}
+			}
+		}()
+	}
+
+	// Multiple goroutines call GetSnapshot
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					s.GetSnapshot("u1")
+				}
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// Test 29: SendResult.MsgText flows through the queue to EDIT in both normal and drained paths.
+func TestSendResultMsgText(t *testing.T) {
+	t.Run("normal EDIT after SEND", func(t *testing.T) {
+		q := NewNotifOpQueue()
+		defer q.Close()
+
+		uuid := "uuid-normal"
+		sendDone := make(chan struct{})
+
+		q.TryEnqueue(NotifOp{
+			Type: OpSEND,
+			UUID: uuid,
+			SendFunc: func(frozen bool, frozenLabel string) SendResult {
+				return SendResult{MsgID: 7, ChatID: 200, MsgText: "notification text"}
+			},
+			PostSend: func(result SendResult) {
+				close(sendDone)
+			},
+		})
+		<-sendDone
+
+		msgID, chatID, msgText, ok := pollGetReadyMsgID(q, uuid, 2*time.Second)
+		if !ok {
+			t.Fatal("GetReadyMsgID timed out")
+		}
+		if msgID != 7 || chatID != 200 {
+			t.Fatalf("unexpected msgID=%d chatID=%d", msgID, chatID)
+		}
+		if msgText != "notification text" {
+			t.Fatalf("expected msgText='notification text', got '%s'", msgText)
+		}
+
+		editText := make(chan string, 1)
+		q.TryEnqueue(NotifOp{
+			Type: OpEDIT,
+			UUID: uuid,
+			EditFunc: func(msgID int, chatID int64, msgText string) {
+				editText <- msgText
+			},
+		})
+
+		select {
+		case got := <-editText:
+			if got != "notification text" {
+				t.Fatalf("EDIT received '%s', want 'notification text'", got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("EDIT timed out")
+		}
+	})
+
+	t.Run("drained EDIT receives result MsgText", func(t *testing.T) {
+		q := NewNotifOpQueue()
+		defer q.Close()
+
+		uuid := "uuid-drained"
+		gate := make(chan struct{})
+
+		q.TryEnqueue(NotifOp{
+			Type: OpSEND,
+			UUID: uuid,
+			SendFunc: func(frozen bool, frozenLabel string) SendResult {
+				<-gate
+				return SendResult{MsgID: 8, ChatID: 201, MsgText: "drained text"}
+			},
+			PostSend: func(result SendResult) {},
+		})
+
+		// EDIT enqueued while SEND is blocked
+		editText := make(chan string, 1)
+		time.Sleep(50 * time.Millisecond)
+		q.TryEnqueue(NotifOp{
+			Type: OpEDIT,
+			UUID: uuid,
+			EditFunc: func(msgID int, chatID int64, msgText string) {
+				editText <- msgText
+			},
+		})
+
+		close(gate)
+
+		select {
+		case got := <-editText:
+			if got != "drained text" {
+				t.Fatalf("drained EDIT received '%s', want 'drained text'", got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("drained EDIT timed out")
+		}
+	})
+}
+
+// Test 30: SeedReadyMsgID with text — GetReadyMsgID and subsequent EDIT both see the seeded text.
+func TestSeedReadyMsgIDWithText(t *testing.T) {
+	q := NewNotifOpQueue()
+	defer q.Close()
+
+	// Seed with text
+	q.SeedReadyMsgID("uuid-seed", 42, 100, "seeded text")
+
+	msgID, chatID, msgText, ok := q.GetReadyMsgID("uuid-seed")
+	if !ok {
+		t.Fatal("GetReadyMsgID returned !ok for seeded entry")
+	}
+	if msgID != 42 || chatID != 100 {
+		t.Fatalf("unexpected msgID=%d chatID=%d", msgID, chatID)
+	}
+	if msgText != "seeded text" {
+		t.Fatalf("expected 'seeded text', got '%s'", msgText)
+	}
+
+	// EDIT receives seeded text
+	editText := make(chan string, 1)
+	q.TryEnqueue(NotifOp{
+		Type: OpEDIT,
+		UUID: "uuid-seed",
+		EditFunc: func(msgID int, chatID int64, msgText string) {
+			editText <- msgText
+		},
+	})
+	select {
+	case got := <-editText:
+		if got != "seeded text" {
+			t.Fatalf("EDIT received '%s', want 'seeded text'", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EDIT timed out")
+	}
+
+	// Empty case
+	q.SeedReadyMsgID("uuid-empty", 43, 101, "")
+	_, _, emptyText, ok := q.GetReadyMsgID("uuid-empty")
+	if !ok {
+		t.Fatal("GetReadyMsgID returned !ok for empty-text seeded entry")
+	}
+	if emptyText != "" {
+		t.Fatalf("expected empty text, got '%s'", emptyText)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -20,9 +21,11 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		tool := r.URL.Query().Get("tool")
 		action := r.URL.Query().Get("action")
+		// Use FindByMsgIDSnapshot — safe because msgID is a real TG button message ID
+		snap, snapOk := bs.PendingWait.FindByMsgIDSnapshot(msgID)
 		// Pre-check session liveness before processing the response
-		if entry, ok := bs.ToolNotifs.Get(msgID); ok && entry.TmuxTarget != "" {
-			if !helpers.CheckSessionAlive(entry.TmuxTarget, func(t string) {
+		if snapOk && snap.TmuxTarget != "" {
+			if !helpers.CheckSessionAlive(snap.TmuxTarget, func(t string) {
 				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
 			}) {
 				http.Error(w, "session disconnected", 410)
@@ -31,87 +34,81 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		}
 		switch tool {
 		case "AskUserQuestion":
+			if !snapOk {
+				http.Error(w, "not found", 404)
+				return
+			}
+			if snap.Resolved {
+				http.Error(w, "already answered", 400)
+				return
+			}
 			if action == "text" {
 				value := r.URL.Query().Get("value")
-				entry, ok := bs.ToolNotifs.Get(msgID)
-				if !ok {
-					http.Error(w, "not found", 404)
-					return
-				}
-				if entry.Resolved {
-					http.Error(w, "already answered", 400)
-					return
-				}
 				answers := make(map[string]string)
-				if len(entry.Questions) > 0 {
-					answers[entry.Questions[0].QuestionText] = value
+				if len(snap.Questions) > 0 {
+					answers[snap.Questions[0].QuestionText] = value
 				}
-				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, answers, "✅ Text answer"); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, answers, "✅ Text answer"); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			} else if action == "submit" {
-				entry, ok := bs.ToolNotifs.Get(msgID)
-				if !ok {
+				// Get current questions from store for building answers
+				questions, hasQ := bs.PendingWait.GetQuestions(snap.UUID)
+				if !hasQ {
 					http.Error(w, "not found", 404)
 					return
 				}
-				if entry.Resolved {
-					http.Error(w, "already answered", 400)
-					return
-				}
-				if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, helpers.BuildAnswers(questions), ""); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			} else if action == "chat" {
-				if err := helpers.DoChatAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID); err != nil {
+				if err := helpers.DoChatAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			} else {
 				qIdx, _ := strconv.Atoi(r.URL.Query().Get("question"))
 				optIdx, _ := strconv.Atoi(r.URL.Query().Get("option"))
-				entry, ok := bs.ToolNotifs.Get(msgID)
-				if !ok {
-					http.Error(w, "not found", 404)
-					return
-				}
-				if entry.Resolved {
-					http.Error(w, "already answered", 400)
-					return
-				}
-				if qIdx >= len(entry.Questions) {
+				if qIdx >= len(snap.Questions) {
 					http.Error(w, "invalid question index", 400)
 					return
 				}
-				qm := &entry.Questions[qIdx]
-				if qm.MultiSelect {
-					qm.SelectedOptions[optIdx] = !qm.SelectedOptions[optIdx]
-					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d state=%v label=%s", msgID, qIdx, optIdx, qm.SelectedOptions[optIdx], qm.OptionLabels[optIdx]))
-					newMarkup := helpers.RebuildAskMarkup(entry)
-					editChat := &tele.Chat{ID: entry.ChatID}
-					editMsg := &tele.Message{ID: msgID, Chat: editChat}
-					helpers.RetryEdit(bot, editMsg, entry.MsgText, newMarkup, tele.ModeHTML)
+				if snap.Questions[qIdx].MultiSelect {
+					// Toggle option — use store method for atomic update
+					questions, err := bs.PendingWait.ToggleQuestionOption(snap.UUID, qIdx, optIdx)
+					if err != nil {
+						http.Error(w, "not found", 404)
+						return
+					}
+					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
+					newMarkup := helpers.RebuildAskMarkup(questions)
+					editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
+					helpers.RetryEdit(bot, editMsg, snap.MsgText, newMarkup, tele.ModeHTML)
 				} else {
-					qm.SelectedOption = optIdx
-					hasSubmit := len(entry.Questions) > 1
-					for _, q := range entry.Questions {
+					// Select option — use store method for atomic update
+					questions, err := bs.PendingWait.SelectQuestionOption(snap.UUID, qIdx, optIdx)
+					if err != nil {
+						http.Error(w, "not found", 404)
+						return
+					}
+					hasSubmit := len(questions) > 1
+					for _, q := range questions {
 						if q.MultiSelect {
 							hasSubmit = true
 						}
 					}
 					if !hasSubmit {
-						if err := helpers.DoRespondAsk(bot, bs.ToolNotifs, bs.PendingFiles, bs.PendingWait, bs.ReactionTracker, msgID, helpers.BuildAnswers(entry), ""); err != nil {
+						if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, helpers.BuildAnswers(questions), ""); err != nil {
 							http.Error(w, err.Error(), 500)
 							return
 						}
 					} else {
-						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, qm.OptionLabels[optIdx]))
-						newMarkup := helpers.RebuildAskMarkup(entry)
-						editChat := &tele.Chat{ID: entry.ChatID}
-						editMsg := &tele.Message{ID: msgID, Chat: editChat}
-						helpers.RetryEdit(bot, editMsg, entry.MsgText, newMarkup, tele.ModeHTML)
+						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
+						newMarkup := helpers.RebuildAskMarkup(questions)
+						editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
+						helpers.RetryEdit(bot, editMsg, snap.MsgText, newMarkup, tele.ModeHTML)
 					}
 				}
 			}
@@ -129,20 +126,13 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "missing target or text", 400)
 			return
 		}
-		// Strip socket prefix so the target matches stored pane IDs
+		// Normalize target — strip socket prefix so it matches stored pane IDs
 		target = notify.FormatPaneID(target)
-		// Check pending PermissionRequest first
-		if permMsgID, ok := bs.PendingPerms.FindByTmuxTarget(target); ok {
-			helpers.DoCancelPerm(
-				bot,
-				bs.PendingPerms,
-				bs.PendingFiles,
-				bs.PendingWait,
-				func(text string) (*injector.TmuxTarget, error) {
-					return helpers.ExtractTmuxTargetFromText(text)
-				},
-				permMsgID,
-			)
+		// Use FindByTmuxTarget (target-based path) + branch on snap.ToolName
+		pwSnap, hasPending := bs.PendingWait.FindByTmuxTarget(target)
+		if hasPending && pwSnap.ToolName != "AskUserQuestion" {
+			// Cancel perm via snapshot then delayed inject
+			helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, notify.FormatPaneID, *pwSnap)
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -156,9 +146,8 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			fmt.Fprintf(w, "cancelled+injected")
 			return
 		}
-		msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(target)
-		if !ok {
-			// No pending AskUserQuestion — inject text
+		if !hasPending {
+			// No pending wait — inject text directly
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -178,16 +167,11 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			fmt.Fprintf(w, "injected")
 			return
 		}
-		uuid, uuidOk := bs.PendingFiles.Get(msgID)
-		if !uuidOk {
-			http.Error(w, "pending entry not found", 404)
-			return
-		}
-		// Check wait store liveness instead of file-based stale check
-		waitEntry, waitOk := bs.PendingWait.Get(uuid)
+		// Pending AskUserQuestion — resolve via snap.UUID
+		waitEntry, waitOk := bs.PendingWait.Get(pwSnap.UUID)
 		if !waitOk {
-			// Stale: wait entry missing, inject text instead
-			helpers.CleanupPendingState(bot, bs.ToolNotifs, bs.PendingPerms, bs.PendingFiles, bs.PendingWait, msgID, uuid, "wait entry missing")
+			// Stale: wait entry missing, clean and inject
+			helpers.CleanupPendingState(bot, bs.PendingWait, bs.NotifOpQueue, pwSnap.MsgID, pwSnap.UUID, "wait entry missing")
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -201,16 +185,35 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			fmt.Fprintf(w, "injected")
 			return
 		}
+		// Build answers from snap.Questions
 		answers := make(map[string]string)
-		if len(entry.Questions) > 0 {
-			answers[entry.Questions[0].QuestionText] = text
+		if len(pwSnap.Questions) > 0 {
+			answers[pwSnap.Questions[0].QuestionText] = text
+		} else {
+			answers["question"] = text
 		}
 		ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
-		helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
-		bs.ToolNotifs.MarkResolved(msgID)
-		logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+		// Pre-build markup from snap before CAS
+		frozenMarkup := helpers.BuildFrozenMarkup(pwSnap.Questions, "✅ Text answer")
+		capturedUUID := pwSnap.UUID
+		won, _, _ := bs.PendingWait.ResolveIfUnresolved(pwSnap.UUID, stores.WaitEvent{
+			Type:   "answer",
+			Output: ccOutput,
+		})
+		if won {
+			bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
+				Type:         stores.OpEDIT,
+				UUID:         capturedUUID,
+				FreezeLabel:  "✅ Text answer",
+				FrozenMarkup: frozenMarkup,
+				EditFunc: func(eID int, eChatID int64, editMsgText string) {
+					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+					helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
+					logger.Info(fmt.Sprintf("group text API: AskQ EDIT completed msg_id=%d", eID))
+				},
+			})
+			logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+		}
 		fmt.Fprintf(w, "resolved")
 	})
 }

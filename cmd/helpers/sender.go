@@ -53,7 +53,8 @@ func RetrySend(b *tele.Bot, to tele.Recipient, what interface{}, opts ...interfa
 }
 
 // RetryEdit edits a Telegram message with retries.
-// On FloodError it waits the RetryAfter duration; on other errors it retries up to 3 times with backoff.
+// On FloodError it waits the RetryAfter duration; "message not modified" is treated as success;
+// on other errors it retries up to 3 times with backoff.
 func RetryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interface{}) (*tele.Message, error) {
 	var result *tele.Message
 	var err error
@@ -64,6 +65,13 @@ func RetryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interfa
 			return result, nil
 		}
 		attempt++
+		// Treat "message not modified" as success (coalesced EDIT hit identical content)
+		var teleErr *tele.Error
+		if errors.As(err, &teleErr) {
+			if teleErr == tele.ErrSameMessageContent || teleErr == tele.ErrMessageNotModified {
+				return result, nil
+			}
+		}
 		var floodErr tele.FloodError
 		if errors.As(err, &floodErr) {
 			wait := time.Duration(floodErr.RetryAfter) * time.Second

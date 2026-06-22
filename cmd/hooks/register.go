@@ -146,10 +146,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						go func(target, text string) {
 							p := helpers.SafeInjectTextParams{
 								Bot:              bs.Bot,
-								ToolNotifs:       bs.ToolNotifs,
-								PendingFiles:     bs.PendingFiles,
 								PendingWait:      bs.PendingWait,
-								PendingPerms:     bs.PendingPerms,
 								InjectQueue:      bs.InjectQueue,
 								InjectConfirm:    bs.InjectConfirm,
 								StopCooldown:     bs.StopCooldown,
@@ -157,6 +154,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								SessionState:     bs.SessionState,
 								HookSessionLocks: &bs.HookSessionLocks,
 								SessionEvents:    bs.SessionEvents,
+								NotifOpQueue:     bs.NotifOpQueue,
 								ResolveChat: func(t string) (*tele.Chat, string, int) {
 									return cb.ResolveChat(bs, t)
 								},
@@ -279,10 +277,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							go func(target, text, instr, cnt, peer string) {
 								p := helpers.SafeInjectTextParams{
 									Bot:              bs.Bot,
-									ToolNotifs:       bs.ToolNotifs,
-									PendingFiles:     bs.PendingFiles,
 									PendingWait:      bs.PendingWait,
-									PendingPerms:     bs.PendingPerms,
 									InjectQueue:      bs.InjectQueue,
 									InjectConfirm:    bs.InjectConfirm,
 									StopCooldown:     bs.StopCooldown,
@@ -290,6 +285,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 									SessionState:     bs.SessionState,
 									HookSessionLocks: &bs.HookSessionLocks,
 									SessionEvents:    bs.SessionEvents,
+									NotifOpQueue:     bs.NotifOpQueue,
 									ResolveChat: func(t string) (*tele.Chat, string, int) {
 										return cb.ResolveChat(bs, t)
 									},
@@ -471,7 +467,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 			case "PostToolUse", "PostToolUseFailure":
-				// Correlate with pending wait entry and freeze TG button
+				// Correlate with pending wait entry and freeze TG button via ResolveIfUnresolved
 				if waitEntry, ok := bs.PendingWait.FindMatch(p.SessionID, p.ToolName, helpers.CanonicalToolInput(p.ToolInput), p.ToolUseID); ok {
 					label := "✅ Allowed on desktop"
 					if waitEntry.ToolName == "AskUserQuestion" {
@@ -481,10 +477,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						json.Unmarshal(p.ToolResponse, &resp)
 						label = "⌨️ " + helpers.FormatAnswers(resp.Answers)
 					}
-					helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.ToolNotifs, bs.PendingPerms, waitEntry, label)
-					// Push cancel so hook stands down (no Remove here)
-					bs.PendingWait.Push(waitEntry.UUID, stores.WaitEvent{Type: "cancel"})
-					bs.PendingFiles.Remove(waitEntry.MsgID)
+					// FreezeWaitEntryOnDesktop uses ResolveIfUnresolved + TryEnqueue EDIT
+					if snap, ok := bs.PendingWait.GetSnapshot(waitEntry.UUID); ok {
+						helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.NotifOpQueue, snap, label)
+					}
 					logger.Info(fmt.Sprintf("Resolved on desktop: uuid=%s tool=%s tool_use_id=%q label=%s", waitEntry.UUID, waitEntry.ToolName, p.ToolUseID, label))
 				}
 				if event == "PostToolUseFailure" {

@@ -38,20 +38,20 @@ func BuildPageKeyboardWithExtra(currentPage, totalPages int, extraRows []tele.Ro
 }
 
 // RebuildAskMarkup rebuilds the inline keyboard for an AskUserQuestion entry.
-func RebuildAskMarkup(entry *stores.ToolNotifyEntry) *tele.ReplyMarkup {
+func RebuildAskMarkup(questions []stores.QuestionMeta) *tele.ReplyMarkup {
 	markup := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
-	hasSubmit := len(entry.Questions) > 1
-	for _, q := range entry.Questions {
+	hasSubmit := len(questions) > 1
+	for _, q := range questions {
 		if q.MultiSelect {
 			hasSubmit = true
 		}
 	}
 
-	if len(entry.Questions) == 1 && !entry.Questions[0].MultiSelect {
+	if len(questions) == 1 && !questions[0].MultiSelect {
 		// Single question, single select
-		q := entry.Questions[0]
+		q := questions[0]
 		var buttons []tele.Btn
 		for i, label := range q.OptionLabels {
 			displayLabel := label
@@ -69,10 +69,10 @@ func RebuildAskMarkup(entry *stores.ToolNotifyEntry) *tele.ReplyMarkup {
 		}
 	} else {
 		// Multi-question or multiSelect
-		for qIdx, q := range entry.Questions {
+		for qIdx, q := range questions {
 			for optIdx, label := range q.OptionLabels {
 				displayLabel := label
-				if len(entry.Questions) > 1 {
+				if len(questions) > 1 {
 					displayLabel = fmt.Sprintf("Q%d: %s", qIdx+1, label)
 				}
 				if q.MultiSelect && q.SelectedOptions[optIdx] {
@@ -96,7 +96,7 @@ func RebuildAskMarkup(entry *stores.ToolNotifyEntry) *tele.ReplyMarkup {
 // BuildFrozenMarkup creates a frozen version of the inline keyboard markup after user selection.
 // Shows selected options with ✅ prefix, no Submit/Chat buttons.
 // Buttons remain visible but handler checks resolved flag.
-func BuildFrozenMarkup(entry *stores.ToolNotifyEntry, footer string) *tele.ReplyMarkup {
+func BuildFrozenMarkup(questions []stores.QuestionMeta, footer string) *tele.ReplyMarkup {
 	markup := &tele.ReplyMarkup{}
 	var rows []tele.Row
 
@@ -106,9 +106,9 @@ func BuildFrozenMarkup(entry *stores.ToolNotifyEntry, footer string) *tele.Reply
 		return markup
 	}
 
-	if len(entry.Questions) == 1 && !entry.Questions[0].MultiSelect {
+	if len(questions) == 1 && !questions[0].MultiSelect {
 		// Single question, single select - show all options with ✅ on selected
-		q := entry.Questions[0]
+		q := questions[0]
 		var buttons []tele.Btn
 		for i, label := range q.OptionLabels {
 			displayLabel := label
@@ -126,10 +126,10 @@ func BuildFrozenMarkup(entry *stores.ToolNotifyEntry, footer string) *tele.Reply
 		}
 	} else {
 		// Multi-question or multiSelect - show all options with ✅ on selected
-		for qIdx, q := range entry.Questions {
+		for qIdx, q := range questions {
 			for optIdx, label := range q.OptionLabels {
 				displayLabel := label
-				if len(entry.Questions) > 1 {
+				if len(questions) > 1 {
 					displayLabel = fmt.Sprintf("Q%d: %s", qIdx+1, label)
 				}
 				if q.MultiSelect && q.SelectedOptions[optIdx] {
@@ -186,9 +186,9 @@ func BuildFrozenPermMarkup(selectedDecision string, suggestionLabel string) *tel
 }
 
 // BuildAnswers builds a map of question text to selected answer label.
-func BuildAnswers(entry *stores.ToolNotifyEntry) map[string]string {
+func BuildAnswers(questions []stores.QuestionMeta) map[string]string {
 	answers := make(map[string]string)
-	for _, q := range entry.Questions {
+	for _, q := range questions {
 		if q.MultiSelect {
 			var selected []string
 			for oi := 0; oi < q.NumOptions; oi++ {

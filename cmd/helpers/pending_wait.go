@@ -39,22 +39,36 @@ func FormatAnswers(answers map[string]string) string {
 	return strings.Join(parts, " / ")
 }
 
-// FreezeWaitEntryOnDesktop edits the stored TG message for a PendingWaitEntry using the bot.
-func FreezeWaitEntryOnDesktop(bot *tele.Bot, toolNotifs *stores.ToolNotifyStore, pendingPerms *stores.PendingPermStore, entry *stores.PendingWaitEntry, label string) {
-	if entry.ToolName == "AskUserQuestion" {
-		if notifEntry, ok := toolNotifs.Get(entry.MsgID); ok {
-			editMsg := &tele.Message{ID: entry.MsgID, Chat: &tele.Chat{ID: entry.ChatID}}
-			RetryEdit(bot, editMsg, notifEntry.MsgText, BuildFrozenMarkup(notifEntry, label), tele.ModeHTML)
-			logger.Info(fmt.Sprintf("FreezeWaitEntry(AskQ): msg_id=%d label=%s", entry.MsgID, label))
-		}
+// FreezeWaitEntryOnDesktop edits the stored TG message for a pending entry using the bot.
+// Takes an EntrySnapshot to avoid data races. Uses ResolveIfUnresolved for atomic CAS,
+// then TryEnqueue EDIT to avoid data race B3. EditFunc uses worker-provided msgID/chatID.
+func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStore, opQueue *stores.NotifOpQueue, snap stores.EntrySnapshot, label string) {
+	// Pre-build frozen markup BEFORE CAS (data race B3 prevention)
+	var frozenMarkup *tele.ReplyMarkup
+	if snap.ToolName == "AskUserQuestion" {
+		frozenMarkup = BuildFrozenMarkup(snap.Questions, label)
+	} else {
+		sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
+		frozenMarkup = BuildFrozenPermMarkup(label, sugLabel)
+	}
+	if frozenMarkup == nil {
 		return
 	}
-	// PermissionRequest
-	msgText := pendingPerms.GetMsgText(entry.MsgID)
-	sugLabel, _ := ParseSuggestionLabel(pendingPerms.GetSuggestions(entry.MsgID))
-	if msgText != "" {
-		editMsg := &tele.Message{ID: entry.MsgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, msgText, BuildFrozenPermMarkup(label, sugLabel), tele.ModeHTML)
-		logger.Info(fmt.Sprintf("FreezeWaitEntry(Perm): msg_id=%d label=%s", entry.MsgID, label))
+	won, _, _ := pendingWait.ResolveIfUnresolved(snap.UUID, stores.WaitEvent{Type: "cancel"})
+	if !won {
+		return
 	}
+	capturedLabel := label
+	capturedMarkup := frozenMarkup
+	opQueue.TryEnqueue(stores.NotifOp{
+		Type:         stores.OpEDIT,
+		UUID:         snap.UUID,
+		FreezeLabel:  capturedLabel,
+		FrozenMarkup: capturedMarkup,
+		EditFunc: func(msgID int, chatID int64, editMsgText string) {
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+			RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+			logger.Info(fmt.Sprintf("FreezeWaitEntry: msg_id=%d label=%s", msgID, capturedLabel))
+		},
+	})
 }

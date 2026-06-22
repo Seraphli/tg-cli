@@ -59,28 +59,54 @@ func CleanDeadSession(
 }
 
 // CleanupPendingState cleans up bot memory state and freezes TG buttons.
+// Uses GetSnapshot(uuid) when uuid is available to look up entry data.
+// EditFunc uses worker-provided msgID and chatID parameters.
 func CleanupPendingState(
 	bot *tele.Bot,
-	toolNotifs *stores.ToolNotifyStore,
-	pendingPerms *stores.PendingPermStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
+	opQueue *stores.NotifOpQueue,
 	msgID int,
 	uuid string,
 	reason string,
 ) {
-	if entry, ok := toolNotifs.Get(msgID); ok && !entry.Resolved {
-		toolNotifs.MarkResolved(msgID)
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-		RetryEdit(bot, editMsg, entry.MsgText, BuildFrozenMarkup(entry, "❌ Cancelled"), tele.ModeHTML)
-	}
-	if _, ok := pendingPerms.GetTarget(msgID); ok {
-		pendingPerms.Resolve(msgID, stores.PermDecision{Behavior: "deny", Message: "Cancelled (hook dead)"})
-	}
 	if uuid != "" {
-		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
+		snap, ok := pendingWait.GetSnapshot(uuid)
+		if !ok {
+			logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s (entry not found)", msgID, uuid, reason))
+			return
+		}
+		// Pre-build frozen markup before CAS
+		var frozenMarkup *tele.ReplyMarkup
+		var msgText string
+		if snap.ToolName == "AskUserQuestion" {
+			frozenMarkup = BuildFrozenMarkup(snap.Questions, "❌ Cancelled")
+			msgText = snap.MsgText
+		} else {
+			msgText = snap.MsgText
+			sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
+			frozenMarkup = BuildFrozenPermMarkup("❌ Cancelled", sugLabel)
+		}
+		won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{Type: "cancel"})
+		if won && frozenMarkup != nil {
+			if opQueue != nil {
+				capturedMarkup := frozenMarkup
+				opQueue.TryEnqueue(stores.NotifOp{
+					Type:         stores.OpEDIT,
+					UUID:         uuid,
+					FreezeLabel:  "❌ Cancelled",
+					FrozenMarkup: capturedMarkup,
+					EditFunc: func(eID int, eChatID int64, editMsgText string) {
+						editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+						RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+						logger.Info(fmt.Sprintf("CleanupPendingState: EDIT completed msg_id=%d", eID))
+					},
+				})
+			} else {
+				editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
+				RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+			}
+		}
 	}
-	pendingFiles.Remove(msgID)
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }
 
@@ -115,31 +141,77 @@ func RecordPending(reactionTracker *stores.ReactionTrackerStore, tmuxTarget stri
 	reactionTracker.RecordPending(tmuxTarget, chatID, msgID)
 }
 
-// DoCancelPerm cancels a PermissionRequest: push cancel to wait store + ESC + resolve + edit TG msg.
+// CancelPermBySnapshot cancels a PermissionRequest using a snapshot (target-based path).
+// Sends ESC to the tmux pane, resolves the entry, and enqueues an EDIT to freeze TG buttons.
+// EditFunc uses worker-provided msgID and chatID parameters.
+func CancelPermBySnapshot(bot *tele.Bot, pendingWait *stores.PendingWaitStore, opQueue *stores.NotifOpQueue, extractTarget func(string) string, snap stores.EntrySnapshot) {
+	// Parse snap.TmuxTarget → send ESC
+	target := extractTarget(snap.TmuxTarget)
+	if target != "" {
+		parsed, err := injector.ParseTarget(target)
+		if err == nil {
+			injector.SendKeys(parsed, "Escape")
+		}
+	}
+	// ResolveIfUnresolved — if !won, return
+	won, _, _ := pendingWait.ResolveIfUnresolved(snap.UUID, stores.WaitEvent{Type: "cancel"})
+	if !won {
+		return
+	}
+	// Build frozen perm markup from snap.PermSuggestions
+	sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
+	frozenMarkup := BuildFrozenPermMarkup("❌ Cancelled", sugLabel)
+	capturedMarkup := frozenMarkup
+	// TryEnqueue EDIT — EditFunc uses worker-provided msgID/chatID
+	opQueue.TryEnqueue(stores.NotifOp{
+		Type:         stores.OpEDIT,
+		UUID:         snap.UUID,
+		FreezeLabel:  "❌ Cancelled",
+		FrozenMarkup: capturedMarkup,
+		EditFunc: func(msgID int, chatID int64, editMsgText string) {
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+			RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+			logger.Info(fmt.Sprintf("Permission cancelled by snapshot uuid=%s", snap.UUID))
+		},
+	})
+}
+
+// DoCancelPerm cancels a PermissionRequest via TG-button path (real msgID from callback).
+// Uses FindByMsgIDSnapshot — safe because msgID is real Telegram callback ID.
+// EditFunc uses worker-provided msgID and chatID parameters.
 func DoCancelPerm(
 	bot *tele.Bot,
-	pendingPerms *stores.PendingPermStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
+	opQueue *stores.NotifOpQueue,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 ) string {
-	sugLabel, _ := ParseSuggestionLabel(pendingPerms.GetSuggestions(msgID))
-	uuid, _ := pendingFiles.Get(msgID)
-	if uuid != "" {
-		// Push cancel to wait store (no Remove — live handler removes on delivery)
-		pendingWait.Push(uuid, stores.WaitEvent{Type: "cancel"})
+	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
+	if !ok {
+		return ""
 	}
-	msgText := pendingPerms.GetMsgText(msgID)
-	chatID := pendingPerms.GetChatID(msgID)
-	targetPtr, err := extractTarget(msgText)
+	uuid := snap.UUID
+	// Pre-build frozen markup before CAS
+	sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
+	frozenMarkup := BuildFrozenPermMarkup("❌ Cancelled", sugLabel)
+	targetPtr, err := extractTarget(snap.MsgText)
 	if err == nil && targetPtr != nil {
 		injector.SendKeys(*targetPtr, "Escape")
 	}
-	pendingPerms.Resolve(msgID, stores.PermDecision{Behavior: "deny", Message: "Cancelled by user (Esc)"})
-	if chatID != 0 && msgText != "" {
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		RetryEdit(bot, editMsg, msgText, BuildFrozenPermMarkup("❌ Cancelled", sugLabel), tele.ModeHTML)
+	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{Type: "cancel"})
+	if won && opQueue != nil {
+		capturedMarkup := frozenMarkup
+		opQueue.TryEnqueue(stores.NotifOp{
+			Type:         stores.OpEDIT,
+			UUID:         uuid,
+			FreezeLabel:  "❌ Cancelled",
+			FrozenMarkup: capturedMarkup,
+			EditFunc: func(eID int, eChatID int64, editMsgText string) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+				logger.Info(fmt.Sprintf("DoCancelPerm: EDIT completed msg_id=%d", eID))
+			},
+		})
 	}
 	logger.Info(fmt.Sprintf("Permission cancelled: msg_id=%d uuid=%s", msgID, uuid))
 	return uuid
@@ -179,50 +251,63 @@ func GetPrivateChat() (*tele.Chat, string, int) {
 	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
 }
 
-// DoDecidePerm resolves a PermissionRequest: resolve + push answer to wait store + edit + recordPending.
+// DoDecidePerm resolves a PermissionRequest: ResolveIfUnresolved + TryEnqueue EDIT.
+// Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
+// EditFunc uses worker-provided msgID and chatID parameters.
 func DoDecidePerm(
 	bot *tele.Bot,
-	pendingPerms *stores.PendingPermStore,
-	pendingFiles *stores.PendingFileStore,
 	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
+	opQueue *stores.NotifOpQueue,
 	checkAlive func(string) bool,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 	decision string,
-) (*stores.PermDecision, error) {
-	if permTarget, ok := pendingPerms.GetTarget(msgID); ok && permTarget != "" && !checkAlive(permTarget) {
+) (*PermDecision, error) {
+	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
+	if !ok {
+		return nil, fmt.Errorf("no pending permission for msg_id %d", msgID)
+	}
+	if snap.TmuxTarget != "" && !checkAlive(snap.TmuxTarget) {
 		return nil, fmt.Errorf("session disconnected")
 	}
-	uuid, uuidOk := pendingPerms.GetUUID(msgID)
-	if !uuidOk {
-		uuid, uuidOk = pendingFiles.Get(msgID)
-	}
-	sugLabel, _ := ParseSuggestionLabel(pendingPerms.GetSuggestions(msgID))
-	msgText := pendingPerms.GetMsgText(msgID)
-	chatID := pendingPerms.GetChatID(msgID)
-	d, err := ResolvePermission(pendingPerms, msgID, decision, nil)
+	uuid := snap.UUID
+	// Pre-build frozen markup before CAS
+	sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
+	frozenMarkup := BuildFrozenPermMarkup(decision, sugLabel)
+	d, err := resolvePermissionFromSnap(snap, decision)
 	if err != nil {
 		return nil, err
 	}
-	if uuidOk {
-		var updatedPerms []interface{}
-		if d.UpdatedPermissions != nil {
-			var perms []interface{}
-			json.Unmarshal(d.UpdatedPermissions, &perms)
-			updatedPerms = perms
-		}
-		ccOutput := BuildPermCCOutput(d.Behavior, d.Message, updatedPerms)
-		WritePendingAnswer(pendingWait, uuid, ccOutput)
+	var updatedPerms []interface{}
+	if d.UpdatedPermissions != nil {
+		var perms []interface{}
+		json.Unmarshal(d.UpdatedPermissions, &perms)
+		updatedPerms = perms
+	}
+	ccOutput := BuildPermCCOutput(d.Behavior, d.Message, updatedPerms)
+	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{
+		Type:   "answer",
+		Output: ccOutput,
+	})
+	if won && opQueue != nil {
+		capturedMarkup := frozenMarkup
+		opQueue.TryEnqueue(stores.NotifOp{
+			Type:         stores.OpEDIT,
+			UUID:         uuid,
+			FreezeLabel:  decision,
+			FrozenMarkup: capturedMarkup,
+			EditFunc: func(eID int, eChatID int64, editMsgText string) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+				logger.Info(fmt.Sprintf("DoDecidePerm: EDIT completed msg_id=%d decision=%s", eID, decision))
+			},
+		})
 	}
 	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
-	if chatID != 0 && msgText != "" {
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		RetryEdit(bot, editMsg, msgText, BuildFrozenPermMarkup(decision, sugLabel), tele.ModeHTML)
-	}
-	targetPtr, err2 := extractTarget(msgText)
+	targetPtr, err2 := extractTarget(snap.MsgText)
 	if err2 == nil && targetPtr != nil {
-		reactionTracker.RecordPending(injector.FormatTarget(*targetPtr), chatID, msgID)
+		reactionTracker.RecordPending(injector.FormatTarget(*targetPtr), snap.ChatID, msgID)
 	}
 	return &d, nil
 }

@@ -59,6 +59,17 @@ func (iq *InjectQueueStore) GetInjectID(tmuxTarget string) string {
 	return iq.injectIDs[tmuxTarget]
 }
 
+// ReEnqueue prepends items back to the front of the queue for the given target.
+func (iq *InjectQueueStore) ReEnqueue(tmuxTarget string, items []InjectItem) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	iq.queues[tmuxTarget] = append(items, iq.queues[tmuxTarget]...)
+	if _, ok := iq.injectIDs[tmuxTarget]; !ok {
+		iq.injectIDs[tmuxTarget] = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
+	}
+	iq.saveLocked()
+}
+
 // Flush removes and returns all queued items for the given tmux target.
 func (iq *InjectQueueStore) Flush(tmuxTarget string) []InjectItem {
 	iq.mu.Lock()

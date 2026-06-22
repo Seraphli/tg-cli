@@ -1,9 +1,27 @@
 package helpers
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/Seraphli/tg-cli/internal/injector"
 )
+
+func TestSentinels(t *testing.T) {
+	// ErrInjectNotConfirmed wraps properly
+	err := fmt.Errorf("%w for target=%%5", ErrInjectNotConfirmed)
+	if !errors.Is(err, ErrInjectNotConfirmed) {
+		t.Fatal("expected errors.Is to match ErrInjectNotConfirmed")
+	}
+
+	// ErrSubmitAfterPaste wraps properly
+	err2 := fmt.Errorf("%w: tmux error", injector.ErrSubmitAfterPaste)
+	if !errors.Is(err2, injector.ErrSubmitAfterPaste) {
+		t.Fatal("expected errors.Is to match ErrSubmitAfterPaste")
+	}
+}
 
 func TestTruncateQueueTexts(t *testing.T) {
 	short := []string{"hello", "world"}

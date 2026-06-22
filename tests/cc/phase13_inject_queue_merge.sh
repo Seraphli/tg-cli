@@ -135,3 +135,133 @@ fi
 
 wait_for_idle
 pane_log "[inject_queue_merge] AFTER test"
+
+# =============================================
+# Test: Queued message delivered as AskQ custom reply
+# Reproduces the inject-queue/AskUserQuestion bug
+# =============================================
+echo ""
+echo "--- Inject queue AskQ custom reply test ---"
+
+# Exit previous session and start fresh
+stop_claude "e2e-cc-13"
+sleep 2
+LOG_BEFORE_ASKQ=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+start_claude "e2e-cc-13b"
+
+# Name the new session
+SESSION_ID_B=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for s in d.get("sessions", []):
+    if s.get("target") == sys.argv[1]:
+        print(s.get("id", ""))
+        sys.exit(0)
+print("")
+' "$E2E_PANE" 2>/dev/null || echo "")
+if [ -n "$SESSION_ID_B" ]; then
+  curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID_B&name=$SESSION_NAME" > /dev/null 2>&1 || true
+  echo "  Named session $SESSION_ID_B as $SESSION_NAME (target=$E2E_PANE)"
+fi
+
+CUSTOM_MARKER="CUSTOM_REPLY_$RANDOM"
+
+# Step 1: Inject prompt that sleeps 5s then calls AskUserQuestion
+inject_prompt "Do these two things in sequence, step by step. Step 1: Run a bash command: sleep 5. Step 2: After the sleep completes, call the AskUserQuestion tool with exactly one question: header 'TestQ', question 'Pick one', two options: label 'OptionA' description 'first' and label 'OptionB' description 'second'. Do not skip either step."
+
+# Wait for CC to become busy (running the sleep)
+echo "  Waiting for CC to start processing..."
+ELAPSED=0
+CC_BUSY_B=false
+while [ $ELAPSED -lt 30 ]; do
+  PANE_TITLE=$($TMUX_TEST display-message -p -t "${E2E_PANE%@*}" '#{pane_title}' 2>/dev/null || echo "")
+  set +eo pipefail
+  echo "$PANE_TITLE" | grep -q '^✳'
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  if [ -n "$PANE_TITLE" ] && [ "${_ps[1]}" -ne 0 ]; then
+    CC_BUSY_B=true
+    echo "  CC is busy at t=$ELAPSED: pane_title=\"$PANE_TITLE\""
+    break
+  fi
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
+done
+
+if [ "$CC_BUSY_B" != true ]; then
+  fail "AskQ custom reply: CC never became busy after prompt injection"
+fi
+
+# Step 2: Send the custom reply marker while CC is busy
+sleep 2
+echo "  Sending marker while CC is busy: $CUSTOM_MARKER"
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$CUSTOM_MARKER" 2>&1 || true
+
+# Step 3: Verify marker was queued (CC is busy)
+sleep 3
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep -q "CC busy, queued.*$CUSTOM_MARKER"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -eq 0 ]; then
+  pass "AskQ custom reply: marker queued while CC busy ($CUSTOM_MARKER)"
+else
+  fail "AskQ custom reply: marker was NOT queued (CC may not have been busy)"
+fi
+
+# Step 4: Wait for the AskQ to be surfaced and the queued marker to be delivered as custom reply
+# The flow is: sleep 5 → AskUserQuestion → Stop hook fires → flushInjectQueue → settle 5s → SafeInjectText detects AskQ → delivers marker as custom reply
+echo "  Waiting for AskQ custom reply delivery (up to 120s)..."
+ELAPSED=0
+ASKQ_REPLY_FOUND=false
+while [ $ELAPSED -lt 120 ]; do
+  set +eo pipefail
+  tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep -q "PostToolUse.*AskUserQuestion.*$CUSTOM_MARKER"
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  if [ "${_ps[1]}" -eq 0 ]; then
+    ASKQ_REPLY_FOUND=true
+    break
+  fi
+  sleep 3
+  ELAPSED=$((ELAPSED + 3))
+done
+
+if [ "$ASKQ_REPLY_FOUND" = true ]; then
+  pass "AskQ custom reply: marker delivered as AskQ answer ($CUSTOM_MARKER)"
+else
+  # Check for the old buggy behavior
+  pane_log "[askq_custom_reply] FAIL - checking for bug symptoms"
+  set +eo pipefail
+  INJECT_FAILED=$(tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Inject failed.*$CUSTOM_MARKER" || true)
+  DESKTOP_ANSWERED=$(tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Answered on desktop" || true)
+  set -eo pipefail
+  echo "  DEBUG: Inject failed lines: ${INJECT_FAILED:-none}"
+  echo "  DEBUG: Answered on desktop lines: ${DESKTOP_ANSWERED:-none}"
+  fail "AskQ custom reply: marker was NOT delivered as custom reply within 120s"
+fi
+
+# Step 5: Verify NEGATIVE assertions - no Inject failed for the marker
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep -q "Inject failed.*$CUSTOM_MARKER"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -ne 0 ]; then
+  pass "AskQ custom reply: no 'Inject failed' for marker"
+else
+  fail "AskQ custom reply: 'Inject failed' found for marker (bug not fixed)"
+fi
+
+# Step 6: Verify NEGATIVE assertion - AskQ NOT frozen as "Answered on desktop"
+set +eo pipefail
+tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "FreezeWaitEntry.*Answered on desktop" | grep -v "PostToolUse" > /dev/null 2>&1
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -ne 0 ]; then
+  pass "AskQ custom reply: AskQ not frozen as 'Answered on desktop'"
+else
+  fail "AskQ custom reply: AskQ was frozen as 'Answered on desktop' (bug not fixed)"
+fi
+
+wait_for_idle
+pane_log "[askq_custom_reply] AFTER test"

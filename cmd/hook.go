@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -81,6 +82,7 @@ type ndjsonFrame struct {
 	MsgID   int             `json:"msg_id"`
 	ChatID  int64           `json:"chat_id"`
 	TopicID int             `json:"topic_id"`
+	MsgText string          `json:"msg_text"`
 }
 
 // postWithUpgradeRetry posts to url with body, retrying on ECONNREFUSED if an upgrade is active.
@@ -186,10 +188,11 @@ func runHook(cmd *cobra.Command, args []string) {
 			hookExit(0, "signal cleanup")
 		}()
 
-		// Reconnect state (populated after first registered frame)
+		// Reconnect state (populated after first registered/update frame)
 		var msgID int
 		var chatID int64
 		var topicID int
+		var msgText string
 
 		// Streaming connect loop with upgrade retry
 		const retryCap = 25 * time.Second
@@ -202,6 +205,9 @@ func runHook(cmd *cobra.Command, args []string) {
 			connectURL := fmt.Sprintf("http://127.0.0.1:%d/pending/connect?uuid=%s", port, uuid)
 			if msgID != 0 {
 				connectURL = fmt.Sprintf("%s&msg_id=%d&chat_id=%d&topic_id=%d", connectURL, msgID, chatID, topicID)
+			}
+			if msgText != "" {
+				connectURL += "&msg_text=" + url.QueryEscape(msgText)
 			}
 			req, reqErr := http.NewRequestWithContext(ctx, "POST", connectURL, bytes.NewReader(enrichedJSON))
 			if reqErr != nil {
@@ -241,6 +247,20 @@ func runHook(cmd *cobra.Command, args []string) {
 					chatID = frame.ChatID
 					topicID = frame.TopicID
 					hookLog("registered: uuid=%s msg_id=%d", uuid, msgID)
+				case "update":
+					if frame.MsgID != 0 {
+						msgID = frame.MsgID
+					}
+					if frame.ChatID != 0 {
+						chatID = frame.ChatID
+					}
+					if frame.TopicID != 0 {
+						topicID = frame.TopicID
+					}
+					if frame.MsgText != "" {
+						msgText = frame.MsgText
+					}
+					hookLog("update: msg_id=%d chat_id=%d topic_id=%d", msgID, chatID, topicID)
 				case "answer":
 					hookLog("answered: %s", string(frame.Output))
 					resp.Body.Close()

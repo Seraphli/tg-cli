@@ -174,10 +174,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 	}
 	p := helpers.SafeInjectTextParams{
 		Bot:              bs.Bot,
-		ToolNotifs:       bs.ToolNotifs,
-		PendingFiles:     bs.PendingFiles,
 		PendingWait:      bs.PendingWait,
-		PendingPerms:     bs.PendingPerms,
 		InjectQueue:      bs.InjectQueue,
 		InjectConfirm:    bs.InjectConfirm,
 		StopCooldown:     bs.StopCooldown,
@@ -185,6 +182,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
+		NotifOpQueue:     bs.NotifOpQueue,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
 			return resolveChat(bs, t)
 		},

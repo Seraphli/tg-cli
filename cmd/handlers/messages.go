@@ -224,10 +224,7 @@ func InjectMessage(bs *types.BotState, tmuxTarget string, text string, imagePath
 func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
 	p := helpers.SafeInjectTextParams{
 		Bot:              bs.Bot,
-		ToolNotifs:       bs.ToolNotifs,
-		PendingFiles:     bs.PendingFiles,
 		PendingWait:      bs.PendingWait,
-		PendingPerms:     bs.PendingPerms,
 		InjectQueue:      bs.InjectQueue,
 		InjectConfirm:    bs.InjectConfirm,
 		StopCooldown:     bs.StopCooldown,
@@ -235,6 +232,7 @@ func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, sub
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
+		NotifOpQueue:     bs.NotifOpQueue,
 		ResolveChat: func(target string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, target)
 		},
@@ -409,45 +407,40 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		}
 		return nil
 	}
-	if _, ok := bs.PendingPerms.GetTarget(replyTo.ID); ok {
-		targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text)
-		if err == nil && targetPtr != nil {
-			tmuxStr := injector.FormatTarget(*targetPtr)
-			if injector.SessionExists(*targetPtr) {
-				if permMsgID, found := bs.PendingPerms.FindByTmuxTarget(tmuxStr); found {
-					doCancelPerm(bs, permMsgID)
-					injector.SendKeys(*targetPtr, "Escape")
+	// Use FindByMsgIDSnapshot — safe because replyTo.ID is a real TG message ID
+	if snap, ok := bs.PendingWait.FindByMsgIDSnapshot(replyTo.ID); ok {
+		switch snap.ToolName {
+		default:
+			// Cancel perm via DoCancelPerm (msgID-based — safe for TG message paths, any non-AskQ tool is a PermReq)
+			doCancelPerm(bs, replyTo.ID)
+			targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text)
+			if err == nil && targetPtr != nil {
+				tmuxStr := injector.FormatTarget(*targetPtr)
+				if injector.SessionExists(*targetPtr) {
 					for i := 0; i < 20; i++ {
 						time.Sleep(500 * time.Millisecond)
 						if !helpers.IsSessionRunning(tmuxStr) {
 							break
 						}
 					}
+					sendFeedback(tmuxStr)
+					InjectMessage(bs, tmuxStr, injectionText, imgPath)
+					logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
 				}
-				sendFeedback(tmuxStr)
-				InjectMessage(bs, injector.FormatTarget(*targetPtr), injectionText, imgPath)
-				logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
 			}
-		}
-		return nil
-	}
-	if entry, ok := bs.ToolNotifs.Get(replyTo.ID); ok {
-		target, err := injector.ParseTarget(entry.TmuxTarget)
-		if err != nil || !injector.SessionExists(target) {
-			return c.Reply("❌ tmux session not found.")
-		}
-		switch entry.ToolName {
+			return nil
 		case "AskUserQuestion":
-			sendFeedback(entry.TmuxTarget)
-			if err := InjectMessage(bs, entry.TmuxTarget, injectionText, imgPath); err != nil {
+			target, err := injector.ParseTarget(snap.TmuxTarget)
+			if err != nil || !injector.SessionExists(target) {
+				return c.Reply("❌ tmux session not found.")
+			}
+			sendFeedback(snap.TmuxTarget)
+			if err := InjectMessage(bs, snap.TmuxTarget, injectionText, imgPath); err != nil {
 				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
 			}
-			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, entry.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, snap.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
 			return nil
 		}
-		logger.Info(fmt.Sprintf("Tool reply: tool=%s msg_id=%d target=%s voice=%v text=%s", entry.ToolName, replyTo.ID, entry.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
-		recordPending(bs, entry.TmuxTarget, c.Message().Chat.ID, c.Message().ID)
-		return nil
 	}
 	target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
 	if err != nil {

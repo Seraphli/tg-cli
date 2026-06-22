@@ -7,6 +7,14 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/stores"
 )
 
+// PermDecision holds the resolved outcome of a PermissionRequest.
+// Used as the return value of DoDecidePerm and related helpers.
+type PermDecision struct {
+	Behavior           string          `json:"behavior"`
+	Message            string          `json:"message,omitempty"`
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
+}
+
 // WritePendingAnswer pushes an answer event to the wait store.
 // The old file-IO variant is superseded; callers must now pass the wait store.
 func WritePendingAnswer(waitStore *stores.PendingWaitStore, uuid string, ccOutput json.RawMessage) {
@@ -56,13 +64,20 @@ func BuildPermCCOutput(decision string, message string, updatedPerms []interface
 	return result
 }
 
-// ResolvePermission resolves a PermissionRequest decision.
-func ResolvePermission(pendingPerms *stores.PendingPermStore, msgID int, decision string, suggestionsOverride json.RawMessage) (stores.PermDecision, error) {
-	d := stores.PermDecision{}
-	suggestions := suggestionsOverride
-	if suggestions == nil {
-		suggestions = pendingPerms.GetSuggestions(msgID)
-	}
+// ResolvePermission resolves a PermissionRequest decision using raw suggestions JSON.
+// Callers that used to read from PendingPermStore must now pass snap.PermSuggestions directly.
+func ResolvePermission(suggestions json.RawMessage, decision string) (PermDecision, error) {
+	return resolvePermDecision(suggestions, decision)
+}
+
+// resolvePermissionFromSnap resolves a PermissionRequest decision from an EntrySnapshot.
+func resolvePermissionFromSnap(snap stores.EntrySnapshot, decision string) (PermDecision, error) {
+	return resolvePermDecision(snap.PermSuggestions, decision)
+}
+
+// resolvePermDecision computes a PermDecision for a given decision string and suggestions JSON.
+func resolvePermDecision(suggestions json.RawMessage, decision string) (PermDecision, error) {
+	d := PermDecision{}
 	switch {
 	case decision == "allow":
 		d.Behavior = "allow"
@@ -89,9 +104,6 @@ func ResolvePermission(pendingPerms *stores.PendingPermStore, msgID int, decisio
 		}
 	default:
 		return d, fmt.Errorf("unknown decision: %s", decision)
-	}
-	if !pendingPerms.Resolve(msgID, d) {
-		return d, fmt.Errorf("no pending permission for msg_id %d", msgID)
 	}
 	return d, nil
 }

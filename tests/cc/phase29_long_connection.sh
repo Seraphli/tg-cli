@@ -315,7 +315,8 @@ TC4_FOUND=false
 TC4_MSG_ID=""
 TC4_UUID=""
 while [ $ELAPSED -lt "$TIMEOUT" ]; do
-  if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "hook connected:" > /dev/null 2>&1; then
+  if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "hook connected:" > /dev/null 2>&1 \
+     && tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "Permission request sent" > /dev/null 2>&1; then
     TC4_FOUND=true
     TC4_MSG_ID=$(tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -m1 "Permission request sent" | grep -oP 'msg_id=\K[0-9]+' || true)
     TC4_UUID=$(tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -m1 "Permission request sent" | grep -oP 'uuid=\K[^ ]+' || true)

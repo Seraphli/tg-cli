@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
@@ -267,43 +269,53 @@ func flushInjectQueue(bs *BotState, tmuxTarget string) {
 	if !bs.InjectQueue.HasItems(tmuxTarget) {
 		return
 	}
-	// Check PermissionRequest — if pending, do NOT flush (keep queue for later)
-	if _, ok := bs.PendingPerms.FindByTmuxTarget(tmuxTarget); ok {
+	if snap, ok := bs.PendingWait.FindByTmuxTarget(tmuxTarget); ok && snap.ToolName != "AskUserQuestion" {
 		logger.Info(fmt.Sprintf("flushInjectQueue: PermissionRequest pending, keeping queue for target=%s", tmuxTarget))
 		return
 	}
-	// Capture notify message ID and inject ID before flush clears them
+	// All pre-drain early returns ABOVE — FlushInFlight not yet acquired.
+
+	// Acquire AFTER early returns:
+	if _, loaded := bs.FlushInFlight.LoadOrStore(tmuxTarget, true); loaded {
+		return // in-flight
+	}
+
 	notifyMsgID, hasNotify := bs.InjectQueue.GetNotifyMsg(tmuxTarget)
 	injectID := bs.InjectQueue.GetInjectID(tmuxTarget)
 	items := bs.InjectQueue.Flush(tmuxTarget)
 	if len(items) == 0 {
+		bs.FlushInFlight.Delete(tmuxTarget)
 		return
 	}
-	// Merge all items into one text
+
 	var texts []string
 	for _, item := range items {
 		texts = append(texts, item.Text)
 	}
 	merged := strings.Join(texts, "\n")
 	logger.Info(fmt.Sprintf("flushInjectQueue: merging %d items for target=%s merged_len=%d", len(items), tmuxTarget, len(merged)))
-	// Resolve chat for TG notification updates
+
 	chat, _, topicID := resolveChat(bs, tmuxTarget)
 	if injectID == "" {
 		injectID = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
 	}
 	logger.Info(fmt.Sprintf("flushInjectQueue: [%s] starting flush for target=%s items=%d", injectID, tmuxTarget, len(items)))
-	// Build message list for notifications (with delimiters)
 	msgContent := "──────\n" + strings.Join(texts, "\n") + "\n──────"
-	// Inject the merged text in a goroutine to avoid blocking the hook handler
-	go func(target, text, id, msgList string, itemCount int, notifyID int, hasNotifyMsg bool, chat *tele.Chat, topicID int) {
-		// Wait for Stop hook to finish (CC returns to idle after hook exits)
-		bs.StopCooldown.WaitIfNeeded(target, 1500*time.Millisecond)
+
+	go func(target, text, id, msgList string, flushItems []stores.InjectItem, itemCount int, notifyID int, hasNotifyMsg bool, chat *tele.Chat, topicID int) {
+		defer bs.FlushInFlight.Delete(target)
+
+		// Settle 5s if no recent Stop (transient idle — e.g. idle ticker)
+		if !bs.StopCooldown.HasRecentStop(target, 10*time.Second) {
+			logger.Info(fmt.Sprintf("flushInjectQueue: [%s] no recent Stop, settling 5s for target=%s", id, target))
+			time.Sleep(5 * time.Second)
+		} else {
+			bs.StopCooldown.WaitIfNeeded(target, 1500*time.Millisecond)
+		}
+
 		p := helpers.SafeInjectTextParams{
 			Bot:              bs.Bot,
-			ToolNotifs:       bs.ToolNotifs,
-			PendingFiles:     bs.PendingFiles,
 			PendingWait:      bs.PendingWait,
-			PendingPerms:     bs.PendingPerms,
 			InjectQueue:      bs.InjectQueue,
 			InjectConfirm:    bs.InjectConfirm,
 			StopCooldown:     bs.StopCooldown,
@@ -311,27 +323,36 @@ func flushInjectQueue(bs *BotState, tmuxTarget string) {
 			SessionState:     bs.SessionState,
 			HookSessionLocks: &bs.HookSessionLocks,
 			SessionEvents:    bs.SessionEvents,
+			NotifOpQueue:     bs.NotifOpQueue,
 			ResolveChat: func(t string) (*tele.Chat, string, int) {
 				return resolveChat(bs, t)
 			},
 			FormatPaneID: notify.FormatPaneID,
 			Force:        true,
 		}
-		if err := helpers.SafeInjectText(p, target, text); err != nil {
-			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] inject failed: target=%s err=%v", id, target, err))
+		err := helpers.SafeInjectText(p, target, text)
+		if err != nil {
+			// Error classification with sentinels
+			if errors.Is(err, injector.ErrSubmitAfterPaste) || errors.Is(err, helpers.ErrInjectNotConfirmed) {
+				// Post-paste error — do NOT re-enqueue (text may be in pane)
+				logger.Error(fmt.Sprintf("flushInjectQueue: [%s] post-paste error (not re-enqueueing): target=%s err=%v", id, target, err))
+			} else {
+				// Pre-paste error — safe to re-enqueue
+				logger.Error(fmt.Sprintf("flushInjectQueue: [%s] pre-paste error (re-enqueueing %d items): target=%s err=%v", id, itemCount, target, err))
+				bs.InjectQueue.ReEnqueue(target, flushItems)
+			}
 			if hasNotifyMsg && chat != nil {
 				editMsg := &tele.Message{ID: notifyID, Chat: chat}
 				helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("❌ Inject failed [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
 			}
 			return
 		}
-		// SafeInjectText handles confirmation internally (CapturePane/PostToolUse)
 		logger.Info(fmt.Sprintf("flushInjectQueue: [%s] inject completed: target=%s", id, target))
 		if hasNotifyMsg && chat != nil {
 			editMsg := &tele.Message{ID: notifyID, Chat: chat}
 			helpers.RetryEdit(bs.Bot, editMsg, fmt.Sprintf("✅ Injected [%s] (%d)\n📟 %s\n%s", id, itemCount, notify.FormatPaneID(target), msgList))
 		}
-	}(tmuxTarget, merged, injectID, msgContent, len(items), notifyMsgID, hasNotify, chat, topicID)
+	}(tmuxTarget, merged, injectID, msgContent, items, len(items), notifyMsgID, hasNotify, chat, topicID)
 }
 
 // checkSessionVersion checks a single session for CC version updates.

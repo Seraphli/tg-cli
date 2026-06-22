@@ -66,6 +66,17 @@ func (s *StopCooldownStore) Record(tmuxTarget string) {
 	s.times[tmuxTarget] = time.Now()
 }
 
+// HasRecentStop reports whether a Stop event was recorded for the target within the given duration.
+func (s *StopCooldownStore) HasRecentStop(tmuxTarget string, within time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	lastStop, ok := s.times[tmuxTarget]
+	if !ok {
+		return false
+	}
+	return time.Since(lastStop) < within
+}
+
 // WaitIfNeeded sleeps for the remaining cooldown duration if needed.
 func (s *StopCooldownStore) WaitIfNeeded(tmuxTarget string, cooldown time.Duration) {
 	s.mu.RLock()

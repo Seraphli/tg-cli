@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
@@ -244,25 +245,53 @@ func Register(bs *types.BotState) {
 						text += " " + payload
 					}
 					tmuxStr := injector.FormatTarget(target)
-					// Check for pending AskUserQuestion
-					if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
-						uuid, uuidOk := bs.PendingFiles.Get(msgID)
-						if uuidOk && !handleStalePending(bs, msgID, uuid) {
-							if waitEntry, wok := bs.PendingWait.Get(uuid); wok {
+					// Check for pending tool wait via PendingWait (target-based, snap.UUID path)
+					if pwSnap, hasPW := bs.PendingWait.FindByTmuxTarget(tmuxStr); hasPW {
+						switch pwSnap.ToolName {
+						default:
+							// Cancel perm via snapshot then delayed inject (any non-AskQ tool is a PermReq)
+							helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, extractTarget, *pwSnap)
+							go func() {
+								time.Sleep(3 * time.Second)
+								helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text)
+							}()
+							logger.Info(fmt.Sprintf("Permission cancelled via CC command (reply) + delayed inject: target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+							recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
+							return nil
+						case "AskUserQuestion":
+							// Resolve AskQ — build answer from snap.Questions
+							if waitEntry, wok := bs.PendingWait.Get(pwSnap.UUID); wok {
 								answers := make(map[string]string)
-								if len(entry.Questions) > 0 {
-									answers[entry.Questions[0].QuestionText] = text
+								if len(pwSnap.Questions) > 0 {
+									answers[pwSnap.Questions[0].QuestionText] = text
+								} else {
+									answers["question"] = text
 								}
 								ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
-								helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
-								bs.ToolNotifs.MarkResolved(msgID)
-								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-								helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+								frozenMarkup := helpers.BuildFrozenMarkup(pwSnap.Questions, "✅ Text answer")
+								capturedUUID := pwSnap.UUID
+								won, _, _ := bs.PendingWait.ResolveIfUnresolved(pwSnap.UUID, stores.WaitEvent{
+									Type:   "answer",
+									Output: ccOutput,
+								})
+								if won {
+									bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
+										Type:         stores.OpEDIT,
+										UUID:         capturedUUID,
+										FreezeLabel:  "✅ Text answer",
+										FrozenMarkup: frozenMarkup,
+										EditFunc: func(eID int, eChatID int64, editMsgText string) {
+											editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+											helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
+											logger.Info(fmt.Sprintf("CC command (reply): AskQ EDIT completed msg_id=%d", eID))
+										},
+									})
+									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+								}
 							}
+							recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
+							return nil
 						}
-						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
-						return nil
 					}
 					if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text); err != nil {
 						return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -288,25 +317,53 @@ func Register(bs *types.BotState) {
 				if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
 					text += " " + payload
 				}
-				// Check for pending AskUserQuestion
-				if msgID, entry, ok := bs.ToolNotifs.FindByTmuxTarget(tmuxStr); ok {
-					uuid, uuidOk := bs.PendingFiles.Get(msgID)
-					if uuidOk && !handleStalePending(bs, msgID, uuid) {
-						if waitEntry, wok := bs.PendingWait.Get(uuid); wok {
+				// Check for pending tool wait via PendingWait (target-based, snap.UUID path)
+				if pwSnap, hasPW := bs.PendingWait.FindByTmuxTarget(tmuxStr); hasPW {
+					switch pwSnap.ToolName {
+					default:
+						// Cancel perm via snapshot then delayed inject (any non-AskQ tool is a PermReq)
+						helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, extractTarget, *pwSnap)
+						go func() {
+							time.Sleep(3 * time.Second)
+							helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text)
+						}()
+						logger.Info(fmt.Sprintf("Permission cancelled via CC command (group) + delayed inject: target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
+						return nil
+					case "AskUserQuestion":
+						// Resolve AskQ — build answer from snap.Questions
+						if waitEntry, wok := bs.PendingWait.Get(pwSnap.UUID); wok {
 							answers := make(map[string]string)
-							if len(entry.Questions) > 0 {
-								answers[entry.Questions[0].QuestionText] = text
+							if len(pwSnap.Questions) > 0 {
+								answers[pwSnap.Questions[0].QuestionText] = text
+							} else {
+								answers["question"] = text
 							}
 							ccOutput := helpers.BuildAskCCOutput(waitEntry.Payload, answers)
-							helpers.WritePendingAnswer(bs.PendingWait, uuid, ccOutput)
-							bs.ToolNotifs.MarkResolved(msgID)
-							logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): msg_id=%d uuid=%s text=%s", msgID, uuid, helpers.TruncateStr(text, 200)))
-							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: entry.ChatID}}
-							helpers.RetryEdit(bot, editMsg, entry.MsgText, helpers.BuildFrozenMarkup(entry, "✅ Text answer"), tele.ModeHTML)
+							frozenMarkup := helpers.BuildFrozenMarkup(pwSnap.Questions, "✅ Text answer")
+							capturedUUID := pwSnap.UUID
+							won, _, _ := bs.PendingWait.ResolveIfUnresolved(pwSnap.UUID, stores.WaitEvent{
+								Type:   "answer",
+								Output: ccOutput,
+							})
+							if won {
+								bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
+									Type:         stores.OpEDIT,
+									UUID:         capturedUUID,
+									FreezeLabel:  "✅ Text answer",
+									FrozenMarkup: frozenMarkup,
+									EditFunc: func(eID int, eChatID int64, editMsgText string) {
+										editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+										helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
+										logger.Info(fmt.Sprintf("CC command (group): AskQ EDIT completed msg_id=%d", eID))
+									},
+								})
+								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+							}
 						}
+						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
+						return nil
 					}
-					recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
-					return nil
 				}
 				if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))

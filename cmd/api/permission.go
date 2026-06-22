@@ -15,12 +15,12 @@ func registerPermission(mux *http.ServeMux, bs *types.BotState) {
 	mux.HandleFunc("/permission/decide", func(w http.ResponseWriter, r *http.Request) {
 		msgID, _ := strconv.Atoi(r.URL.Query().Get("msg_id"))
 		decision := r.URL.Query().Get("decision")
+		// Use FindByMsgIDSnapshot internally (TG-button path — real msgID from callback)
 		d, err := helpers.DoDecidePerm(
 			bs.Bot,
-			bs.PendingPerms,
-			bs.PendingFiles,
 			bs.PendingWait,
 			bs.ReactionTracker,
+			bs.NotifOpQueue,
 			func(target string) bool {
 				return helpers.CheckSessionAlive(target, func(t string) {
 					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)

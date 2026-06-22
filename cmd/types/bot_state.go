@@ -16,11 +16,8 @@ type BotState struct {
 	Port      int    // resolved bot HTTP port; used to render @ channel reply/end CLI instructions
 	ConfigDir string // resolved config dir; used to render @ channel reply/end CLI instructions
 
-	Pages           *stores.PageCacheStore
-	PendingPerms    *stores.PendingPermStore
-	ToolNotifs      *stores.ToolNotifyStore
-	PendingFiles    *stores.PendingFileStore
-	SessionState    *stores.SessionStateStore
+	Pages         *stores.PageCacheStore
+	SessionState  *stores.SessionStateStore
 	SessionCounts   *stores.SessionCountStore
 	MergeBuffers    *stores.MergeBufferStore
 	InjectQueue     *stores.InjectQueueStore
@@ -37,6 +34,8 @@ type BotState struct {
 	CompactTools    *stores.CompactToolStore
 	Streams         *stores.StreamStore
 	PendingWait     *stores.PendingWaitStore
+	NotifOpQueue    *stores.NotifOpQueue
+	FlushInFlight   sync.Map
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map
