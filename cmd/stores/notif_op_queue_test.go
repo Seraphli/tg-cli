@@ -311,3 +311,47 @@ func TestNotifOpQueue_ReconnectGetMsgID(t *testing.T) {
 		t.Fatalf("GetMsgID should work for reconnect: ok=%v msgID=%d chatID=%d", ok, msgID, chatID)
 	}
 }
+
+func TestEDIT_EmptyMsgText(t *testing.T) {
+	q := NewNotifOpQueue()
+	defer q.Close()
+	uuid := "test-empty-msgtext"
+	sendDone := make(chan struct{})
+	q.TryEnqueue(NotifOp{
+		Type: OpSEND, UUID: uuid,
+		SendFunc: func(frozen bool, frozenLabel string) SendResult {
+			return SendResult{MsgID: 99, ChatID: 300, MsgText: ""}
+		},
+		PostSend: func(result SendResult) { close(sendDone) },
+	})
+	<-sendDone
+	_, _, msgText, ok := q.GetReadyMsgID(uuid)
+	if !ok {
+		t.Fatal("expected entry to be ready")
+	}
+	if msgText != "" {
+		t.Fatalf("expected empty MsgText, got %q", msgText)
+	}
+	editDone := make(chan struct{})
+	var receivedMsgText string
+	var editCalled bool
+	q.TryEnqueue(NotifOp{
+		Type: OpEDIT, UUID: uuid,
+		EditFunc: func(msgID int, chatID int64, mText string) {
+			editCalled = true
+			receivedMsgText = mText
+			close(editDone)
+		},
+	})
+	select {
+	case <-editDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EditFunc not called within timeout")
+	}
+	if !editCalled {
+		t.Fatal("EditFunc was not called")
+	}
+	if receivedMsgText != "" {
+		t.Fatalf("expected empty msgText, got %q", receivedMsgText)
+	}
+}

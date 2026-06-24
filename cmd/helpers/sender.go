@@ -88,3 +88,20 @@ func RetryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interfa
 		time.Sleep(wait)
 	}
 }
+
+// freezeEditArgs builds the what/opts arguments for a freeze edit.
+// When text is empty, only the markup is updated (avoids "message text is empty" Telegram error).
+// When text is non-empty, both text and markup are updated with HTML parse mode.
+func freezeEditArgs(text string, markup *tele.ReplyMarkup) (what interface{}, opts []interface{}) {
+	if text == "" {
+		return markup, nil
+	}
+	return text, []interface{}{markup, tele.ModeHTML}
+}
+
+// RetryFreezeEdit edits a message's reply markup (and optionally its text) with retries.
+// It delegates argument building to freezeEditArgs so that an empty text never causes a 400 error.
+func RetryFreezeEdit(b *tele.Bot, msg tele.Editable, text string, markup *tele.ReplyMarkup) (*tele.Message, error) {
+	what, opts := freezeEditArgs(text, markup)
+	return RetryEdit(b, msg, what, opts...)
+}

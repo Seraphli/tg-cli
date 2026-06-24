@@ -123,8 +123,12 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 					FrozenMarkup: capturedMarkup,
 					EditFunc: func(msgID int, chatID int64, editMsgText string) {
 						editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-						helpers.RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+						_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+					if err != nil {
+						logger.Error(fmt.Sprintf("/pending/cancel EDIT failed msg_id=%d uuid=%s err=%v", msgID, uuid, err))
+					} else {
 						logger.Info(fmt.Sprintf("/pending/cancel EDIT completed msg_id=%d uuid=%s", msgID, uuid))
+					}
 					},
 				})
 			}

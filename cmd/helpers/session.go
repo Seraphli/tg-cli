@@ -97,13 +97,17 @@ func CleanupPendingState(
 					FrozenMarkup: capturedMarkup,
 					EditFunc: func(eID int, eChatID int64, editMsgText string) {
 						editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-						RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
+						_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+					if err != nil {
+						logger.Error(fmt.Sprintf("CleanupPendingState: EDIT failed msg_id=%d err=%v", eID, err))
+					} else {
 						logger.Info(fmt.Sprintf("CleanupPendingState: EDIT completed msg_id=%d", eID))
+					}
 					},
 				})
 			} else {
 				editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-				RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+				RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
 			}
 		}
 	}
@@ -170,8 +174,12 @@ func CancelPermBySnapshot(bot *tele.Bot, pendingWait *stores.PendingWaitStore, o
 		FrozenMarkup: capturedMarkup,
 		EditFunc: func(msgID int, chatID int64, editMsgText string) {
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-			RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-			logger.Info(fmt.Sprintf("Permission cancelled by snapshot uuid=%s", snap.UUID))
+			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("CancelPermBySnapshot: EDIT failed uuid=%s err=%v", snap.UUID, err))
+			} else {
+				logger.Info(fmt.Sprintf("CancelPermBySnapshot: EDIT completed uuid=%s", snap.UUID))
+			}
 		},
 	})
 }
@@ -208,8 +216,12 @@ func DoCancelPerm(
 			FrozenMarkup: capturedMarkup,
 			EditFunc: func(eID int, eChatID int64, editMsgText string) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-				logger.Info(fmt.Sprintf("DoCancelPerm: EDIT completed msg_id=%d", eID))
+				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("DoCancelPerm: EDIT failed msg_id=%d err=%v", eID, err))
+				} else {
+					logger.Info(fmt.Sprintf("DoCancelPerm: EDIT completed msg_id=%d", eID))
+				}
 			},
 		})
 	}
@@ -299,8 +311,12 @@ func DoDecidePerm(
 			FrozenMarkup: capturedMarkup,
 			EditFunc: func(eID int, eChatID int64, editMsgText string) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-				logger.Info(fmt.Sprintf("DoDecidePerm: EDIT completed msg_id=%d decision=%s", eID, decision))
+				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("DoDecidePerm: EDIT failed msg_id=%d decision=%s err=%v", eID, decision, err))
+				} else {
+					logger.Info(fmt.Sprintf("DoDecidePerm: EDIT completed msg_id=%d decision=%s", eID, decision))
+				}
 			},
 		})
 	}

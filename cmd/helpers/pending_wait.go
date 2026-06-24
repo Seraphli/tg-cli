@@ -67,8 +67,12 @@ func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStor
 		FrozenMarkup: capturedMarkup,
 		EditFunc: func(msgID int, chatID int64, editMsgText string) {
 			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-			RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-			logger.Info(fmt.Sprintf("FreezeWaitEntry: msg_id=%d label=%s", msgID, capturedLabel))
+			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("FreezeWaitEntry: EDIT failed msg_id=%d label=%s err=%v", msgID, capturedLabel, err))
+			} else {
+				logger.Info(fmt.Sprintf("FreezeWaitEntry: EDIT completed msg_id=%d label=%s", msgID, capturedLabel))
+			}
 		},
 	})
 }

@@ -282,8 +282,12 @@ func Register(bs *types.BotState) {
 										FrozenMarkup: frozenMarkup,
 										EditFunc: func(eID int, eChatID int64, editMsgText string) {
 											editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-											helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
-											logger.Info(fmt.Sprintf("CC command (reply): AskQ EDIT completed msg_id=%d", eID))
+											_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
+											if err != nil {
+												logger.Error(fmt.Sprintf("CC command (reply): AskQ EDIT failed msg_id=%d err=%v", eID, err))
+											} else {
+												logger.Info(fmt.Sprintf("CC command (reply): AskQ EDIT completed msg_id=%d", eID))
+											}
 										},
 									})
 									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
@@ -354,8 +358,12 @@ func Register(bs *types.BotState) {
 									FrozenMarkup: frozenMarkup,
 									EditFunc: func(eID int, eChatID int64, editMsgText string) {
 										editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-										helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
-										logger.Info(fmt.Sprintf("CC command (group): AskQ EDIT completed msg_id=%d", eID))
+										_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
+										if err != nil {
+											logger.Error(fmt.Sprintf("CC command (group): AskQ EDIT failed msg_id=%d err=%v", eID, err))
+										} else {
+											logger.Info(fmt.Sprintf("CC command (group): AskQ EDIT completed msg_id=%d", eID))
+										}
 									},
 								})
 								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))

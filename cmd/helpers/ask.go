@@ -64,14 +64,18 @@ func DoRespondAsk(
 			FrozenMarkup: capturedMarkup,
 			EditFunc: func(eID int, chatID int64, editMsgText string) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-				logger.Info(fmt.Sprintf("DoRespondAsk: EDIT completed msg_id=%d", eID))
+				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("DoRespondAsk: EDIT failed msg_id=%d err=%v", eID, err))
+				} else {
+					logger.Info(fmt.Sprintf("DoRespondAsk: EDIT completed msg_id=%d", eID))
+				}
 			},
 		})
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+		RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion responded: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
 	return nil
@@ -114,13 +118,17 @@ func DoCancelAsk(
 				FrozenMarkup: capturedMarkup,
 				EditFunc: func(eID int, eChatID int64, editMsgText string) {
 					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-					RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-					logger.Info(fmt.Sprintf("DoCancelAsk: EDIT completed msg_id=%d", eID))
+					_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+					if err != nil {
+						logger.Error(fmt.Sprintf("DoCancelAsk: EDIT failed msg_id=%d err=%v", eID, err))
+					} else {
+						logger.Info(fmt.Sprintf("DoCancelAsk: EDIT completed msg_id=%d", eID))
+					}
 				},
 			})
 		} else {
 			editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-			RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+			RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
 		}
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion cancelled: msg_id=%d uuid=%s", msgID, uuid))
@@ -173,14 +181,18 @@ func DoChatAsk(
 			FrozenMarkup: capturedMarkup,
 			EditFunc: func(eID int, chatID int64, editMsgText string) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-				RetryEdit(bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-				logger.Info(fmt.Sprintf("DoChatAsk: EDIT completed msg_id=%d", eID))
+				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("DoChatAsk: EDIT failed msg_id=%d err=%v", eID, err))
+				} else {
+					logger.Info(fmt.Sprintf("DoChatAsk: EDIT completed msg_id=%d", eID))
+				}
 			},
 		})
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryEdit(bot, editMsg, msgText, frozenMarkup, tele.ModeHTML)
+		RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion chat mode: msg_id=%d uuid=%s", msgID, uuid))
 	return nil
@@ -366,8 +378,12 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 							FrozenMarkup: capturedMarkup,
 							EditFunc: func(msgID int, chatID int64, editMsgText string) {
 								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-								RetryEdit(p.Bot, editMsg, editMsgText, capturedMarkup, tele.ModeHTML)
-								logger.Info(fmt.Sprintf("safeInjectText: AskQ EDIT completed msg_id=%d", msgID))
+								_, err := RetryFreezeEdit(p.Bot, editMsg, editMsgText, capturedMarkup)
+								if err != nil {
+									logger.Error(fmt.Sprintf("safeInjectText: AskQ EDIT failed msg_id=%d err=%v", msgID, err))
+								} else {
+									logger.Info(fmt.Sprintf("safeInjectText: AskQ EDIT completed msg_id=%d", msgID))
+								}
 							},
 						})
 					}
@@ -375,7 +391,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 					// Fallback: direct edit using snap coordinates
 					if len(pwSnap.Questions) > 0 {
 						editMsg := &tele.Message{ID: pwSnap.MsgID, Chat: &tele.Chat{ID: pwSnap.ChatID}}
-						RetryEdit(p.Bot, editMsg, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"), tele.ModeHTML)
+						RetryFreezeEdit(p.Bot, editMsg, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"))
 					}
 				}
 				logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion uuid=%s text=%s", pwSnap.UUID, TruncateStr(text, 200)))
@@ -576,7 +592,7 @@ func cleanupAskState(
 	}
 	if !snap.Resolved && len(snap.Questions) > 0 {
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryEdit(bot, editMsg, snap.MsgText, BuildFrozenMarkup(snap.Questions, "❌ Cancelled"), tele.ModeHTML)
+		RetryFreezeEdit(bot, editMsg, snap.MsgText, BuildFrozenMarkup(snap.Questions, "❌ Cancelled"))
 	}
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }

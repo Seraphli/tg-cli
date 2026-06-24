@@ -85,7 +85,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
 					newMarkup := helpers.RebuildAskMarkup(questions)
 					editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
-					helpers.RetryEdit(bot, editMsg, snap.MsgText, newMarkup, tele.ModeHTML)
+					helpers.RetryFreezeEdit(bot, editMsg, snap.MsgText, newMarkup)
 				} else {
 					// Select option — use store method for atomic update
 					questions, err := bs.PendingWait.SelectQuestionOption(snap.UUID, qIdx, optIdx)
@@ -108,7 +108,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
 						newMarkup := helpers.RebuildAskMarkup(questions)
 						editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
-						helpers.RetryEdit(bot, editMsg, snap.MsgText, newMarkup, tele.ModeHTML)
+						helpers.RetryFreezeEdit(bot, editMsg, snap.MsgText, newMarkup)
 					}
 				}
 			}
@@ -208,8 +208,12 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				FrozenMarkup: frozenMarkup,
 				EditFunc: func(eID int, eChatID int64, editMsgText string) {
 					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-					helpers.RetryEdit(bot, editMsg, editMsgText, frozenMarkup, tele.ModeHTML)
-					logger.Info(fmt.Sprintf("group text API: AskQ EDIT completed msg_id=%d", eID))
+					_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
+					if err != nil {
+						logger.Error(fmt.Sprintf("group text API: AskQ EDIT failed msg_id=%d err=%v", eID, err))
+					} else {
+						logger.Info(fmt.Sprintf("group text API: AskQ EDIT completed msg_id=%d", eID))
+					}
 				},
 			})
 			logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
