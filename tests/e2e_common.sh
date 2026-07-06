@@ -309,6 +309,120 @@ check_typing_continuity() {
   fi
 }
 
+# validate_phase_log: after a CC phase completes, validate that phase's bot-log slice for
+#   V1 - hook raw-payload completeness (every "Raw hook payload [E]:" has a JSON body; MessageDisplay too)
+#   V2 - TG message content completeness (stream full_text non-empty; no truncated "Notification sent" body)
+#   V3 - message ordering (no two consecutive DISTINCT Message-type sends without a separator send between)
+# CC-scoped: skips phases with no CC streaming markers (codex/common phases unaffected). Failures call fail.
+# Usage: validate_phase_log <label> <log_before_phase>
+validate_phase_log() {
+  local label="$1"
+  local log_before="$2"
+  local pane_target="${3:-${E2E_PANE:-}}"
+  local slice
+  slice=$(tail -n +"$((log_before + 1))" "$LOG_FILE" 2>/dev/null || true)
+  # CC-scoped: only validate phases that produced CC streaming output. Use a here-string, NOT
+  # `printf '%s\n' "$slice" | grep -q ...`: under `set -o pipefail`, grep -q closing the pipe on its first
+  # match makes printf exit SIGPIPE(141), so the pipeline reads as failure and the check would WRONGLY skip
+  # large phases (e.g. streaming) where the marker appears early. (Project lesson 2026-02-14.)
+  if ! grep -q -e "Stream send:" -e "MessageDisplay delta:" <<< "$slice"; then
+    return 0
+  fi
+
+  # --- V1: hook raw-payload completeness ---
+  local bad_raw
+  bad_raw=$(printf '%s\n' "$slice" | grep -E 'Raw hook payload \[[^]]+\]:' | grep -vE 'Raw hook payload \[[^]]+\]: *\{' || true)
+  if [ -n "$bad_raw" ]; then
+    echo "  [validate_phase_log:$label] V1 FAIL — raw-payload line(s) without a JSON body:"
+    printf '%s\n' "$bad_raw" | head -5
+    pane_log "[$label] V1 FAIL pane" "$pane_target"
+    fail "[$label] V1 raw-payload completeness: empty/missing raw payload"
+  fi
+  if grep -q "MessageDisplay delta:" <<< "$slice"; then
+    if ! grep -q 'Raw hook payload \[MessageDisplay\]:' <<< "$slice"; then
+      pane_log "[$label] V1 FAIL pane" "$pane_target"
+      fail "[$label] V1 raw-payload completeness: MessageDisplay deltas present but no 'Raw hook payload [MessageDisplay]' line (bot must run with --debug)"
+    fi
+  fi
+
+  # --- V2: TG message content completeness (no truncation) ---
+  if grep -q "Stream send:" <<< "$slice"; then
+    local recon
+    recon=$(reconstruct_tg_full_text "$slice")
+    if [ -z "$(printf '%s' "$recon" | tr -d '[:space:]')" ]; then
+      pane_log "[$label] V2 FAIL pane" "$pane_target"
+      fail "[$label] V2 content completeness: Stream send lines present but reconstructed full_text is empty"
+    fi
+  fi
+  # No "Notification sent" line shows the old truncation signature (large body_len but a ~200-rune+'...' body).
+  # Conservative threshold (body_len>220 && on-line body<=210 chars && ends with '...') to avoid false positives.
+  local trunc
+  trunc=$(printf '%s\n' "$slice" | awk '
+    /^\[[0-9]{4}-/ && /Notification sent .*body_len=[0-9]+ body=/ {
+      if (match($0, /body_len=[0-9]+/)) {
+        blen = substr($0, RSTART + 9, RLENGTH - 9) + 0
+        idx = index($0, " body=")
+        body = substr($0, idx + 6)
+        if (blen > 220 && length(body) <= 210 && body ~ /\.\.\.$/) print
+      }
+    }' || true)
+  if [ -n "$trunc" ]; then
+    echo "  [validate_phase_log:$label] V2 FAIL — truncated 'Notification sent' line(s):"
+    printf '%s\n' "$trunc" | head -5
+    pane_log "[$label] V2 FAIL pane" "$pane_target"
+    fail "[$label] V2 content completeness: truncated Notification sent body"
+  fi
+
+  # --- V3: message ordering (Problem-1 regression guard) ---
+  # The Problem-1 bug is WITHIN one assistant turn (the CompactTools cycle is per-turn, reset at Stop):
+  # a merged tool leaves two text bubbles adjacent with no tool between. So flag two distinct CC
+  # message_id= "Stream send:" lines ONLY when they share the SAME turn_id with no separator between.
+  # A turn_id change is a new user turn = a legitimate boundary (cross-turn text replies are normal).
+  # Pagination chunks share message_id= -> counted once. Separator = a tool/interactive TG SEND.
+  local v3
+  v3=$(printf '%s\n' "$slice" | awk '
+    !/^\[[0-9]{4}-/ { next }   # only real log lines (skip multi-line full_text content)
+    /compact tool sent|compact tool overflow sent/ { last = "SEP"; next }
+    /Notification sent .*: ToolUse / { last = "SEP"; next }
+    /AskUserQuestion sent: msg_id=/ { last = "SEP"; next }
+    /Permission request sent:/ { last = "SEP"; next }
+    /Stream send: / {
+      mid = ""; tid = ""
+      if (match($0, /message_id=[^ ]+/)) mid = substr($0, RSTART, RLENGTH)
+      if (match($0, /turn_id=[^ ]+/)) tid = substr($0, RSTART, RLENGTH)
+      if (mid == lastmid) next   # same logical message (pagination) — not a new Message event
+      if (tid != lasttid) { last = "M"; lastmid = mid; lasttid = tid; next }   # new turn = boundary, not a violation
+      if (last == "M") { print "consecutive Message sends in same " tid " with no separator: " lastmid " -> " mid; bad = 1 }
+      last = "M"; lastmid = mid
+      next
+    }' || true)
+  if [ -n "$v3" ]; then
+    echo "  [validate_phase_log:$label] V3 FAIL — message ordering:"
+    printf '%s\n' "$v3" | head -5
+    pane_log "[$label] V3 FAIL pane" "$pane_target"
+    fail "[$label] V3 message ordering: $(printf '%s' "$v3" | head -1)"
+  fi
+
+  pass "[$label] log validations V1/V2/V3"
+}
+
+# validate_phase_inline: run the V1/V2/V3 log validations from WITHIN a phase, while its CC pane is
+# still alive, so a FAIL capture shows what CC was doing (run_phase runs after the phase's cleanup has
+# already killed the pane -> "(no pane)"). Touches a flag file so run_phase skips its post-phase
+# fallback validation (no double count). Call at the end of a CC phase, before it tears down its CC
+# session. Uses PHASE_LOG_BEFORE (exported by run_phase) as the phase's starting log offset.
+# Usage: validate_phase_inline <pane_target>
+validate_phase_inline() {
+  local pane_target="${1:-${E2E_PANE:-}}"
+  # Ensure CC has gone idle before validating: a still-busy pane means the phase injected/checked with a
+  # timing gap and the log may be incomplete. wait_for_idle fails the phase if CC never settles (timing bug).
+  if [ -n "$pane_target" ]; then
+    wait_for_idle "${TIMEOUT:-180}" "$pane_target"
+  fi
+  validate_phase_log "$(basename "$0")" "${PHASE_LOG_BEFORE:-0}" "$pane_target"
+  touch "$TEST_CONFIG_DIR/.phase-validated" 2>/dev/null || true
+}
+
 ensure_credentials() {
   if [ ! -f "$CREDENTIALS" ]; then
     echo "ERROR: $CREDENTIALS not found. Complete pairing first."
@@ -371,8 +485,25 @@ EOF
   python3 -c "import json;f='$TEST_SETTINGS';d=json.load(open(f));d['skipDangerousModePermissionPrompt']=True;p=d.setdefault('permissions',{});a=p.setdefault('allow',[]);r='Read(//tmp/**)';a.append(r) if r not in a else None;json.dump(d,open(f,'w'),indent=2)"
   # Write test app config
   mkdir -p "$TEST_CONFIG_DIR"
-  local cc_cmd="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --dangerously-skip-permissions --setting-sources user"
-  echo "{\"toolNotifyList\":[\"Bash\",\"AskUserQuestion\"],\"claudeCommand\":\"$cc_cmd\",\"paginationMaxRunes\":500}" > "$TEST_CONFIG_DIR/config.json"
+  # Build the claude launch command for bot-launched (session new) CC — e.g. phase23's e2e-integ-agent,
+  # which does NOT go through start_claude. Mirror start_claude: BROWSER=none + config dir + provider/model
+  # env passthrough + configurable model, so a custom-model run also applies to session-new CC. Values are
+  # shell-quoted (printf %q). config.json is written via python3 (env-passed) so shell-escaped values with
+  # special chars can't break the JSON.
+  local cc_env_prefix="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
+  local _v
+  for _v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
+            ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+            ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
+    if [ -n "${!_v:-}" ]; then
+      cc_env_prefix="${cc_env_prefix} ${_v}=$(printf '%q' "${!_v}")"
+    fi
+  done
+  local cc_cmd="$cc_env_prefix claude --model ${ANTHROPIC_MODEL:-sonnet} --dangerously-skip-permissions --setting-sources user --no-chrome"
+  # toolNotifyList = ALL knownTools (cmd/helpers/version.go) + AskUserQuestion + "Other", so EVERY tool use
+  # (including unlisted tools like SendMessage, classified as "Other") emits a ToolUse notification. This
+  # makes every tool a valid V3 separator, so a text -> tool -> text turn never trips the ordering check.
+  CC_CMD="$cc_cmd" python3 -c "import json,os; json.dump({'toolNotifyList':['Edit','Write','Bash','Read','Glob','Grep','Agent','WebFetch','WebSearch','MCP','Skill','TaskCreate','TaskUpdate','TaskGet','TaskList','TaskStop','TaskOutput','NotebookEdit','EnterPlanMode','ExitPlanMode','EnterWorktree','ExitWorktree','AskUserQuestion','Other'],'claudeCommand':os.environ['CC_CMD'],'paginationMaxRunes':500}, open('$TEST_CONFIG_DIR/config.json','w'))"
   echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
 }
 

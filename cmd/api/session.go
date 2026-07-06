@@ -107,29 +107,24 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			}
 			logger.Info(fmt.Sprintf("Permission cancelled: msg_id=%d uuid=%s tool=%s", snap.MsgID, uuid, snap.ToolName))
 			// Build frozen markup from snapshot and TryEnqueue EDIT
+			capturedLabel := "❌ Cancelled"
 			var frozenMarkup *tele.ReplyMarkup
 			if snap.ToolName == "AskUserQuestion" {
-				frozenMarkup = helpers.BuildFrozenMarkup(snap.Questions, "❌ Cancelled")
+				frozenMarkup = helpers.BuildFrozenMarkup(snap.Questions, capturedLabel)
 			} else {
 				sugLabel, _ := helpers.ParseSuggestionLabel(snap.PermSuggestions)
-				frozenMarkup = helpers.BuildFrozenPermMarkup("❌ Cancelled", sugLabel)
+				frozenMarkup = helpers.BuildFrozenPermMarkup(capturedLabel, sugLabel)
 			}
 			if frozenMarkup != nil {
 				capturedMarkup := frozenMarkup
-				bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
-					Type:         stores.OpEDIT,
-					UUID:         uuid,
-					FreezeLabel:  "❌ Cancelled",
-					FrozenMarkup: capturedMarkup,
-					EditFunc: func(msgID int, chatID int64, editMsgText string) {
-						editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-						_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				bs.PendingMsgStore.EditOrDefer(uuid, func(msgID int, chatID int64, editMsgText string, topicID int) {
+					editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+					_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
 					if err != nil {
 						logger.Error(fmt.Sprintf("/pending/cancel EDIT failed msg_id=%d uuid=%s err=%v", msgID, uuid, err))
 					} else {
-						logger.Info(fmt.Sprintf("/pending/cancel EDIT completed msg_id=%d uuid=%s", msgID, uuid))
+						logger.Info(fmt.Sprintf("/pending/cancel EDIT completed msg_id=%d uuid=%s label=%s", msgID, uuid, capturedLabel))
 					}
-					},
 				})
 			}
 		}
@@ -365,7 +360,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s noHeader=%t text=%s injectText=%q", req.Name, info.TmuxTarget, req.From, req.NoHeader, helpers.TruncateStr(req.Text, 200), helpers.TruncateStr(injectText, 300)))
+		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s noHeader=%t text=%s injectText=%q", req.Name, info.TmuxTarget, req.From, req.NoHeader, req.Text, injectText))
 		// Send TG notification to the target session's chat
 		chat, _, topicID := helpers.ResolveChat(bs.SessionState, info.TmuxTarget)
 		if chat != nil {
@@ -385,7 +380,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			} else {
 				helpers.RetrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
 			}
-			logger.Info(fmt.Sprintf("Session send notification: target=%s from=%s text=%s", req.Name, req.From, helpers.TruncateStr(req.Text, 200)))
+			logger.Info(fmt.Sprintf("Session send notification: target=%s from=%s text=%s", req.Name, req.From, req.Text))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
@@ -412,22 +407,14 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 		if pwSnap, hasPW := bs.PendingWait.FindByTmuxTarget(target); hasPW {
 			switch pwSnap.ToolName {
 			default:
-				// CancelPermBySnapshot: send ESC + ResolveIfUnresolved + TryEnqueue EDIT (any non-AskQ tool is a PermReq)
-				helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, notify.FormatPaneID, *pwSnap)
+				// CancelPermBySnapshot: send ESC + ResolveIfUnresolved + EditOrDefer (any non-AskQ tool is a PermReq)
+				helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.PendingMsgStore, notify.FormatPaneID, *pwSnap)
 				if t, err := injector.ParseTarget(target); err == nil {
 					injector.SendKeys(t, "Escape")
 				}
 			case "AskUserQuestion":
-				// DoCancelAsk uses FindByMsgIDSnapshot internally
-				helpers.DoCancelAsk(
-					bot,
-					bs.PendingWait,
-					bs.NotifOpQueue,
-					func(text string) (*injector.TmuxTarget, error) {
-						return helpers.ExtractTmuxTargetFromText(text)
-					},
-					pwSnap.MsgID,
-				)
+				// CancelAskBySnapshot: send ESC + ResolveIfUnresolved + EditOrDefer for AskQ
+				helpers.CancelAskBySnapshot(bot, bs.PendingWait, bs.PendingMsgStore, notify.FormatPaneID, *pwSnap)
 			}
 		}
 		// Wait for pending cleanup
@@ -520,7 +507,7 @@ func buildSafeInjectParams(bs *types.BotState) helpers.SafeInjectTextParams {
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
-		NotifOpQueue:     bs.NotifOpQueue,
+		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, t)
 		},

@@ -20,13 +20,15 @@ import (
 
 // Callbacks holds cmd-level functions injected into hooks to avoid circular imports.
 type Callbacks struct {
-	ResolveChat              func(bs *types.BotState, tmuxTarget string) (*tele.Chat, string, int)
-	ProcessTranscriptUpdates func(bs *types.BotState, sessionID, transcriptPath string, isQuestion ...bool) string
-	SendEventNotification    func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int
-	TypingLog                func(format string, args ...interface{})
-	FlushInjectQueue         func(bs *types.BotState, tmuxTarget string)
-	CheckSessionVersion      func(bs *types.BotState, tmuxTarget string)
-	StreamFlush              func(bs *types.BotState, sessionID string, stop bool)
+	ResolveChat                  func(bs *types.BotState, tmuxTarget string) (*tele.Chat, string, int)
+	ProcessTranscriptUpdates     func(bs *types.BotState, sessionID, transcriptPath string, isQuestion ...bool) string
+	SendEventNotification        func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int
+	TypingLog                    func(format string, args ...interface{})
+	FlushInjectQueue             func(bs *types.BotState, tmuxTarget string)
+	CheckSessionVersion          func(bs *types.BotState, tmuxTarget string)
+	StreamFlush                  func(bs *types.BotState, sessionID string, stop bool)
+	StreamFlushAwaitNewText      func(bs *types.BotState, sessionID string)
+	StreamFlushAwaitToolBoundary func(bs *types.BotState, sessionID, promptID, toolUseID string) string
 }
 
 // GetHookSessionLock returns (or creates) the mutex for a session.
@@ -39,16 +41,31 @@ func GetHookSessionLock(bs *types.BotState, sessionID string) *sync.Mutex {
 // Used by Stop/PreToolUse/UserPromptSubmit/SessionEnd to signal CC has moved on.
 // Uses snapshots to avoid holding PendingWait's read lock while calling FreezeWaitEntryOnDesktop.
 // No Remove — live handler / sweep removes after delivery.
-func CancelPendingWaitBySession(bs *types.BotState, sessionID string) {
+//
+// Round 8: skipToolName/skipCanonicalInput/skipToolUseID identify the CALLER's own tool (PreToolUse passes
+// its tool). Under async hooks a tool's PermissionRequest /pending/connect can register its entry BEFORE the
+// tool's PreToolUse is processed on the FIFO — without the skip, PreToolUse would cancel the permission prompt
+// it is about to need. The skip entry is resolved with the same key FindMatch uses at the PostToolUse handler.
+// Non-tool callers (Stop/UserPromptSubmit/SessionEnd) pass empty strings = cancel everything (no skip).
+func CancelPendingWaitBySession(bs *types.BotState, sessionID, skipToolName, skipCanonicalInput, skipToolUseID string) {
 	if sessionID == "" {
 		return
+	}
+	skipUUID := ""
+	if skipToolName != "" || skipToolUseID != "" {
+		if m, ok := bs.PendingWait.FindMatch(sessionID, skipToolName, skipCanonicalInput, skipToolUseID); ok {
+			skipUUID = m.UUID
+		}
 	}
 	for _, snap := range bs.PendingWait.FindBySessionSnapshots(sessionID) {
 		if snap.Resolved {
 			continue
 		}
-		// FreezeWaitEntryOnDesktop handles ResolveIfUnresolved + TryEnqueue EDIT internally
-		helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.NotifOpQueue, snap, "⌨️ Answered on desktop")
+		if skipUUID != "" && snap.UUID == skipUUID {
+			continue // this tool's own pending entry — do not cancel it
+		}
+		// FreezeWaitEntryOnDesktop handles ResolveIfUnresolved + EditOrDefer internally
+		helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.PendingMsgStore, snap, "⌨️ Answered on desktop")
 		logger.Info(fmt.Sprintf("CancelPendingWaitBySession: uuid=%s session=%s", snap.UUID, sessionID))
 	}
 }
@@ -90,13 +107,13 @@ func parseEntryFields(entry *stores.PendingWaitEntry, raw json.RawMessage, p *he
 	entry.Questions = qMetas
 }
 
-// preparePendingMessage builds a NotifOp for a new pending entry. ZERO TG network I/O in this function.
-// The SendFunc closure performs: PreToolUse transcript update → main send → @-channel forwarding → SendResult.
-// The PostSend closure uses the captured sendFrame to write an "update" frame to the ndjson stream.
-func preparePendingMessage(bs *types.BotState, cb Callbacks, entry *stores.PendingWaitEntry, sendFrame func(any) error) (stores.NotifOp, error) {
+// preparePendingMessage builds a send closure for a new pending entry. ZERO TG network I/O in this function.
+// Returns a func() error that: executes the TG SEND → on success calls PendingMsgStore.SetAndDrain +
+// PendingWait.BackfillMsgID + sends "update" frame. On failure calls PendingMsgStore.Delete.
+func preparePendingMessage(bs *types.BotState, cb Callbacks, entry *stores.PendingWaitEntry, sendFrame func(any) error) (func() error, error) {
 	var p helpers.HookPayload
 	if err := json.Unmarshal(entry.Payload, &p); err != nil {
-		return stores.NotifOp{}, fmt.Errorf("unmarshal payload: %w", err)
+		return nil, fmt.Errorf("unmarshal payload: %w", err)
 	}
 	p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 	cwdForRoute := p.CWD
@@ -110,43 +127,43 @@ func preparePendingMessage(bs *types.BotState, cb Callbacks, entry *stores.Pendi
 	}
 	chat, chatID, topicID := cb.ResolveChat(bs, p.TmuxTarget)
 	if chat == nil {
-		return stores.NotifOp{}, fmt.Errorf("no chat for target %s", p.TmuxTarget)
+		return nil, fmt.Errorf("no chat for target %s", p.TmuxTarget)
 	}
 	capturedChat := chat
 	capturedChatID := chatID
 	capturedTopicID := topicID
 	capturedEntry := entry
 
-	op := stores.NotifOp{
-		UUID: entry.UUID,
-		SendFunc: func(frozen bool, frozenLabel string) stores.SendResult {
-			return executeSendPendingMessage(bs, cb, capturedEntry, capturedChat, capturedChatID, capturedTopicID, cwdForRoute, agentName, &p, frozen, frozenLabel)
-		},
-		PostSend: func(result stores.SendResult) {
-			if result.MainErr != nil {
-				return
-			}
-			// Backfill MsgID/ChatID/TopicID/MsgText into PendingWait under lock
-			bs.PendingWait.BackfillMsgID(capturedEntry.UUID, result.MsgID, result.ChatID, result.TopicID, result.MsgText)
-			// Send "update" frame to the ndjson stream
-			type updateMsg struct {
-				Type    string `json:"type"`
-				MsgID   int    `json:"msg_id"`
-				ChatID  int64  `json:"chat_id"`
-				TopicID int    `json:"topic_id"`
-				MsgText string `json:"msg_text,omitempty"`
-			}
-			if err := sendFrame(updateMsg{Type: "update", MsgID: result.MsgID, ChatID: result.ChatID, TopicID: result.TopicID, MsgText: result.MsgText}); err != nil {
-				logger.Debug(fmt.Sprintf("preparePendingMessage: sendFrame update failed uuid=%s err=%v", capturedEntry.UUID, err))
-			}
-		},
+	sendFn := func() error {
+		result := executeSendPendingMessage(bs, cb, capturedEntry, capturedChat, capturedChatID, capturedTopicID, cwdForRoute, agentName, &p)
+		if result.MainErr != nil {
+			// Send failed — mark closed so deferred EDITs are discarded
+			bs.PendingMsgStore.Delete(capturedEntry.UUID)
+			return result.MainErr
+		}
+		// Store TG coordinates in PendingMsgStore (drains any deferred EDIT)
+		bs.PendingMsgStore.SetAndDrain(capturedEntry.UUID, result.MsgID, result.ChatID, result.MsgText, result.TopicID)
+		// Backfill MsgID/ChatID/TopicID/MsgText into PendingWait for TG-button callback correlation
+		bs.PendingWait.BackfillMsgID(capturedEntry.UUID, result.MsgID, result.ChatID, result.TopicID, result.MsgText)
+		// Send "update" frame to the ndjson stream
+		type updateMsg struct {
+			Type    string `json:"type"`
+			MsgID   int    `json:"msg_id"`
+			ChatID  int64  `json:"chat_id"`
+			TopicID int    `json:"topic_id"`
+			MsgText string `json:"msg_text,omitempty"`
+		}
+		if err := sendFrame(updateMsg{Type: "update", MsgID: result.MsgID, ChatID: result.ChatID, TopicID: result.TopicID, MsgText: result.MsgText}); err != nil {
+			logger.Debug(fmt.Sprintf("preparePendingMessage: sendFrame update failed uuid=%s err=%v", capturedEntry.UUID, err))
+		}
+		return nil
 	}
-	return op, nil
+	return sendFn, nil
 }
 
 // executeSendPendingMessage performs the actual TG network I/O for sending the pending message.
-// Called from inside NotifOp.SendFunc (runs in op-queue worker goroutine).
-func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.PendingWaitEntry, chat *tele.Chat, chatID string, topicID int, cwdForRoute, agentName string, p *helpers.HookPayload, frozen bool, frozenLabel string) stores.SendResult {
+// Called from inside the send closure dispatched via SessionEvents.TryDispatchAsync.
+func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.PendingWaitEntry, chat *tele.Chat, chatID string, topicID int, cwdForRoute, agentName string, p *helpers.HookPayload) stores.SendResult {
 	chatIDInt, _ := strconv.ParseInt(chatID, 10, 64)
 	if p.AgentID == "" {
 		if p.Backend == "codex" {
@@ -156,7 +173,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 				logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", entry.UUID, chatIDInt))
 			}
 		} else {
-			cb.StreamFlush(bs, p.SessionID, false)
+			cb.StreamFlushAwaitNewText(bs, p.SessionID)
 		}
 	}
 	if p.ToolName == "AskUserQuestion" {
@@ -306,7 +323,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 						SessionState:     bs.SessionState,
 						HookSessionLocks: &bs.HookSessionLocks,
 						SessionEvents:    bs.SessionEvents,
-						NotifOpQueue:     bs.NotifOpQueue,
+						PendingMsgStore:  bs.PendingMsgStore,
 						ResolveChat: func(t string) (*tele.Chat, string, int) {
 							return cb.ResolveChat(bs, t)
 						},
@@ -474,7 +491,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			// Reconnect with live store entry — use snapshot to read MsgID safely
 			snap, snapOk := bs.PendingWait.GetSnapshot(uuid)
 			if snapOk && snap.MsgID == 0 {
-				if realMsgID, realChatID, realMsgText, ok := bs.NotifOpQueue.GetMsgID(uuid); ok && realMsgID != 0 {
+				if realMsgID, realChatID, realMsgText, _, ok := bs.PendingMsgStore.Get(uuid); ok && realMsgID != 0 {
 					// Backfill under lock so all readers see the updated value
 					bs.PendingWait.BackfillMsgID(uuid, realMsgID, realChatID, topicIDQ, realMsgText)
 					snap, _ = bs.PendingWait.GetSnapshot(uuid)
@@ -501,8 +518,8 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			if msgTextQ != "" {
 				entry.MsgText = msgTextQ
 			}
-			// Seed op-queue with known msgID BEFORE Register so any racing EDIT finds it ready
-			bs.NotifOpQueue.SeedReadyMsgID(uuid, msgIDQ, chatIDQ, entry.MsgText)
+			// Seed PendingMsgStore with known coords BEFORE Register so any racing EDIT finds them
+			bs.PendingMsgStore.SetAndDrain(uuid, msgIDQ, chatIDQ, entry.MsgText, topicIDQ)
 			bs.PendingWait.Register(entry)
 			logger.Info(fmt.Sprintf("hook reattached (restart): uuid=%s msg_id=%d", uuid, entry.MsgID))
 		} else {
@@ -518,20 +535,20 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			}
 			parseEntryFields(entry, raw, &p)
 			bs.PendingWait.Register(entry)
-			op, prepErr := preparePendingMessage(bs, cb, entry, sendFrame)
+			sendFn, prepErr := preparePendingMessage(bs, cb, entry, sendFrame)
 			if prepErr != nil {
 				logger.Error(fmt.Sprintf("pendingConnect: preparePendingMessage failed uuid=%s err=%v", uuid, prepErr))
 				bs.PendingWait.Remove(uuid)
 				http.Error(w, "failed to prepare TG message", 500)
 				return
 			}
-			if !bs.NotifOpQueue.TryEnqueue(op) {
-				logger.Error(fmt.Sprintf("pendingConnect: TryEnqueue SEND failed (queue full) uuid=%s", uuid))
-				bs.PendingWait.Remove(uuid)
-				http.Error(w, "op queue full", 503)
-				return
+			// Route SEND through per-session FIFO queue to preserve per-session ordering.
+			// Fall back to inline execution if the channel is full (ordering degraded in rare saturation).
+			if !bs.SessionEvents.TryDispatchAsync(p.SessionID, "send:pending", sendFn) {
+				logger.Info(fmt.Sprintf("pendingConnect: SessionEvents full, running send inline uuid=%s", uuid))
+				go sendFn()
 			}
-			logger.Info(fmt.Sprintf("hook connected: uuid=%s tool=%s (SEND enqueued)", uuid, p.ToolName))
+			logger.Info(fmt.Sprintf("hook connected: uuid=%s tool=%s (SEND dispatched)", uuid, p.ToolName))
 		}
 
 		// Deliver any terminal that arrived while no handler was live
@@ -560,7 +577,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			regTopicID = snap.TopicID
 		}
 		if regMsgID == 0 {
-			if qMsgID, qChatID, _, ok := bs.NotifOpQueue.GetMsgID(uuid); ok && qMsgID != 0 {
+			if qMsgID, qChatID, _, _, ok := bs.PendingMsgStore.Get(uuid); ok && qMsgID != 0 {
 				regMsgID = qMsgID
 				regChatID = qChatID
 			}
@@ -604,8 +621,8 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 				if !snapOk || waitSnap.Resolved {
 					return
 				}
-				// Hook stayed away — cancel via ResolveIfUnresolved + TryEnqueue EDIT
-				helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.NotifOpQueue, waitSnap, "❌ Cancelled")
+				// Hook stayed away — cancel via ResolveIfUnresolved + EditOrDefer
+				helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.PendingMsgStore, waitSnap, "❌ Cancelled")
 				bs.PendingWait.Remove(capturedUUID)
 				logger.Info(fmt.Sprintf("pendingConnect grace expired: cancelled uuid=%s", capturedUUID))
 			}()

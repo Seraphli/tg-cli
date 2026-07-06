@@ -35,7 +35,7 @@ func registerInjection(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
-		logger.Info(fmt.Sprintf("Inject API: target=%s text=%s", injector.FormatTarget(target), helpers.TruncateStr(req.Text, 200)))
+		logger.Info(fmt.Sprintf("Inject API: target=%s text=%s", injector.FormatTarget(target), req.Text))
 		if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, req.Text); err != nil {
 			logger.Error(fmt.Sprintf("Inject API failed: %v", err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -68,7 +68,7 @@ func registerInjection(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		tmuxStr := injector.FormatTarget(target)
-		logger.Info(fmt.Sprintf("Inject message API: target=%s text=%s image=%s", tmuxStr, helpers.TruncateStr(req.Text, 200), req.ImagePath))
+		logger.Info(fmt.Sprintf("Inject message API: target=%s text=%s image=%s", tmuxStr, req.Text, req.ImagePath))
 		if err := handlers.InjectMessage(bs, tmuxStr, req.Text, req.ImagePath); err != nil {
 			logger.Error(fmt.Sprintf("Inject message API failed: %v", err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)

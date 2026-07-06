@@ -4,11 +4,11 @@
     "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30}]}],
     "SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30}]}],
     "PermissionRequest": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
-    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483}]}],
-    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30}]}],
+    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 2147483, "async": true}]}],
+    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30, "async": true}]}],
     "PostToolUseFailure": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30}]}],
     "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 30, "async": true}]}],
-    "MessageDisplay": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 10, "async": true}]}]
+    "MessageDisplay": [{"matcher": "", "hooks": [{"type": "command", "command": "HOOK_CMD --backend cc", "timeout": 10}]}]
   },
   "permissions": {
     "allow": ["mcp__tg-cli__send_file", "Bash(tg-cli:*)", "Bash(./tg-cli:*)"]

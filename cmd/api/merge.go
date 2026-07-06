@@ -49,7 +49,7 @@ func registerMerge(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		bs.MergeBuffers.Add(key, req.Text)
-		logger.Info(fmt.Sprintf("Merge add via API: text=%s", helpers.TruncateStr(req.Text, 200)))
+		logger.Info(fmt.Sprintf("Merge add via API: text=%s", req.Text))
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/merge/submit", func(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +69,7 @@ func registerMerge(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		logger.Info(fmt.Sprintf("Merge submitted via API: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), helpers.TruncateStr(merged, 200)))
+		logger.Info(fmt.Sprintf("Merge submitted via API: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), merged))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "items": len(buf.Items)})
 	})

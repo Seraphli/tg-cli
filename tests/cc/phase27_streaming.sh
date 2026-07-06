@@ -285,3 +285,75 @@ if [ "$TC5_FOUND" = true ]; then
 else
   fail "TC5: Stream relabel ✅ not received within ${TIMEOUT}s"
 fi
+
+wait_for_idle
+
+# ============================================================
+# TC6: notification ordering regression (text → tool → text)
+# Regression test for the NotifOpQueue ordering fix.
+# Expect: Stream send/edit log line containing CATS_MARKER
+# appears BEFORE the ToolUse Notification sent line,
+# which appears BEFORE the Stream send/edit log line containing
+# DOGS_MARKER. This verifies the FIFO serialization of SEND ops
+# prevents the tool-call notification from leapfrogging the
+# pre-tool text chunk in Telegram delivery order.
+# ============================================================
+echo ""
+echo "  TC6: notification ordering regression (CATS_MARKER → ToolUse → DOGS_MARKER)"
+
+LOG_BEFORE_TC6=$(wc -l < "$LOG_FILE")
+pane_log "[streaming] TC6 BEFORE inject"
+# Prompt spells out exact ordered steps to prevent CC from batching:
+# Step 1: output text with CATS_MARKER (no tool yet)
+# Step 2: run bash echo to produce a ToolUse notification
+# Step 3: output text with DOGS_MARKER (after tool result)
+inject_prompt "Follow these steps exactly in order, one at a time:
+Step 1: Write exactly one sentence: The cats are here CATS_MARKER
+Step 2: Run the bash command: echo STREAM_TC6_TOOL
+Step 3: After you get the bash result, write exactly one sentence: The dogs are here DOGS_MARKER
+Do not combine steps or reorder them."
+pane_log "[streaming] TC6 AFTER inject"
+
+# Wait for Stream relabel ✅ (turn finalized after all three steps)
+ELAPSED=0
+TC6_FOUND=false
+while [ $ELAPSED -lt $TIMEOUT ]; do
+  if tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+    TC6_FOUND=true
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+  echo "  Waiting for TC6 Stream relabel ✅... ${ELAPSED}s / ${TIMEOUT}s"
+done
+pane_log "[streaming] TC6 AFTER relabel"
+
+if [ "$TC6_FOUND" = true ]; then
+  pass "TC6: Stream relabel ✅ received (text→tool→text turn finalized)"
+  TC6_LOGS=$(tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE")
+
+  # Assert the three required log lines are present, in order.
+  # Anchor the CATS/DOGS markers to the bot's "MessageDisplay delta:" log lines
+  # (one per delta, logged when the bot RECEIVES each text delta). This is the
+  # faithful test of Issue 1's async delta-receipt race: a correct (sync) build
+  # logs CATS delta < ToolUse notif < DOGS delta. The injected prompt also contains
+  # the marker strings, but it is logged under UserPromptSubmit (not MessageDisplay
+  # delta), so anchoring to "MessageDisplay delta:" excludes the prompt pollution.
+  CATS_LINE=$(awk '/MessageDisplay delta:.*CATS_MARKER/{print NR; exit}' <<< "$TC6_LOGS")
+  TOOLUSE_LINE=$(awk '/Notification sent.*ToolUse/{print NR; exit}' <<< "$TC6_LOGS")
+  DOGS_LINE=$(awk '/MessageDisplay delta:.*DOGS_MARKER/{print NR; exit}' <<< "$TC6_LOGS")
+
+  if [ -z "$CATS_LINE" ]; then
+    fail "TC6: CATS_MARKER not found in bot log (pre-tool text chunk missing)"
+  elif [ -z "$TOOLUSE_LINE" ]; then
+    fail "TC6: ToolUse Notification sent line not found in bot log (Bash tool notification missing)"
+  elif [ -z "$DOGS_LINE" ]; then
+    fail "TC6: DOGS_MARKER not found in bot log (post-tool text chunk missing)"
+  elif [ "$CATS_LINE" -lt "$TOOLUSE_LINE" ] && [ "$TOOLUSE_LINE" -lt "$DOGS_LINE" ]; then
+    pass "TC6: Correct ordering — CATS_MARKER (line $CATS_LINE) < ToolUse (line $TOOLUSE_LINE) < DOGS_MARKER (line $DOGS_LINE)"
+  else
+    fail "TC6: Ordering violated — CATS_MARKER=$CATS_LINE ToolUse=$TOOLUSE_LINE DOGS_MARKER=$DOGS_LINE (expected CATS < ToolUse < DOGS)"
+  fi
+else
+  fail "TC6: Stream relabel ✅ not received within ${TIMEOUT}s"
+fi

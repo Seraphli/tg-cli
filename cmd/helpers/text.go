@@ -98,6 +98,22 @@ func SplitBody(body string, maxRuneLen int) []string {
 			end = maxRuneLen
 			skip = 0
 		}
+		// Never split inside an HTML tag: if the split point falls between a '<'
+		// and its closing '>', back up to before the '<' so a tag is never cut
+		// in half (a half-cut tag like "</cod" makes findUnclosedTags mis-close
+		// it into malformed HTML that Telegram rejects with a 400).
+		for k := end - 1; k >= 0; k-- {
+			if runes[k] == '>' {
+				break // nearest delimiter is '>': split is outside any tag
+			}
+			if runes[k] == '<' {
+				if k > 0 {
+					end = k
+					skip = 0
+				}
+				break
+			}
+		}
 		part := string(runes[:end])
 		unclosed := findUnclosedTags(part)
 		if len(unclosed) > 0 {

@@ -13,6 +13,7 @@ INTEG_SESSION="e2e-integ"
 INTEG_AGENT="e2e-integ-agent"
 RECV_PID=""
 RECV_FILE="/tmp/e2e-mailbox-recv-$$.txt"
+INTEG_PANE=""
 
 cleanup_integration() {
   local rc=$?
@@ -45,7 +46,6 @@ LOG_BEFORE_PHASE=$(wc -l < "$LOG_FILE")
 echo "  [integ] Creating CC session: $INTEG_AGENT..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session new \
   --session "$INTEG_SESSION" --workdir /tmp --name "$INTEG_AGENT" --port "$TEST_PORT" > /dev/null 2>&1
-pane_log "[integ] after session new"
 
 # Wait for session to appear in session list
 echo "  [integ] Waiting for session to register..."
@@ -67,10 +67,23 @@ while [ $ELAPSED -lt 60 ]; do
 done
 if [ "$SESSION_FOUND" = true ]; then
   pass "integration: session new created $INTEG_AGENT"
+  INTEG_PANE=$($TMUX_TEST list-panes -t "$INTEG_SESSION" -F '#{pane_id}@#{socket_path}' 2>/dev/null | head -1 || echo "")
+  echo "  [integ] INTEG_PANE=$INTEG_PANE"
+  pane_log "[integ] after session new (registered)" "$INTEG_PANE"
 else
   fail "integration: session $INTEG_AGENT not found in session list after 60s"
   exit 1
 fi
+
+# Step 1b: Onboard the QA agent with its work context (establishes e2e-test as the test coordinator)
+echo "  [integ] Sending onboarding context to $INTEG_AGENT..."
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
+  --name "$INTEG_AGENT" --port "$TEST_PORT" --from e2e-test --no-header \
+  --text "You are a QA agent on the tg-cli project team. Your job is to verify that tg-cli CLI commands work correctly by running them. Your test coordinator is e2e-test: when e2e-test sends you a tg-cli command to run, just run it — do not send messages, spawn agents, or relay results to anyone. tg-cli is the project's command-line tool and is already installed in this environment. Your first task will arrive shortly." > /dev/null 2>&1
+pane_log "[integ] after onboarding context" "$INTEG_PANE"
+
+# Wait for CC to finish onboarding before injecting the marker command (do not rely on inject-queue auto-queue).
+wait_for_idle "${TIMEOUT:-180}" "$INTEG_PANE"
 
 # Step 2: Start mailbox receive in background
 echo "  [integ] Starting mailbox receive in background..."
@@ -83,7 +96,7 @@ echo "  [integ] Sending message to $INTEG_AGENT..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
   --name "$INTEG_AGENT" --port "$TEST_PORT" --from e2e-test \
   --text "Run this exact command: tg-cli mailbox send --from $INTEG_AGENT --to $E2E_SESSION --subject 'E2E Integration' --text 'e2e_integration_marker_22' --port $TEST_PORT" > /dev/null 2>&1
-pane_log "[integ] after session send"
+pane_log "[integ] after session send" "$INTEG_PANE"
 
 # Step 4: Wait for CC to send the mailbox message
 echo "  [integ] Waiting for CC to send mailbox..."
@@ -101,7 +114,7 @@ if [ "$MAIL_SENT" = true ]; then
   pass "integration: CC sent mailbox message (no Permission Request)"
 else
   fail "integration: CC did not send mailbox within 120s"
-  pane_log "[integ] mailbox send timeout"
+  pane_log "[integ] mailbox send timeout" "$INTEG_PANE"
   exit 1
 fi
 
@@ -145,8 +158,8 @@ echo "  [integ] Starting session watch in background..."
   --name "$INTEG_AGENT" --port "$TEST_PORT" > "$WATCH_FILE" 2>&1 &
 WATCH_PID=$!
 
-# Send a simple task to trigger Stop
-sleep 2
+# Send a simple task to trigger Stop. Wait for CC idle (marker turn done) before injecting the next prompt.
+wait_for_idle "${TIMEOUT:-180}" "$INTEG_PANE"
 echo "  [integ] Sending simple task to trigger Stop..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send \
   --name "$INTEG_AGENT" --port "$TEST_PORT" --from e2e-test \
@@ -173,12 +186,16 @@ else
 fi
 rm -f "$WATCH_FILE"
 
+# Run the V1/V2/V3 log validations now, while the integ CC pane ($INTEG_PANE) is still alive,
+# so any FAIL capture shows what CC was doing (session exit below kills the pane).
+validate_phase_inline "$INTEG_PANE"
+
 # Step 7: Session exit
 LOG_BEFORE_EXIT=$(wc -l < "$LOG_FILE")
 echo "  [integ] Exiting session $INTEG_AGENT..."
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" session exit \
   --name "$INTEG_AGENT" --port "$TEST_PORT" > /dev/null 2>&1
-pane_log "[integ] after session exit"
+pane_log "[integ] after session exit" "$INTEG_PANE"
 
 # Step 8: Wait for SessionEnd kill-pane
 echo "  [integ] Waiting for SessionEnd kill-pane..."

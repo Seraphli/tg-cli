@@ -126,7 +126,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 			if sent != nil {
 				sentMsgID = sent.ID
 			}
-			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), helpers.TruncateStr(body, 200)))
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), body))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
 		}
 	} else {
@@ -155,7 +155,7 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 				ContextUsedTokens: nd.ContextUsedTokens,
 				ContextWindowSize: nd.ContextWindowSize,
 			})
-			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), helpers.TruncateStr(body, 200)))
+			logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s (%d pages, msg_id=%d) body_len=%d body=%s", chatID, event, project, tmuxTarget, len(chunks), sent.ID, len([]rune(body)), body))
 			logger.Debug(fmt.Sprintf("TG message sent [%s] page=1/%d full_text:\n%s", event, len(chunks), text))
 		}
 	}
@@ -323,7 +323,7 @@ func flushInjectQueue(bs *BotState, tmuxTarget string) {
 			SessionState:     bs.SessionState,
 			HookSessionLocks: &bs.HookSessionLocks,
 			SessionEvents:    bs.SessionEvents,
-			NotifOpQueue:     bs.NotifOpQueue,
+			PendingMsgStore:  bs.PendingMsgStore,
 			ResolveChat: func(t string) (*tele.Chat, string, int) {
 				return resolveChat(bs, t)
 			},

@@ -36,7 +36,7 @@ func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit .
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
-		NotifOpQueue:     bs.NotifOpQueue,
+		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(target string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, target)
 		},
@@ -66,7 +66,7 @@ func recordPending(bs *types.BotState, tmuxTarget string, chatID int64, msgID in
 func handleStalePending(bs *types.BotState, uuid string) bool {
 	// With the wait store, stale = entry not in wait store
 	if _, ok := bs.PendingWait.Get(uuid); !ok {
-		helpers.CleanupPendingState(bs.Bot, bs.PendingWait, bs.NotifOpQueue, 0, uuid, "wait entry missing")
+		helpers.CleanupPendingState(bs.Bot, bs.PendingWait, bs.PendingMsgStore, 0, uuid, "wait entry missing")
 		return true
 	}
 	return false
@@ -74,14 +74,14 @@ func handleStalePending(bs *types.BotState, uuid string) bool {
 
 // doCancelPerm cancels a PermissionRequest (TG-button path — real msgID from callback).
 func doCancelPerm(bs *types.BotState, msgID int) string {
-	return helpers.DoCancelPerm(bs.Bot, bs.PendingWait, bs.NotifOpQueue, func(text string) (*injector.TmuxTarget, error) {
+	return helpers.DoCancelPerm(bs.Bot, bs.PendingWait, bs.PendingMsgStore, func(text string) (*injector.TmuxTarget, error) {
 		return helpers.ExtractTmuxTargetFromText(text)
 	}, msgID)
 }
 
 // doCancelAsk cancels an AskUserQuestion (TG-button path — real msgID from callback).
 func doCancelAsk(bs *types.BotState, msgID int) string {
-	return helpers.DoCancelAsk(bs.Bot, bs.PendingWait, bs.NotifOpQueue, func(text string) (*injector.TmuxTarget, error) {
+	return helpers.DoCancelAsk(bs.Bot, bs.PendingWait, bs.PendingMsgStore, func(text string) (*injector.TmuxTarget, error) {
 		return helpers.ExtractTmuxTargetFromText(text)
 	}, msgID)
 }
@@ -92,7 +92,7 @@ func doDecidePerm(bs *types.BotState, msgID int, decision string) (*helpers.Perm
 		bs.Bot,
 		bs.PendingWait,
 		bs.ReactionTracker,
-		bs.NotifOpQueue,
+		bs.PendingMsgStore,
 		func(target string) bool { return checkSessionAlive(bs, target) },
 		func(text string) (*injector.TmuxTarget, error) { return helpers.ExtractTmuxTargetFromText(text) },
 		msgID,
@@ -102,12 +102,12 @@ func doDecidePerm(bs *types.BotState, msgID int, decision string) (*helpers.Perm
 
 // doRespondAsk responds to AskUserQuestion (TG-button path — real msgID from callback).
 func doRespondAsk(bs *types.BotState, msgID int, answers map[string]string, frozenLabel string) error {
-	return helpers.DoRespondAsk(bs.Bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, answers, frozenLabel)
+	return helpers.DoRespondAsk(bs.Bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID, answers, frozenLabel)
 }
 
 // doChatAsk handles chat mode for AskUserQuestion (TG-button path — real msgID from callback).
 func doChatAsk(bs *types.BotState, msgID int) error {
-	return helpers.DoChatAsk(bs.Bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID)
+	return helpers.DoChatAsk(bs.Bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID)
 }
 
 // handlePermCommand handles /bot_perm_<cmd>.

@@ -650,7 +650,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			c.Respond(&tele.CallbackResponse{Text: "❌ Injection failed"})
 			return c.Edit(BuildMergeNotifyText(fmt.Sprintf("❌ Injection failed: %v", err), buf.Items), tele.ModeHTML)
 		}
-		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), helpers.TruncateStr(merged, 200)))
+		logger.Info(fmt.Sprintf("Merge submitted: target=%s items=%d text=%s", buf.TmuxTarget, len(buf.Items), merged))
 		recordPending(bs, buf.TmuxTarget, chatID, c.Message().ID)
 		c.Respond(&tele.CallbackResponse{Text: fmt.Sprintf("✅ Submitted %d messages", len(buf.Items))})
 		return c.Edit(BuildMergeNotifyText(fmt.Sprintf("✅ Submitted (%d messages)", len(buf.Items)), buf.Items), tele.ModeHTML)

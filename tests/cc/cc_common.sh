@@ -10,11 +10,25 @@ start_claude() {
   E2E_SESSION="$session_name"
   export E2E_SESSION
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
-  $TMUX_TEST new-session -d -s "$E2E_SESSION" -c "$CC_WORKDIR"
+  $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 -c "$CC_WORKDIR"
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
+  # Build the env prefix + configurable model (mirrors the CA E2E harness, commit 8440b2a): forward any
+  # of these provider/model env vars that are set, so the suite can run against an arbitrary
+  # Anthropic-compatible model. Values are shell-quoted (printf %q) so tokens/URLs with special chars
+  # cannot break or inject into the launch command.
+  local env_prefix="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
+  local _v
+  for _v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
+            ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+            ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
+    if [ -n "${!_v:-}" ]; then
+      env_prefix="${env_prefix} ${_v}=$(printf '%q' "${!_v}")"
+    fi
+  done
+  local model="${ANTHROPIC_MODEL:-sonnet}"
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
-    "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet $perm_flag --setting-sources user"
+    "$env_prefix claude --model $model $perm_flag --setting-sources user --no-chrome"
   sleep 1
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   echo "Waiting for Claude to start..."
@@ -112,6 +126,10 @@ _cc_phase_cleanup() {
     return $rc
   fi
   if [ $rc -eq 0 ]; then
+    # Run V1/V2/V3 log validations while the CC pane ($E2E_PANE) is still alive, before stop_claude
+    # kills it, so a FAIL capture shows what CC was doing. This is the shared "end of phase, before
+    # cleanup" point for all start_claude CC phases; it touches a flag so run_phase skips its fallback.
+    validate_phase_inline "${E2E_PANE:-}"
     if ! stop_claude "$_CC_PHASE_SESSION"; then
       echo "ERROR: _cc_phase_cleanup: graceful stop failed for $_CC_PHASE_SESSION"
       rc=1

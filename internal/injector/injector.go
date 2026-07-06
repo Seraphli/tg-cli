@@ -190,7 +190,7 @@ func FormatTarget(t TmuxTarget) string {
 
 // CreateSession creates a new tmux session with optional working directory.
 func CreateSession(name, workDir string) error {
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-s", name, "-x", "220", "-y", "50"}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}

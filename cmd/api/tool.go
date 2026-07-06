@@ -48,7 +48,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				if len(snap.Questions) > 0 {
 					answers[snap.Questions[0].QuestionText] = value
 				}
-				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, answers, "✅ Text answer"); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID, answers, "✅ Text answer"); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -59,12 +59,12 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 					http.Error(w, "not found", 404)
 					return
 				}
-				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, helpers.BuildAnswers(questions), ""); err != nil {
+				if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID, helpers.BuildAnswers(questions), ""); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			} else if action == "chat" {
-				if err := helpers.DoChatAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID); err != nil {
+				if err := helpers.DoChatAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID); err != nil {
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -100,7 +100,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 						}
 					}
 					if !hasSubmit {
-						if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.NotifOpQueue, msgID, helpers.BuildAnswers(questions), ""); err != nil {
+						if err := helpers.DoRespondAsk(bot, bs.PendingWait, bs.ReactionTracker, bs.PendingMsgStore, msgID, helpers.BuildAnswers(questions), ""); err != nil {
 							http.Error(w, err.Error(), 500)
 							return
 						}
@@ -132,7 +132,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		pwSnap, hasPending := bs.PendingWait.FindByTmuxTarget(target)
 		if hasPending && pwSnap.ToolName != "AskUserQuestion" {
 			// Cancel perm via snapshot then delayed inject
-			helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, notify.FormatPaneID, *pwSnap)
+			helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.PendingMsgStore, notify.FormatPaneID, *pwSnap)
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -142,7 +142,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				time.Sleep(3 * time.Second)
 				helpers.QueuedInject(bs.SessionEvents, bs.SessionState, t, text)
 			}()
-			logger.Info(fmt.Sprintf("Permission cancelled via group text API + delayed inject: target=%s text=%s", target, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("Permission cancelled via group text API + delayed inject: target=%s text=%s", target, text))
 			fmt.Fprintf(w, "cancelled+injected")
 			return
 		}
@@ -163,7 +163,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
 				return
 			}
-			logger.Info(fmt.Sprintf("Group text API injected: target=%s text=%s", target, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("Group text API injected: target=%s text=%s", target, text))
 			fmt.Fprintf(w, "injected")
 			return
 		}
@@ -171,7 +171,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		waitEntry, waitOk := bs.PendingWait.Get(pwSnap.UUID)
 		if !waitOk {
 			// Stale: wait entry missing, clean and inject
-			helpers.CleanupPendingState(bot, bs.PendingWait, bs.NotifOpQueue, pwSnap.MsgID, pwSnap.UUID, "wait entry missing")
+			helpers.CleanupPendingState(bot, bs.PendingWait, bs.PendingMsgStore, pwSnap.MsgID, pwSnap.UUID, "wait entry missing")
 			t, err := injector.ParseTarget(target)
 			if err != nil {
 				http.Error(w, "invalid target", 400)
@@ -181,7 +181,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, fmt.Sprintf("inject failed: %v", err), 500)
 				return
 			}
-			logger.Info(fmt.Sprintf("Group text API injected (stale): target=%s text=%s", target, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("Group text API injected (stale): target=%s text=%s", target, text))
 			fmt.Fprintf(w, "injected")
 			return
 		}
@@ -201,22 +201,17 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 			Output: ccOutput,
 		})
 		if won {
-			bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
-				Type:         stores.OpEDIT,
-				UUID:         capturedUUID,
-				FreezeLabel:  "✅ Text answer",
-				FrozenMarkup: frozenMarkup,
-				EditFunc: func(eID int, eChatID int64, editMsgText string) {
-					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-					_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
-					if err != nil {
-						logger.Error(fmt.Sprintf("group text API: AskQ EDIT failed msg_id=%d err=%v", eID, err))
-					} else {
-						logger.Info(fmt.Sprintf("group text API: AskQ EDIT completed msg_id=%d", eID))
-					}
-				},
+			capturedMarkup := frozenMarkup
+			bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+				_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("group text API: AskQ EDIT failed msg_id=%d err=%v", eID, err))
+				} else {
+					logger.Info(fmt.Sprintf("group text API: AskQ EDIT completed msg_id=%d", eID))
+				}
 			})
-			logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("AskUserQuestion resolved via group text API: uuid=%s text=%s", pwSnap.UUID, text))
 		}
 		fmt.Fprintf(w, "resolved")
 	})

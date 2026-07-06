@@ -237,9 +237,12 @@ else
   fail "executeLaunch done log with pane ID not found in bot log"
 fi
 pane_log "[bot_new] AFTER step 8: wait for executeLaunch done" "$BOT_PANE"
-NEW_PANE=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}' 2>/dev/null || echo "")
+NEW_PANE=$($TMUX_TEST list-panes -t "tg-cli" -F '#{pane_id}@#{socket_path}' 2>/dev/null || echo "")
 if [ -n "$NEW_PANE" ]; then
   pane_log "[bot_new] new CC pane after step 8" "$NEW_PANE"
 fi
 
 echo "  [bot_new] test complete."
+
+# Run V1/V2/V3 log validations while the launched CC pane ($NEW_PANE) is still alive (trap kills it below).
+validate_phase_inline "${NEW_PANE:-}"

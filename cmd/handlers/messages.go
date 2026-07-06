@@ -127,7 +127,7 @@ func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
 		logger.Error(fmt.Sprintf("Voice transcription failed: %v", err))
 		return "", fmt.Errorf("transcription failed: %w", err)
 	}
-	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, helpers.TruncateStr(text, 200)))
+	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, text))
 	return text, nil
 }
 
@@ -232,7 +232,7 @@ func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, sub
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
-		NotifOpQueue:     bs.NotifOpQueue,
+		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(target string) (*tele.Chat, string, int) {
 			return helpers.ResolveChat(bs.SessionState, target)
 		},
@@ -255,7 +255,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 			content = voicePrefix + " " + text
 		}
 		items, notifyMsgID, chatID, _ := bs.MergeBuffers.AddAndGetInfo(key, content)
-		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), helpers.TruncateStr(content, 200)))
+		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), content))
 		if isVoice {
 			bot.Reply(c.Message(), voicePrefix+" "+text)
 		}
@@ -359,7 +359,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		if err := InjectMessage(bs, tmuxStr, injectionText, imgPath); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
-		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
+		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, text))
 		return nil
 	}
 	replyTo := c.Message().ReplyTo
@@ -425,7 +425,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 					}
 					sendFeedback(tmuxStr)
 					InjectMessage(bs, tmuxStr, injectionText, imgPath)
-					logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, helpers.TruncateStr(text, 200)))
+					logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, text))
 				}
 			}
 			return nil
@@ -438,7 +438,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 			if err := InjectMessage(bs, snap.TmuxTarget, injectionText, imgPath); err != nil {
 				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
 			}
-			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, snap.TmuxTarget, isVoice, helpers.TruncateStr(text, 200)))
+			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, snap.TmuxTarget, isVoice, text))
 			return nil
 		}
 	}
@@ -460,7 +460,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	if err := InjectMessage(bs, injector.FormatTarget(target), injectionText, imgPath); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
-	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, helpers.TruncateStr(text, 200)))
+	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, text))
 	return nil
 }
 
@@ -581,7 +581,7 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 			}
 			helpers.RetrySend(bs.Bot, targetChat, targetMsg, opts...)
 		}
-		logger.Info(fmt.Sprintf("@ channel already open: %s -> %s message=%s", initiator, target, helpers.TruncateStr(message, 200)))
+		logger.Info(fmt.Sprintf("@ channel already open: %s -> %s message=%s", initiator, target, message))
 		// Auto-forward existing channel message to other open channels
 		otherTargets := bs.AtChannels.GetTargets(initiator)
 		for _, other := range otherTargets {

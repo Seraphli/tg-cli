@@ -250,12 +250,12 @@ func Register(bs *types.BotState) {
 						switch pwSnap.ToolName {
 						default:
 							// Cancel perm via snapshot then delayed inject (any non-AskQ tool is a PermReq)
-							helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, extractTarget, *pwSnap)
+							helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.PendingMsgStore, extractTarget, *pwSnap)
 							go func() {
 								time.Sleep(3 * time.Second)
 								helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text)
 							}()
-							logger.Info(fmt.Sprintf("Permission cancelled via CC command (reply) + delayed inject: target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+							logger.Info(fmt.Sprintf("Permission cancelled via CC command (reply) + delayed inject: target=%s text=%s", tmuxStr, text))
 							recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 							return nil
 						case "AskUserQuestion":
@@ -275,22 +275,17 @@ func Register(bs *types.BotState) {
 									Output: ccOutput,
 								})
 								if won {
-									bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
-										Type:         stores.OpEDIT,
-										UUID:         capturedUUID,
-										FreezeLabel:  "✅ Text answer",
-										FrozenMarkup: frozenMarkup,
-										EditFunc: func(eID int, eChatID int64, editMsgText string) {
-											editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-											_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
-											if err != nil {
-												logger.Error(fmt.Sprintf("CC command (reply): AskQ EDIT failed msg_id=%d err=%v", eID, err))
-											} else {
-												logger.Info(fmt.Sprintf("CC command (reply): AskQ EDIT completed msg_id=%d", eID))
-											}
-										},
+									capturedMarkup := frozenMarkup
+									bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
+										editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+										_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+										if err != nil {
+											logger.Error(fmt.Sprintf("CC command (reply): AskQ EDIT failed msg_id=%d err=%v", eID, err))
+										} else {
+											logger.Info(fmt.Sprintf("CC command (reply): AskQ EDIT completed msg_id=%d", eID))
+										}
 									})
-									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+									logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (reply): uuid=%s text=%s", pwSnap.UUID, text))
 								}
 							}
 							recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
@@ -326,12 +321,12 @@ func Register(bs *types.BotState) {
 					switch pwSnap.ToolName {
 					default:
 						// Cancel perm via snapshot then delayed inject (any non-AskQ tool is a PermReq)
-						helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.NotifOpQueue, extractTarget, *pwSnap)
+						helpers.CancelPermBySnapshot(bot, bs.PendingWait, bs.PendingMsgStore, extractTarget, *pwSnap)
 						go func() {
 							time.Sleep(3 * time.Second)
 							helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text)
 						}()
-						logger.Info(fmt.Sprintf("Permission cancelled via CC command (group) + delayed inject: target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+						logger.Info(fmt.Sprintf("Permission cancelled via CC command (group) + delayed inject: target=%s text=%s", tmuxStr, text))
 						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 						return nil
 					case "AskUserQuestion":
@@ -351,22 +346,17 @@ func Register(bs *types.BotState) {
 								Output: ccOutput,
 							})
 							if won {
-								bs.NotifOpQueue.TryEnqueue(stores.NotifOp{
-									Type:         stores.OpEDIT,
-									UUID:         capturedUUID,
-									FreezeLabel:  "✅ Text answer",
-									FrozenMarkup: frozenMarkup,
-									EditFunc: func(eID int, eChatID int64, editMsgText string) {
-										editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-										_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, frozenMarkup)
-										if err != nil {
-											logger.Error(fmt.Sprintf("CC command (group): AskQ EDIT failed msg_id=%d err=%v", eID, err))
-										} else {
-											logger.Info(fmt.Sprintf("CC command (group): AskQ EDIT completed msg_id=%d", eID))
-										}
-									},
+								capturedMarkup := frozenMarkup
+								bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
+									editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+									_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+									if err != nil {
+										logger.Error(fmt.Sprintf("CC command (group): AskQ EDIT failed msg_id=%d err=%v", eID, err))
+									} else {
+										logger.Info(fmt.Sprintf("CC command (group): AskQ EDIT completed msg_id=%d", eID))
+									}
 								})
-								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): uuid=%s text=%s", pwSnap.UUID, helpers.TruncateStr(text, 200)))
+								logger.Info(fmt.Sprintf("AskUserQuestion resolved via CC command (group): uuid=%s text=%s", pwSnap.UUID, text))
 							}
 						}
 						recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
@@ -376,7 +366,7 @@ func Register(bs *types.BotState) {
 				if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, text); err != nil {
 					return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 				}
-				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, helpers.TruncateStr(text, 200)))
+				logger.Info(fmt.Sprintf("Group quick reply (command): target=%s text=%s", tmuxStr, text))
 				recordPending(bs, tmuxStr, c.Message().Chat.ID, c.Message().ID)
 				return nil
 			}

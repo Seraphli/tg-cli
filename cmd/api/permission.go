@@ -20,7 +20,7 @@ func registerPermission(mux *http.ServeMux, bs *types.BotState) {
 			bs.Bot,
 			bs.PendingWait,
 			bs.ReactionTracker,
-			bs.NotifOpQueue,
+			bs.PendingMsgStore,
 			func(target string) bool {
 				return helpers.CheckSessionAlive(target, func(t string) {
 					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)

@@ -191,7 +191,7 @@ func registerAt(mux *http.ServeMux, bs *types.BotState) {
 		if isNew {
 			logger.Info(fmt.Sprintf("@ channel opened: %s → %s rounds=%d lines=%d isNew=true", req.Initiator, req.Target, req.Rounds, req.Lines))
 		} else {
-			logger.Info(fmt.Sprintf("@ channel opened: %s → %s isNew=false message=%s", req.Initiator, req.Target, helpers.TruncateStr(req.Message, 200)))
+			logger.Info(fmt.Sprintf("@ channel opened: %s → %s isNew=false message=%s", req.Initiator, req.Target, req.Message))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
@@ -298,7 +298,7 @@ func registerAt(mux *http.ServeMux, bs *types.BotState) {
 			helpers.SendPagedForward(bot, chat, targetHeader, content, bs.Pages, "", sendOpts...)
 		}
 
-		logger.Info(fmt.Sprintf("@ reply: from=%s to=%s text=%s", req.From, req.To, helpers.TruncateStr(req.Text, 200)))
+		logger.Info(fmt.Sprintf("@ reply: from=%s to=%s text=%s", req.From, req.To, req.Text))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})

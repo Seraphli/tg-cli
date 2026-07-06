@@ -117,7 +117,7 @@ func executePrintJob(job *stores.CronJob, bs *BotState) {
 	} else {
 		result = strings.TrimSpace(string(output))
 	}
-	logger.Info(fmt.Sprintf("Cron print job result: id=%s result=%s", job.ID[:8], helpers.TruncateStr(result, 200)))
+	logger.Info(fmt.Sprintf("Cron print job result: id=%s result=%s", job.ID[:8], result))
 	if strings.HasPrefix(strings.TrimSpace(result), "HEARTBEAT_OK") {
 		logger.Info(fmt.Sprintf("Cron heartbeat OK: id=%s", job.ID[:8]))
 		return
@@ -182,7 +182,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		SessionState:     bs.SessionState,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
-		NotifOpQueue:     bs.NotifOpQueue,
+		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
 			return resolveChat(bs, t)
 		},
@@ -193,7 +193,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.TmuxTarget)
 		return
 	}
-	logger.Info(fmt.Sprintf("Cron inject job: injected to '%s' target=%s text=%s", agentLabel, info.TmuxTarget, helpers.TruncateStr(job.Prompt, 200)))
+	logger.Info(fmt.Sprintf("Cron inject job: injected to '%s' target=%s text=%s", agentLabel, info.TmuxTarget, job.Prompt))
 	sendCronNotification(bs, fmt.Sprintf("%s\n\n✅ Injected → %s\n\n%s", cronNotifyHeader(job), agentLabel, job.Prompt), info.TmuxTarget)
 }
 

@@ -9,12 +9,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// changedHookEvents compares two hooks maps (event -> entry list) and returns the sorted list of
+// event names whose entries differ (added, removed, or modified). Used to report what an upgrade
+// actually changed instead of unconditionally claiming "installed".
+func changedHookEvents(oldHooks, newHooks map[string]interface{}) []string {
+	per := func(h map[string]interface{}) map[string]string {
+		out := make(map[string]string)
+		for ev, v := range h {
+			b, _ := json.Marshal(v)
+			out[ev] = string(b)
+		}
+		return out
+	}
+	o, n := per(oldHooks), per(newHooks)
+	seen := make(map[string]bool)
+	var changed []string
+	for ev, nv := range n {
+		seen[ev] = true
+		if o[ev] != nv {
+			changed = append(changed, ev)
+		}
+	}
+	for ev := range o {
+		if !seen[ev] {
+			changed = append(changed, ev)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}
 
 // availableTools is the list of tools that can trigger TG notifications.
 var availableTools = []string{
@@ -37,11 +68,11 @@ var cronSkillDoc []byte
 //go:embed commands/tg-cli/agent.md
 var agentSkillDoc []byte
 
-func applyClaudeSettingsMigrations(settings map[string]interface{}) bool {
-	changed := false
+func applyClaudeSettingsMigrations(settings map[string]interface{}) []string {
+	var changed []string
 	if v, ok := settings["skipAutoPermissionPrompt"]; !ok || v != true {
 		settings["skipAutoPermissionPrompt"] = true
-		changed = true
+		changed = append(changed, "skipAutoPermissionPrompt")
 	}
 	return changed
 }
@@ -62,14 +93,63 @@ func MigrateClaudeSettings(settingsPath string) error {
 	if settings == nil {
 		settings = make(map[string]interface{})
 	}
-	if !applyClaudeSettingsMigrations(settings) {
+	changedKeys := applyClaudeSettingsMigrations(settings)
+	if len(changedKeys) == 0 {
+		fmt.Println("Claude settings already up-to-date")
 		return nil
 	}
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsPath, out, 0644)
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		return err
+	}
+	fmt.Printf("Claude settings: updated %s\n", strings.Join(changedKeys, ", "))
+	return nil
+}
+
+// mergeCCHooks merges the embedded cc.json hook entries into settings["hooks"], replacing this
+// instance's tg-cli hook entries (matched by --config-dir per config.ConfigDir) while preserving
+// user-added non-tg-cli entries and other instances' tg-cli entries. Hooks only (not permissions/
+// statusLine). hookCommand is substituted for the HOOK_CMD placeholder.
+func mergeCCHooks(settings map[string]interface{}, hookCommand string) {
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		hooks = make(map[string]interface{})
+	}
+	ccTemplate := strings.ReplaceAll(string(ccConfigJSON), "HOOK_CMD", hookCommand)
+	var ccConfig map[string]interface{}
+	json.Unmarshal([]byte(ccTemplate), &ccConfig)
+	if ccHooks, ok := ccConfig["hooks"].(map[string]interface{}); ok {
+		for event, ourEntries := range ccHooks {
+			existing, _ := hooks[event].([]interface{})
+			filtered := []interface{}{}
+			for _, h := range existing {
+				hJSON, _ := json.Marshal(h)
+				hStr := string(hJSON)
+				if !strings.Contains(hStr, "tg-cli") {
+					filtered = append(filtered, h)
+					continue
+				}
+				if config.ConfigDir != "" {
+					if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
+						continue
+					}
+				} else {
+					if !strings.Contains(hStr, "--config-dir") {
+						continue
+					}
+				}
+				filtered = append(filtered, h)
+			}
+			if ourList, ok := ourEntries.([]interface{}); ok {
+				filtered = append(filtered, ourList...)
+			}
+			hooks[event] = filtered
+		}
+	}
+	settings["hooks"] = hooks
 }
 
 // InstallCodexHooks registers the tg-cli Codex hooks in CODEX_HOME/hooks.json and
@@ -98,6 +178,8 @@ func InstallCodexHooks(home, hookCommand string) error {
 	if codexHooks == nil {
 		codexHooks = make(map[string]interface{})
 	}
+	// Snapshot the existing hooks before merging so we can report what actually changed.
+	oldCodexHooksJSON, _ := json.Marshal(codexHooks["hooks"])
 	// Parse our template
 	var ourCodexHooks map[string]interface{}
 	json.Unmarshal([]byte(codexTemplate), &ourCodexHooks)
@@ -125,11 +207,23 @@ func InstallCodexHooks(home, hookCommand string) error {
 		}
 		codexHooks["hooks"] = existingHooksMap
 	}
+	newCodexHooksJSON, _ := json.Marshal(codexHooks["hooks"])
 	codexData, _ := json.MarshalIndent(codexHooks, "", "  ")
-	if err := os.WriteFile(codexHooksPath, codexData, 0644); err != nil {
-		return fmt.Errorf("write codex hooks: %w", err)
+	if string(oldCodexHooksJSON) == string(newCodexHooksJSON) {
+		fmt.Printf("Codex hooks already up-to-date (%s)\n", codexHooksPath)
+	} else {
+		if err := os.WriteFile(codexHooksPath, codexData, 0644); err != nil {
+			return fmt.Errorf("write codex hooks: %w", err)
+		}
+		var oldCH, newCH map[string]interface{}
+		json.Unmarshal(oldCodexHooksJSON, &oldCH)
+		json.Unmarshal(newCodexHooksJSON, &newCH)
+		if events := changedHookEvents(oldCH, newCH); len(events) > 0 {
+			fmt.Printf("Codex hooks updated (%s): %s\n", codexHooksPath, strings.Join(events, ", "))
+		} else {
+			fmt.Printf("Codex hooks updated (%s)\n", codexHooksPath)
+		}
 	}
-	fmt.Printf("Codex hooks installed to %s\n", codexHooksPath)
 	// Enable the stable `hooks` feature in config.toml. Codex renamed the old
 	// experimental `codex_hooks` flag to `hooks` (now stable, default-on).
 	// Remove any existing hooks / codex_hooks line at the line level (tolerant
@@ -149,6 +243,53 @@ func InstallCodexHooks(home, hookCommand string) error {
 			return fmt.Errorf("write codex config: %w", err)
 		}
 		fmt.Println("Codex hooks feature enabled in config.toml")
+	}
+	return nil
+}
+
+// InstallCCHooks syncs the tg-cli CC hooks from the embedded cc.json template into the given
+// Claude settings.json, replacing this instance's tg-cli hook entries while preserving user-added
+// and other-instance hooks. Idempotent. Reused by `tg-cli setup` (via mergeCCHooks) and
+// `tg-cli service upgrade` so the two stay consistent.
+func InstallCCHooks(settingsPath, hookCommand string) error {
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return fmt.Errorf("create settings dir: %w", err)
+	}
+	var settings map[string]interface{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("invalid JSON in %s: %w", settingsPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read settings %s: %w", settingsPath, err)
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+	// Snapshot the hooks before merging (mergeCCHooks mutates settings["hooks"] in place). Compare at
+	// the hooks level rather than the whole file: MarshalIndent would reformat unrelated keys, so a
+	// full-file byte compare would falsely read as "changed".
+	oldHooksJSON, _ := json.Marshal(settings["hooks"])
+	mergeCCHooks(settings, hookCommand)
+	newHooks, _ := settings["hooks"].(map[string]interface{})
+	newHooksJSON, _ := json.Marshal(newHooks)
+	if string(oldHooksJSON) == string(newHooksJSON) {
+		fmt.Printf("CC hooks already up-to-date (%s)\n", settingsPath)
+		return nil
+	}
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(settingsPath, out, 0644); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+	var oldHooks map[string]interface{}
+	json.Unmarshal(oldHooksJSON, &oldHooks)
+	if events := changedHookEvents(oldHooks, newHooks); len(events) > 0 {
+		fmt.Printf("CC hooks updated (%s): %s\n", settingsPath, strings.Join(events, ", "))
+	} else {
+		fmt.Printf("CC hooks updated (%s)\n", settingsPath)
 	}
 	return nil
 }
@@ -224,46 +365,45 @@ func runSetup(cmd *cobra.Command, args []string) {
 	if settings == nil {
 		settings = make(map[string]interface{})
 	}
-	hooks, ok := settings["hooks"].(map[string]interface{})
-	if !ok {
-		hooks = make(map[string]interface{})
-	}
-	// Parse CC hooks config template
+	// Parse CC hooks config template (needed for permissions/statusLine blocks below)
 	ccTemplate := strings.ReplaceAll(string(ccConfigJSON), "HOOK_CMD", hookCommand)
 	var ccConfig map[string]interface{}
 	json.Unmarshal([]byte(ccTemplate), &ccConfig)
-	// Merge hooks
-	if ccHooks, ok := ccConfig["hooks"].(map[string]interface{}); ok {
-		for event, ourEntries := range ccHooks {
-			existing, _ := hooks[event].([]interface{})
-			filtered := []interface{}{}
-			for _, h := range existing {
-				hJSON, _ := json.Marshal(h)
-				hStr := string(hJSON)
-				if !strings.Contains(hStr, "tg-cli") {
-					filtered = append(filtered, h)
-					continue
-				}
-				if config.ConfigDir != "" {
-					if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
-						continue
-					}
-				} else {
-					if !strings.Contains(hStr, "--config-dir") {
-						continue
-					}
-				}
-				filtered = append(filtered, h)
-			}
-			if !setupUninstallFlag {
-				if ourList, ok := ourEntries.([]interface{}); ok {
-					filtered = append(filtered, ourList...)
-				}
-			}
-			hooks[event] = filtered
+	// Merge hooks: install uses shared helper; uninstall removes this instance's tg-cli entries
+	if !setupUninstallFlag {
+		mergeCCHooks(settings, hookCommand)
+	} else {
+		hooks, ok := settings["hooks"].(map[string]interface{})
+		if !ok {
+			hooks = make(map[string]interface{})
 		}
+		if ccHooks, ok := ccConfig["hooks"].(map[string]interface{}); ok {
+			for event := range ccHooks {
+				existing, _ := hooks[event].([]interface{})
+				filtered := []interface{}{}
+				for _, h := range existing {
+					hJSON, _ := json.Marshal(h)
+					hStr := string(hJSON)
+					if !strings.Contains(hStr, "tg-cli") {
+						filtered = append(filtered, h)
+						continue
+					}
+					if config.ConfigDir != "" {
+						if strings.Contains(hStr, "--config-dir "+config.ConfigDir) {
+							continue
+						}
+					} else {
+						if !strings.Contains(hStr, "--config-dir") {
+							continue
+						}
+					}
+					filtered = append(filtered, h)
+				}
+				hooks[event] = filtered
+			}
+		}
+		settings["hooks"] = hooks
 	}
-	settings["hooks"] = hooks
 	// Manage permissions
 	if ccPerms, ok := ccConfig["permissions"].(map[string]interface{}); ok {
 		if allowPerms, ok := ccPerms["allow"].([]interface{}); ok && len(allowPerms) > 0 {

@@ -455,7 +455,7 @@ if [ "$AQCANCEL_FOUND" = true ] && [ -n "$AQCANCEL_UUID" ]; then
   ELAPSED=0
   AQCANCEL_LOGGED=false
   while [ $ELAPSED -lt $TIMEOUT ]; do
-    if tail -n +"$((LOG_BEFORE_AQCANCEL + 1))" "$LOG_FILE" | grep "AskUserQuestion cancelled: msg_id=" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_AQCANCEL + 1))" "$LOG_FILE" | grep "Permission cancelled: msg_id=.*tool=AskUserQuestion" > /dev/null 2>&1; then
       AQCANCEL_LOGGED=true
       break
     fi

@@ -17,14 +17,14 @@ import (
 // ErrInjectNotConfirmed is returned when inject confirmation fails (CapturePane miss + channel timeout).
 var ErrInjectNotConfirmed = fmt.Errorf("inject not confirmed")
 
-// DoRespondAsk responds to AskUserQuestion: resolve via ResolveIfUnresolved + TryEnqueue EDIT.
+// DoRespondAsk responds to AskUserQuestion: resolve via ResolveIfUnresolved + EditOrDefer.
 // Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
-// EditFunc uses worker-provided msgID and chatID parameters.
+// EditFunc uses PendingMsgStore-provided msgID and chatID parameters.
 func DoRespondAsk(
 	bot *tele.Bot,
 	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
-	opQueue *stores.NotifOpQueue,
+	pendingMsgStore *stores.PendingMsgStore,
 	msgID int,
 	answers map[string]string,
 	frozenLabel string,
@@ -55,22 +55,17 @@ func DoRespondAsk(
 	if !won {
 		return nil
 	}
-	if frozenMarkup != nil && opQueue != nil {
+	if frozenMarkup != nil && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
-		opQueue.TryEnqueue(stores.NotifOp{
-			Type:         stores.OpEDIT,
-			UUID:         uuid,
-			FreezeLabel:  frozenLabel,
-			FrozenMarkup: capturedMarkup,
-			EditFunc: func(eID int, chatID int64, editMsgText string) {
-				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
-				if err != nil {
-					logger.Error(fmt.Sprintf("DoRespondAsk: EDIT failed msg_id=%d err=%v", eID, err))
-				} else {
-					logger.Info(fmt.Sprintf("DoRespondAsk: EDIT completed msg_id=%d", eID))
-				}
-			},
+		capturedLabel := frozenLabel
+		pendingMsgStore.EditOrDefer(uuid, func(eID int, chatID int64, editMsgText string, topicID int) {
+			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
+			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("DoRespondAsk: EDIT failed msg_id=%d label=%s err=%v", eID, capturedLabel, err))
+			} else {
+				logger.Info(fmt.Sprintf("DoRespondAsk: EDIT completed msg_id=%d label=%s", eID, capturedLabel))
+			}
 		})
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
@@ -81,13 +76,13 @@ func DoRespondAsk(
 	return nil
 }
 
-// DoCancelAsk cancels an AskUserQuestion: ResolveIfUnresolved + ESC + TryEnqueue EDIT.
+// DoCancelAsk cancels an AskUserQuestion: ResolveIfUnresolved + ESC + EditOrDefer.
 // Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
-// EditFunc uses worker-provided msgID and chatID parameters.
+// EditFunc uses PendingMsgStore-provided msgID and chatID parameters.
 func DoCancelAsk(
 	bot *tele.Bot,
 	pendingWait *stores.PendingWaitStore,
-	opQueue *stores.NotifOpQueue,
+	pendingMsgStore *stores.PendingMsgStore,
 	extractTarget func(string) (*injector.TmuxTarget, error),
 	msgID int,
 ) string {
@@ -109,22 +104,16 @@ func DoCancelAsk(
 	}
 	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{Type: "cancel"})
 	if won && frozenMarkup != nil {
-		if opQueue != nil {
+		if pendingMsgStore != nil {
 			capturedMarkup := frozenMarkup
-			opQueue.TryEnqueue(stores.NotifOp{
-				Type:         stores.OpEDIT,
-				UUID:         uuid,
-				FreezeLabel:  "❌ Cancelled",
-				FrozenMarkup: capturedMarkup,
-				EditFunc: func(eID int, eChatID int64, editMsgText string) {
-					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-					_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
-					if err != nil {
-						logger.Error(fmt.Sprintf("DoCancelAsk: EDIT failed msg_id=%d err=%v", eID, err))
-					} else {
-						logger.Info(fmt.Sprintf("DoCancelAsk: EDIT completed msg_id=%d", eID))
-					}
-				},
+			pendingMsgStore.EditOrDefer(uuid, func(eID int, eChatID int64, editMsgText string, topicID int) {
+				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
+				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				if err != nil {
+					logger.Error(fmt.Sprintf("DoCancelAsk: EDIT failed msg_id=%d err=%v", eID, err))
+				} else {
+					logger.Info(fmt.Sprintf("DoCancelAsk: EDIT completed msg_id=%d", eID))
+				}
 			})
 		} else {
 			editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
@@ -135,14 +124,14 @@ func DoCancelAsk(
 	return uuid
 }
 
-// DoChatAsk handles chat mode for AskUserQuestion: ResolveIfUnresolved + TryEnqueue EDIT.
+// DoChatAsk handles chat mode for AskUserQuestion: ResolveIfUnresolved + EditOrDefer.
 // Uses FindByMsgIDSnapshot (TG-button path — safe because msgID is real Telegram callback ID).
-// EditFunc uses worker-provided msgID and chatID parameters.
+// EditFunc uses PendingMsgStore-provided msgID and chatID parameters.
 func DoChatAsk(
 	bot *tele.Bot,
 	pendingWait *stores.PendingWaitStore,
 	reactionTracker *stores.ReactionTrackerStore,
-	opQueue *stores.NotifOpQueue,
+	pendingMsgStore *stores.PendingMsgStore,
 	msgID int,
 ) error {
 	snap, ok := pendingWait.FindByMsgIDSnapshot(msgID)
@@ -172,22 +161,16 @@ func DoChatAsk(
 	if !won {
 		return nil
 	}
-	if frozenMarkup != nil && opQueue != nil {
+	if frozenMarkup != nil && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
-		opQueue.TryEnqueue(stores.NotifOp{
-			Type:         stores.OpEDIT,
-			UUID:         uuid,
-			FreezeLabel:  "💬 Chat mode selected",
-			FrozenMarkup: capturedMarkup,
-			EditFunc: func(eID int, chatID int64, editMsgText string) {
-				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
-				if err != nil {
-					logger.Error(fmt.Sprintf("DoChatAsk: EDIT failed msg_id=%d err=%v", eID, err))
-				} else {
-					logger.Info(fmt.Sprintf("DoChatAsk: EDIT completed msg_id=%d", eID))
-				}
-			},
+		pendingMsgStore.EditOrDefer(uuid, func(eID int, chatID int64, editMsgText string, topicID int) {
+			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
+			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("DoChatAsk: EDIT failed msg_id=%d err=%v", eID, err))
+			} else {
+				logger.Info(fmt.Sprintf("DoChatAsk: EDIT completed msg_id=%d", eID))
+			}
 		})
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
@@ -222,7 +205,7 @@ type SafeInjectTextParams struct {
 	SessionState     *stores.SessionStateStore
 	HookSessionLocks *sync.Map
 	SessionEvents    *stores.SessionEventStore
-	NotifOpQueue     *stores.NotifOpQueue // Op queue for async EDIT after AskQ answer
+	PendingMsgStore  *stores.PendingMsgStore // Deferred EDIT after AskQ answer
 	ResolveChat      func(string) (*tele.Chat, string, int)
 	FormatPaneID     func(string) string
 	Force            bool   // Skip busy check — used by flushInjectQueue
@@ -362,8 +345,9 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 				if sessionMu != nil {
 					sessionMu.Unlock()
 				}
-				// TryEnqueue EDIT with pre-built frozen markup using snap.Questions
-				if p.NotifOpQueue != nil {
+				// EditOrDefer EDIT with pre-built frozen markup using snap.Questions.
+				// Runs inline (SessionEvents is nil inside safe-inject phase) because we set p.SessionEvents=nil above.
+				if p.PendingMsgStore != nil {
 					var frozenMarkup *tele.ReplyMarkup
 					if len(pwSnap.Questions) > 0 {
 						frozenMarkup = BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply")
@@ -371,20 +355,14 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 					if frozenMarkup != nil {
 						capturedMarkup := frozenMarkup
 						capturedUUID := pwSnap.UUID
-						p.NotifOpQueue.TryEnqueue(stores.NotifOp{
-							Type:         stores.OpEDIT,
-							UUID:         capturedUUID,
-							FreezeLabel:  "✅ Custom reply",
-							FrozenMarkup: capturedMarkup,
-							EditFunc: func(msgID int, chatID int64, editMsgText string) {
-								editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-								_, err := RetryFreezeEdit(p.Bot, editMsg, editMsgText, capturedMarkup)
-								if err != nil {
-									logger.Error(fmt.Sprintf("safeInjectText: AskQ EDIT failed msg_id=%d err=%v", msgID, err))
-								} else {
-									logger.Info(fmt.Sprintf("safeInjectText: AskQ EDIT completed msg_id=%d", msgID))
-								}
-							},
+						p.PendingMsgStore.EditOrDefer(capturedUUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
+							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+							_, err := RetryFreezeEdit(p.Bot, editMsg, editMsgText, capturedMarkup)
+							if err != nil {
+								logger.Error(fmt.Sprintf("safeInjectText: AskQ EDIT failed msg_id=%d err=%v", msgID, err))
+							} else {
+								logger.Info(fmt.Sprintf("safeInjectText: AskQ EDIT completed msg_id=%d", msgID))
+							}
 						})
 					}
 				} else {
@@ -394,7 +372,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 						RetryFreezeEdit(p.Bot, editMsg, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"))
 					}
 				}
-				logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion uuid=%s text=%s", pwSnap.UUID, TruncateStr(text, 200)))
+				logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion uuid=%s text=%s", pwSnap.UUID, text))
 				ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmAskAnswered, text)
 				return injectResult{ch: ch, confirmType: "askq"}
 			}
@@ -412,7 +390,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		}
 		p.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
 		count := p.InjectQueue.ItemCount(tmuxTarget)
-		logger.Info(fmt.Sprintf("safeInjectText: PermissionRequest pending, queued for target=%s count=%d text=%s", tmuxTarget, count, TruncateStr(text, 200)))
+		logger.Info(fmt.Sprintf("safeInjectText: PermissionRequest pending, queued for target=%s count=%d text=%s", tmuxTarget, count, text))
 		if chat != nil {
 			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
 			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
@@ -434,7 +412,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if sessionMu != nil { sessionMu.Unlock() }
 		return injectResult{}
 	}
-	logger.Info(fmt.Sprintf("safeInjectText: direct inject path, target=%s text=%s", tmuxTarget, TruncateStr(text, 200)))
+	logger.Info(fmt.Sprintf("safeInjectText: direct inject path, target=%s text=%s", tmuxTarget, text))
 	// Wait for Stop event cooldown before injecting
 	p.StopCooldown.WaitIfNeeded(tmuxTarget, 3*time.Second)
 	shouldSubmit := len(submit) == 0 || submit[0]

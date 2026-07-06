@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,6 +92,16 @@ func copyFile(src, dst string) error {
 	out.Close()
 	os.Chmod(tmp, 0755)
 	return os.Rename(tmp, dst)
+}
+
+// fileMD5 returns the hex md5 of the file at path, or "unknown" if it cannot be read.
+func fileMD5(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	sum := md5.Sum(data)
+	return hex.EncodeToString(sum[:])
 }
 
 var serviceInstallCmd = &cobra.Command{
@@ -182,7 +194,8 @@ var serviceUpgradeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		tmpBin := binPath + ".build"
-		fmt.Println("Building...")
+		cwd, _ := os.Getwd()
+		fmt.Printf("Building from %s...\n", cwd)
 		buildCmd := exec.Command("go", "build", "-o", tmpBin)
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
@@ -191,6 +204,10 @@ var serviceUpgradeCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Build failed: %v\n", err)
 			os.Exit(1)
 		}
+		// md5 of the old installed binary (read before stop/replace) and the freshly built one
+		oldMD5 := fileMD5(binPath)
+		newMD5 := fileMD5(tmpBin)
+		fmt.Printf("Built binary md5: %s\n", newMD5)
 		// Read old version from installed binary
 		oldVersion := "unknown"
 		if oldVerBytes, err := exec.Command(binPath, "--version").Output(); err == nil {
@@ -210,14 +227,14 @@ var serviceUpgradeCmd = &cobra.Command{
 		// Read existing unit file to preserve debug flag
 		unitData, _ := os.ReadFile(unitFilePath())
 		hasDebug := strings.Contains(string(unitData), "--debug")
-		fmt.Printf("Upgrading from v%s to v%s\n", oldVersion, newVersion)
+		fmt.Printf("Upgrading from v%s (md5: %s) to v%s (md5: %s)\n", oldVersion, oldMD5, newVersion, newMD5)
 		// Write upgrade sentinel before stopping so hooks can detect the in-progress state
 		flagPath := config.UpgradeFlagPath()
 		os.WriteFile(flagPath, []byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
 		defer os.Remove(flagPath)
 		fmt.Println("Stopping service...")
 		systemctl("stop", serviceName())
-		fmt.Printf("Replacing %s...\n", binPath)
+		fmt.Printf("Replacing %s (md5: %s → %s)...\n", binPath, oldMD5, newMD5)
 		if err := os.Rename(tmpBin, binPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to replace binary: %v\n", err)
 			os.Exit(1)
@@ -248,8 +265,6 @@ var serviceUpgradeCmd = &cobra.Command{
 		claudeSettingsPath := filepath.Join(home, ".claude", "settings.json")
 		if err := MigrateClaudeSettings(claudeSettingsPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: settings migration failed: %v\n", err)
-		} else {
-			fmt.Println("Claude settings migrated.")
 		}
 		// Apply Codex hook setup/migration so upgrades stay consistent with `tg-cli setup`
 		// (codex_hooks -> hooks in CODEX_HOME/config.toml + re-register hooks.json).
@@ -263,18 +278,21 @@ var serviceUpgradeCmd = &cobra.Command{
 		}
 		if err := InstallCodexHooks(home, hookCommand); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: codex hooks migration failed: %v\n", err)
-		} else {
-			fmt.Println("Codex hooks migrated.")
+		}
+		if err := InstallCCHooks(claudeSettingsPath, hookCommand); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: CC hooks sync failed: %v\n", err)
 		}
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
-		// Poll /session/idle until the new bot is ready (up to 30s), then remove upgrade flag
-		idleURL := fmt.Sprintf("http://127.0.0.1:%d/session/idle", port)
+		// Poll /health until the new bot is ready (up to 30s), then remove upgrade flag
+		healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
-			resp, err := http.Get(idleURL)
+			resp, err := http.Get(healthURL)
 			if err == nil && resp.StatusCode == 200 {
+				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				fmt.Printf("Service healthy: %s\n", strings.TrimSpace(string(body)))
 				break
 			}
 			if resp != nil {

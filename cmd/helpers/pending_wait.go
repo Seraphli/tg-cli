@@ -41,8 +41,8 @@ func FormatAnswers(answers map[string]string) string {
 
 // FreezeWaitEntryOnDesktop edits the stored TG message for a pending entry using the bot.
 // Takes an EntrySnapshot to avoid data races. Uses ResolveIfUnresolved for atomic CAS,
-// then TryEnqueue EDIT to avoid data race B3. EditFunc uses worker-provided msgID/chatID.
-func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStore, opQueue *stores.NotifOpQueue, snap stores.EntrySnapshot, label string) {
+// then EditOrDefer to freeze TG buttons. EditFunc uses PendingMsgStore-provided msgID/chatID.
+func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStore, pendingMsgStore *stores.PendingMsgStore, snap stores.EntrySnapshot, label string) {
 	// Pre-build frozen markup BEFORE CAS (data race B3 prevention)
 	var frozenMarkup *tele.ReplyMarkup
 	if snap.ToolName == "AskUserQuestion" {
@@ -60,19 +60,13 @@ func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStor
 	}
 	capturedLabel := label
 	capturedMarkup := frozenMarkup
-	opQueue.TryEnqueue(stores.NotifOp{
-		Type:         stores.OpEDIT,
-		UUID:         snap.UUID,
-		FreezeLabel:  capturedLabel,
-		FrozenMarkup: capturedMarkup,
-		EditFunc: func(msgID int, chatID int64, editMsgText string) {
-			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
-			if err != nil {
-				logger.Error(fmt.Sprintf("FreezeWaitEntry: EDIT failed msg_id=%d label=%s err=%v", msgID, capturedLabel, err))
-			} else {
-				logger.Info(fmt.Sprintf("FreezeWaitEntry: EDIT completed msg_id=%d label=%s", msgID, capturedLabel))
-			}
-		},
+	pendingMsgStore.EditOrDefer(snap.UUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
+		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+		_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+		if err != nil {
+			logger.Error(fmt.Sprintf("FreezeWaitEntry: EDIT failed msg_id=%d label=%s err=%v", msgID, capturedLabel, err))
+		} else {
+			logger.Info(fmt.Sprintf("FreezeWaitEntry: EDIT completed msg_id=%d label=%s", msgID, capturedLabel))
+		}
 	})
 }

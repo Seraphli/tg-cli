@@ -34,7 +34,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 		// Strip socket suffix so internal stores use bare pane IDs (e.g. %859 not %859@/tmp/...)
 		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
 		if event == "MessageDisplay" {
-			handleMessageDisplay(bs, cb, p)
+			handleMessageDisplay(bs, cb, p, raw)
 			w.WriteHeader(200)
 			return
 		}
@@ -46,6 +46,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			if p.Backend != "" {
 				bs.SessionState.SetBackend(p.SessionID, p.Backend)
 			}
+		}
+		// Round 8: record a PostToolUse/PostToolUseFailure arrival OFF-FIFO, BEFORE Dispatch (which blocks
+		// until the job runs — session_queue.go). Under async hooks the PostToolUse POST can land while a
+		// PreToolUse FIFO job is still in its bounded wait (queued behind it); the wait polls this signal (B2)
+		// and PreToolUse applies the buffered result edit inline when PostToolUse beat it.
+		if (event == "PostToolUse" || event == "PostToolUseFailure") && p.ToolUseID != "" {
+			bs.Streams.SetPostToolArrived(p.SessionID, p.ToolUseID, p.ToolName, p.ToolResponse)
 		}
 		// Dispatch hook handling through the session event queue to serialize per-session events
 		bs.SessionEvents.Dispatch(p.SessionID, "hook:"+event, func() error {
@@ -154,7 +161,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								SessionState:     bs.SessionState,
 								HookSessionLocks: &bs.HookSessionLocks,
 								SessionEvents:    bs.SessionEvents,
-								NotifOpQueue:     bs.NotifOpQueue,
+								PendingMsgStore:  bs.PendingMsgStore,
 								ResolveChat: func(t string) (*tele.Chat, string, int) {
 									return cb.ResolveChat(bs, t)
 								},
@@ -167,8 +174,8 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				bs.Pages.CleanupSession(p.SessionID)
 				bs.CompactTools.Reset(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
-				CancelPendingWaitBySession(bs, p.SessionID) // cancel (resolve + push cancel) any still-pending hook waits for this session
-				bs.Streams.EndSession(p.SessionID) // TTL tombstone; straggler deltas after SessionEnd are dropped
+				CancelPendingWaitBySession(bs, p.SessionID, "", "", "") // cancel (resolve + push cancel) any still-pending hook waits for this session
+				bs.Streams.EndSession(p.SessionID)                      // TTL tombstone; straggler deltas after SessionEnd are dropped
 				logger.Info(fmt.Sprintf("Cleaned up session %s", p.SessionID))
 				// Signal pending upgrade restart
 				if ch, ok := bs.PendingUpgradeRestart.Load(p.TmuxTarget); ok {
@@ -189,7 +196,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 			case "UserPromptSubmit":
-				CancelPendingWaitBySession(bs, p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID, "", "", "")
 				if p.SessionID != "" && p.TranscriptPath != "" {
 					lock := bs.SessionCounts.GetLock(p.SessionID)
 					lock.Lock()
@@ -209,12 +216,12 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					cb.TypingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 					bs.StopCooldown.Record(p.TmuxTarget)
 				}
-				CancelPendingWaitBySession(bs, p.SessionID)
+				CancelPendingWaitBySession(bs, p.SessionID, "", "", "")
 				if chat != nil {
 					body := p.LastAssistantMessage
 					// Auto-handle rate-limit popup
 					if strings.HasPrefix(strings.TrimSpace(body), "You've hit your limit · resets") {
-						logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s body=%s", p.SessionID, p.TmuxTarget, helpers.TruncateStr(body, 200)))
+						logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s body=%s", p.SessionID, p.TmuxTarget, body))
 						if p.TmuxTarget != "" {
 							t, parseErr := injector.ParseTarget(p.TmuxTarget)
 							if parseErr == nil {
@@ -273,7 +280,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							content := strings.Join(contentLines, "\n")
 							instructions := fmt.Sprintf("`%s` completed a task. Below is the progress update.", hookAgentName)
 							msg := helpers.BuildAtMsg(hookAgentName, peerName, instructions, content)
-							logger.Info(fmt.Sprintf("@ forward: %s → %s body_len=%d content=%s", hookAgentName, peerName, len(content), helpers.TruncateStr(content, 200)))
+							logger.Info(fmt.Sprintf("@ forward: %s → %s body_len=%d content=%s", hookAgentName, peerName, len(content), content))
 							go func(target, text, instr, cnt, peer string) {
 								p := helpers.SafeInjectTextParams{
 									Bot:              bs.Bot,
@@ -285,7 +292,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 									SessionState:     bs.SessionState,
 									HookSessionLocks: &bs.HookSessionLocks,
 									SessionEvents:    bs.SessionEvents,
-									NotifOpQueue:     bs.NotifOpQueue,
+									PendingMsgStore:  bs.PendingMsgStore,
 									ResolveChat: func(t string) (*tele.Chat, string, int) {
 										return cb.ResolveChat(bs, t)
 									},
@@ -308,7 +315,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						Event:   "Stop",
 						Agent:   hookAgentName,
 						Summary: "Task completed",
-						Detail:  helpers.TruncateStr(body, 500),
+						Detail:  body,
 					})
 					bs.CompactTools.Reset(p.SessionID)
 					// Flush queued inject items after Stop via async dispatch to avoid blocking hook response
@@ -328,7 +335,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					bs.HookRunning.SetRunning(p.TmuxTarget)
 					cb.TypingLog("state: event=PreToolUse target=%s state=running", p.TmuxTarget)
 				}
-				CancelPendingWaitBySession(bs, p.SessionID)
+				// Round 8: skip THIS tool's own pending entry (async can register its PermissionRequest before
+				// this PreToolUse runs on the FIFO) — cancel only stale entries from earlier tools.
+				CancelPendingWaitBySession(bs, p.SessionID, p.ToolName, helpers.CanonicalToolInput(p.ToolInput), p.ToolUseID)
 				// Skip TG notifications for subagent tool calls
 				if p.AgentID != "" {
 					break
@@ -357,7 +366,24 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				} else {
 					if p.ToolName != "AskUserQuestion" {
-						cb.StreamFlush(bs, p.SessionID, false)
+						// Round 8: bounded per-session wait — B1 pre-tool text (same prompt_id) / B2 PostToolUse
+						// already arrived / B3 1.5s timeout — always flushes before we send the tool notification
+						// below. Replaces the old StreamFlush, which returned instantly on a stale complete bubble
+						// and let the tool notification overtake the pre-tool text.
+						waitBranch := cb.StreamFlushAwaitToolBoundary(bs, p.SessionID, p.PromptID, p.ToolUseID)
+						if waitBranch != "b1_prompt_text" {
+							// No fresh pre-tool text was flushed first (fast tool / timeout). Record a mark so a
+							// same-prompt MessageDisplay-final arriving shortly AFTER this notification is logged
+							// as a residual inversion (observability; sizes the accepted trade-off).
+							bs.Streams.SetLastToolNotify(p.SessionID, p.PromptID, waitBranch)
+						}
+					}
+					// Reset the compact-tool cycle if new assistant text arrived since the last tool.
+					// Serialized on the SessionEvents FIFO worker with the Get/Store below — this is the fix
+					// for the off-FIFO Reset-vs-Store race (a Reset from handleMessageDisplay could previously
+					// run before an in-flight Store and get clobbered). Mirrors the codex body!="" reset above.
+					if bs.Streams.TakeNewTextSinceTool(p.SessionID) {
+						bs.CompactTools.Reset(p.SessionID)
 					}
 				}
 				// Send tool detail notification if configured
@@ -462,6 +488,19 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							msgID := cb.SendEventNotification(bs, toolChat, toolChatID, p.SessionID, "ToolUse", p.Project, cwdForRoute, p.TmuxTarget, toolText, p.ToolName, hookAgentName, toolTopicID)
 							if p.ToolUseID != "" && msgID > 0 {
 								bs.ToolUseMsgs.Store(p.ToolUseID, &stores.ToolUseMsgEntry{MsgID: msgID, ChatID: toolChat.ID, TopicID: toolTopicID, Body: toolText})
+								// Round 8: if PostToolUse already arrived (fast tool beat PreToolUse under async),
+								// apply its buffered result edit inline — exactly once (the later PostToolUse FIFO
+								// job then finds ToolUseMsgs gone and no-ops).
+								if sig, pok := bs.Streams.GetPostToolArrived(p.SessionID, p.ToolUseID); pok {
+									inlEntry := &stores.ToolUseMsgEntry{MsgID: msgID, ChatID: toolChat.ID, TopicID: toolTopicID, Body: toolText}
+									rl := applyToolResultEdit(bs, p.SessionID, p.Project, cwdForRoute, p.TmuxTarget, p.ToolName, hookAgentName, p.Backend, inlEntry, sig.Response)
+									bs.ToolUseMsgs.Delete(p.ToolUseID)
+									bs.Streams.ConsumePostToolArrived(p.SessionID, p.ToolUseID)
+									// Canonical marker (same as the PostToolUse handler) so any consumer of "PostToolUse: updated
+									// msg_id=" sees the result edit regardless of which path applied it — the async race between
+									// PreToolUse and PostToolUse is non-deterministic. "(inline)" annotates the B2 fast-tool path.
+									logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d (inline: PostToolUse beat PreToolUse under async)", msgID, p.ToolName, p.ToolUseID, rl))
+								}
 							}
 						}
 					}
@@ -479,7 +518,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 					// FreezeWaitEntryOnDesktop uses ResolveIfUnresolved + TryEnqueue EDIT
 					if snap, ok := bs.PendingWait.GetSnapshot(waitEntry.UUID); ok {
-						helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.NotifOpQueue, snap, label)
+						helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.PendingMsgStore, snap, label)
 					}
 					logger.Info(fmt.Sprintf("Resolved on desktop: uuid=%s tool=%s tool_use_id=%q label=%s", waitEntry.UUID, waitEntry.ToolName, p.ToolUseID, label))
 				}
@@ -498,61 +537,15 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				}
 				entry, ok := bs.ToolUseMsgs.Get(p.ToolUseID)
 				if !ok {
-					logger.Debug(fmt.Sprintf("PostToolUse: no stored msg for tool_use_id=%s", p.ToolUseID))
+					// Round 8 (countable Info): under async, PostToolUse can beat PreToolUse — the PreToolUse
+					// inline path handles the result edit, so a miss here is expected, not an error.
+					logger.Info(fmt.Sprintf("PostToolUse: no stored msg (PreToolUse not yet stored / applied inline) tool_use_id=%s", p.ToolUseID))
 					break
 				}
 				bs.ToolUseMsgs.Delete(p.ToolUseID)
-				resultText := notify.BuildToolResultText(p.ToolName, p.ToolResponse)
-				combinedBody := entry.Body + "\n\n" + resultText
-				postBackend := "cc"
-				if p.Backend != "" {
-					postBackend = p.Backend
-				}
-				nd := notify.NotificationData{
-					Event: "ToolUse", Project: p.Project, CWD: cwdForRoute,
-					TmuxTarget: p.TmuxTarget, ToolName: p.ToolName,
-					AgentName: hookAgentName, Backend: postBackend,
-					CLICommand: helpers.GetPaneCLICommand(p.TmuxTarget),
-					ContextUsedPct: -1,
-				}
-				if usedPct, usedTokens, windowSize, ctxOk := helpers.ReadContextUsage(p.SessionID); ctxOk {
-					nd.ContextUsedPct = usedPct
-					nd.ContextUsedTokens = usedTokens
-					nd.ContextWindowSize = windowSize
-				}
-				postCfg, _ := config.LoadAppConfig()
-				paginationMax := 4000
-				if postCfg.PaginationMaxRunes > 0 {
-					paginationMax = postCfg.PaginationMaxRunes
-				}
-				headerLen := notify.HeaderLen(nd)
-				maxBodyRunes := paginationMax - headerLen - 100
-				chunks := helpers.SplitBody(combinedBody, maxBodyRunes)
-				editChat := &tele.Chat{ID: entry.ChatID}
-				editMsg := &tele.Message{ID: entry.MsgID, Chat: editChat}
-				if len(chunks) <= 1 {
-					nd.Body = combinedBody
-					fullText := notify.BuildNotificationText(nd)
-					helpers.RetryEdit(bs.Bot, editMsg, fullText, tele.ModeHTML)
-				} else {
-					nd.Body = chunks[0]
-					nd.Page = 1
-					nd.TotalPages = len(chunks)
-					fullText := notify.BuildNotificationText(nd)
-					kb := helpers.BuildPageKeyboard(1, len(chunks))
-					helpers.RetryEdit(bs.Bot, editMsg, fullText, kb, tele.ModeHTML)
-					bs.Pages.Store(entry.MsgID, p.SessionID, &stores.PageEntry{
-						Chunks: chunks, Event: "ToolUse", Project: p.Project,
-						CWD: cwdForRoute, TmuxTarget: p.TmuxTarget, ChatID: entry.ChatID,
-						CLICommand:        nd.CLICommand,
-						AgentName:         nd.AgentName,
-						Backend:           nd.Backend,
-						ContextUsedPct:    nd.ContextUsedPct,
-						ContextUsedTokens: nd.ContextUsedTokens,
-						ContextWindowSize: nd.ContextWindowSize,
-					})
-				}
-				logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d", entry.MsgID, p.ToolName, p.ToolUseID, len(resultText)))
+				bs.Streams.ConsumePostToolArrived(p.SessionID, p.ToolUseID) // idempotent if the inline path already consumed it
+				rl := applyToolResultEdit(bs, p.SessionID, p.Project, cwdForRoute, p.TmuxTarget, p.ToolName, hookAgentName, p.Backend, entry, p.ToolResponse)
+				logger.Info(fmt.Sprintf("PostToolUse: updated msg_id=%d tool=%s tool_use_id=%s result_len=%d", entry.MsgID, p.ToolName, p.ToolUseID, rl))
 				// Flush inject queue after tool execution via async dispatch to avoid blocking hook response
 				if p.ToolName != "AskUserQuestion" && p.TmuxTarget != "" {
 					if bs.InjectQueue.HasItems(p.TmuxTarget) {
@@ -584,13 +577,27 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 
 // handleMessageDisplay handles the MessageDisplay fast-path: appends delta to the stream store and returns
 // immediately — no Telegram I/O inline. The background worker and boundary flushes handle the I/O.
-func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPayload) {
+func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPayload, raw []byte) {
+	// Log the full raw payload for MessageDisplay too (the /hook/ handler's Info raw-payload log is skipped
+	// for MessageDisplay via the early return). Debug level — MessageDisplay is per-delta/high-frequency, so
+	// this is gated behind --debug to avoid Info spam in production.
+	logger.Debug(fmt.Sprintf("Raw hook payload [MessageDisplay]: %s", string(raw)))
 	if p.SessionID == "" || p.MessageID == "" {
 		return // final-with-empty-delta IS still recorded
 	}
+	// Round 8 observability: if a same-prompt MessageDisplay-final lands shortly AFTER a B2/B3 tool
+	// notification was sent (no pre-tool text was flushed first), log it as a residual inversion.
+	if p.Final && p.PromptID != "" {
+		if mark, ok := bs.Streams.GetLastToolNotify(p.SessionID); ok && mark.PromptID == p.PromptID {
+			if d := time.Since(mark.At); d < 3*time.Second {
+				logger.Info(fmt.Sprintf("late MD after tool notify: session=%s prompt=%s branch=%s delay_ms=%d (tool notification preceded this pre-tool text)",
+					p.SessionID, p.PromptID, mark.Branch, d.Milliseconds()))
+			}
+		}
+	}
 	logDelta := func() {
 		logger.Info(fmt.Sprintf("MessageDisplay delta: session=%s message_id=%s turn_id=%s index=%d final=%v delta=%s",
-			p.SessionID, p.MessageID, p.TurnID, p.Index, p.Final, helpers.TruncateStr(p.Delta, 200)))
+			p.SessionID, p.MessageID, p.TurnID, p.Index, p.Final, p.Delta))
 	}
 	// Hot path: existing message_id → append without resolving chat (no LoadCredentials per delta)
 	if handled, dropped := bs.Streams.AppendExisting(p.SessionID, p.MessageID, p.TurnID, p.Index, p.Delta, p.Final); handled {
@@ -622,9 +629,13 @@ func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPaylo
 			backend = info.Backend
 		}
 	}
-	if bs.Streams.AppendDelta(p.SessionID, stores.StreamMeta{
+	// AppendDelta sets the per-session NewTextSinceTool flag when this is a new message bubble; the compact-tool
+	// cycle reset now happens IN the PreToolUse FIFO handler (TakeNewTextSinceTool → Reset), serialized with
+	// Get/Store — no off-FIFO CompactTools.Reset here (that was the race).
+	bs.Streams.AppendDelta(p.SessionID, stores.StreamMeta{
 		MessageID:  p.MessageID,
 		TurnID:     p.TurnID,
+		PromptID:   p.PromptID,
 		TmuxTarget: p.TmuxTarget,
 		Project:    p.Project,
 		CWD:        cwd,
@@ -632,8 +643,59 @@ func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPaylo
 		Backend:    backend,
 		ChatID:     chat.ID,
 		TopicID:    topicID,
-	}, p.Index, p.Delta, p.Final) {
-		bs.CompactTools.Reset(p.SessionID) // new assistant text resets compact-tool cycle
-	}
+	}, p.Index, p.Delta, p.Final)
 	logDelta()
+}
+
+// applyToolResultEdit edits an existing standard-mode tool-notification message (entry.MsgID) to append the
+// tool result. Shared by the PostToolUse handler and the PreToolUse inline path (round 8: when a fast tool's
+// PostToolUse beat PreToolUse under async, PreToolUse applies the buffered result inline). Returns result len.
+func applyToolResultEdit(bs *types.BotState, sessionID, project, cwd, tmuxTarget, toolName, agentName, backend string, entry *stores.ToolUseMsgEntry, toolResponse json.RawMessage) int {
+	resultText := notify.BuildToolResultText(toolName, toolResponse)
+	combinedBody := entry.Body + "\n\n" + resultText
+	postBackend := "cc"
+	if backend != "" {
+		postBackend = backend
+	}
+	nd := notify.NotificationData{
+		Event: "ToolUse", Project: project, CWD: cwd,
+		TmuxTarget: tmuxTarget, ToolName: toolName,
+		AgentName: agentName, Backend: postBackend,
+		CLICommand:     helpers.GetPaneCLICommand(tmuxTarget),
+		ContextUsedPct: -1,
+	}
+	if usedPct, usedTokens, windowSize, ctxOk := helpers.ReadContextUsage(sessionID); ctxOk {
+		nd.ContextUsedPct = usedPct
+		nd.ContextUsedTokens = usedTokens
+		nd.ContextWindowSize = windowSize
+	}
+	postCfg, _ := config.LoadAppConfig()
+	paginationMax := 4000
+	if postCfg.PaginationMaxRunes > 0 {
+		paginationMax = postCfg.PaginationMaxRunes
+	}
+	maxBodyRunes := paginationMax - notify.HeaderLen(nd) - 100
+	chunks := helpers.SplitBody(combinedBody, maxBodyRunes)
+	editMsg := &tele.Message{ID: entry.MsgID, Chat: &tele.Chat{ID: entry.ChatID}}
+	if len(chunks) <= 1 {
+		nd.Body = combinedBody
+		helpers.RetryEdit(bs.Bot, editMsg, notify.BuildNotificationText(nd), tele.ModeHTML)
+	} else {
+		nd.Body = chunks[0]
+		nd.Page = 1
+		nd.TotalPages = len(chunks)
+		kb := helpers.BuildPageKeyboard(1, len(chunks))
+		helpers.RetryEdit(bs.Bot, editMsg, notify.BuildNotificationText(nd), kb, tele.ModeHTML)
+		bs.Pages.Store(entry.MsgID, sessionID, &stores.PageEntry{
+			Chunks: chunks, Event: "ToolUse", Project: project,
+			CWD: cwd, TmuxTarget: tmuxTarget, ChatID: entry.ChatID,
+			CLICommand:        nd.CLICommand,
+			AgentName:         nd.AgentName,
+			Backend:           nd.Backend,
+			ContextUsedPct:    nd.ContextUsedPct,
+			ContextUsedTokens: nd.ContextUsedTokens,
+			ContextWindowSize: nd.ContextWindowSize,
+		})
+	}
+	return len(resultText)
 }

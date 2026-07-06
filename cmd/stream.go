@@ -67,13 +67,37 @@ func drainUntilComplete(bs *BotState, sessionID string, timeout time.Duration) {
 	for {
 		has, complete := bs.Streams.LastStatus(sessionID)
 		if has && complete {
+			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=text_complete", sessionID, time.Since(start).Milliseconds()))
 			return
 		}
 		elapsed := time.Since(start)
 		if !has && elapsed >= grace {
+			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=no_text_within_grace grace=%dms", sessionID, elapsed.Milliseconds(), grace.Milliseconds()))
 			return // no streamed text before this boundary
 		}
 		if elapsed >= timeout {
+			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=incomplete_within_timeout has=%v", sessionID, elapsed.Milliseconds(), has))
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// drainForNewFinal waits until a NEW text bubble completes (CompleteCount rises above the count captured at
+// entry) or the timeout elapses. Used at the AskUserQuestion boundary so the text bubble preceding the
+// question is flushed before the question is sent. Unlike drainUntilComplete it does NOT check whether the
+// current last bubble is already complete — a stale prior bubble would make that return instantly and miss a
+// bubble arriving over the off-FIFO MessageDisplay channel just before the boundary.
+func drainForNewFinal(bs *BotState, sessionID string, timeout time.Duration) {
+	start := time.Now()
+	baseline := bs.Streams.CompleteCount(sessionID)
+	for {
+		if bs.Streams.CompleteCount(sessionID) > baseline {
+			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=new_final_arrived baseline=%d", sessionID, time.Since(start).Milliseconds(), baseline))
+			return
+		}
+		if time.Since(start) >= timeout {
+			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=timeout_no_new_final baseline=%d", sessionID, time.Since(start).Milliseconds(), baseline))
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -251,6 +275,61 @@ func streamFlush(bs *types.BotState, sessionID string, stop bool) {
 	}
 }
 
+// streamFlushAwaitNewText is the Callbacks.StreamFlushAwaitNewText implementation: the AskUserQuestion
+// boundary flush. It waits for a NEW completed text bubble (drainForNewFinal) so the text preceding the
+// question is sent before the question, then flushes. Scoped to AskQ; tool/Stop boundaries use streamFlush.
+func streamFlushAwaitNewText(bs *types.BotState, sessionID string) {
+	drainForNewFinal(bs, sessionID, 1000*time.Millisecond)
+	flushSession(bs, sessionID, false, false)
+}
+
+// streamFlushAwaitToolBoundary is the Callbacks.StreamFlushAwaitToolBoundary implementation: the PreToolUse
+// (non-AskUserQuestion) boundary flush under async hooks. It waits up to a 1.5s budget for the FIRST of:
+//
+//	B1 — a MessageDisplay-final for the same prompt_id becomes complete-but-unsealed (the pre-tool text),
+//	B2 — the PostToolUse for this tool_use_id has already arrived (fast tool; off-FIFO signal), or
+//	B3 — the budget elapses.
+//
+// In EVERY branch it flushes BEFORE returning, so the caller sends the tool notification AFTER any pre-tool
+// text (flush-before-notify). Returns the resolving branch label for observability. No transcript read.
+func streamFlushAwaitToolBoundary(bs *types.BotState, sessionID, promptID, toolUseID string) string {
+	const budget = 1500 * time.Millisecond
+	// b2Floor delays the B2 (PostToolUse-already-arrived) resolution until 500ms in, so a slow-to-arrive
+	// pre-tool text bubble has time to land and win via B1 (flush-before-notify) instead of the tool
+	// notification firing first. B1 is NOT floored — it still wins at any time, including inside the floor.
+	const b2Floor = 500 * time.Millisecond
+	start := time.Now()
+	qd := bs.SessionEvents.QueueDepth(sessionID)
+	branch := "b3_timeout"
+	for {
+		// B1 — the pre-tool text for this prompt is complete-but-unsealed. Wins at ANY time (incl. inside the
+		// 500ms floor), so text is always flushed before the tool notification.
+		if promptID != "" && bs.Streams.HasCompleteUnsealedForPrompt(sessionID, promptID) {
+			branch = "b1_prompt_text"
+			break
+		}
+		// B2 — the PostToolUse for this tool_use_id already arrived (fast/textless tool). Gated by the 500ms
+		// floor AND the in-flight rule: do NOT fire while pre-tool text is still streaming for this prompt
+		// (deltas without a final) — keep waiting for its final (B1) up to the full budget instead.
+		if toolUseID != "" && time.Since(start) >= b2Floor {
+			if _, ok := bs.Streams.GetPostToolArrived(sessionID, toolUseID); ok && !bs.Streams.HasInflightForPrompt(sessionID, promptID) {
+				branch = "b2_posttool"
+				break
+			}
+		}
+		// B3 — budget elapsed.
+		if time.Since(start) >= budget {
+			branch = "b3_timeout"
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	logger.Info(fmt.Sprintf("tool-boundary wait done: session=%s prompt=%s tool_use_id=%s branch=%s elapsed=%dms queue_depth=%d",
+		sessionID, promptID, toolUseID, branch, time.Since(start).Milliseconds(), qd))
+	flushSession(bs, sessionID, false, false)
+	return branch
+}
+
 // startStreamLoop is the background worker that throttle-flushes dirty sessions.
 func startStreamLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -266,9 +345,16 @@ func startStreamLoop(ctx context.Context, bs *BotState) {
 				throttle = time.Duration(cfg.StreamThrottleMs) * time.Millisecond
 			}
 			for _, sid := range bs.Streams.DueSessions(throttle) {
-				flushSession(bs, sid, false, false)
+				// Serialize the ticker flush onto the per-session SessionEvents worker so it is FIFO-ordered
+				// with hook-event sends (e.g. PreToolUse tool notifications). DispatchAsync (guaranteed enqueue)
+				// not TryDispatchAsync — an inline fallback would reintroduce the text-overtakes-tool race.
+				bs.SessionEvents.DispatchAsync(sid, "flush:stream-ticker", func() error {
+					flushSession(bs, sid, false, false)
+					return nil
+				})
 			}
-			bs.Streams.SweepEnded(60 * time.Second) // drop ended-session tombstones older than TTL
+			bs.Streams.SweepEnded(60 * time.Second)           // drop ended-session tombstones older than TTL
+			bs.Streams.SweepPostToolArrived(30 * time.Second) // drop never-consumed PostToolUse (B2) signals
 		}
 	}
 }

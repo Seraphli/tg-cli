@@ -54,3 +54,37 @@ func TestSplitBodyEmptyTagNoPanic(t *testing.T) {
 		t.Errorf("SplitBody altered content:\n got: %q\nwant: %q", joined, body)
 	}
 }
+
+// TestSplitBodyNoSplitInsideTag verifies SplitBody never cuts inside an HTML
+// tag. With a hard split (no newlines) landing inside "</code>", the old code
+// produced malformed HTML like "</cod</code>" that Telegram rejected (400).
+func TestSplitBodyNoSplitInsideTag(t *testing.T) {
+	body := "<code>" + strings.Repeat("X", 12) + "</code>" // 25 runes
+	chunks := SplitBody(body, 23)                           // hard split lands at "...<code>XXXXXXXXXXXX</cod"
+	if len(chunks) < 2 {
+		t.Fatalf("expected the body to be split into >=2 chunks, got %d: %q", len(chunks), chunks)
+	}
+	xCount := 0
+	for i, c := range chunks {
+		if strings.Contains(c, "</cod</code>") {
+			t.Errorf("chunk %d contains malformed tag %q: %q", i, "</cod</code>", c)
+		}
+		// No truncated tag: every '<' must have a '>' after it in the chunk.
+		for off := 0; off < len(c); off++ {
+			if c[off] == '<' {
+				if !strings.Contains(c[off:], ">") {
+					t.Errorf("chunk %d has a truncated tag (a '<' with no later '>'): %q", i, c)
+					break
+				}
+			}
+		}
+		// Each chunk must be self-balanced (SplitBody closes any unclosed tag).
+		if got := findUnclosedTags(c); !slices.Equal(got, nil) {
+			t.Errorf("chunk %d has unclosed tags %v: %q", i, got, c)
+		}
+		xCount += strings.Count(c, "X")
+	}
+	if xCount != 12 {
+		t.Errorf("content not preserved: total X = %d, want 12 (chunks=%q)", xCount, chunks)
+	}
+}

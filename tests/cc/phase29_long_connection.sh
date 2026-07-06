@@ -132,7 +132,7 @@ echo "  TC2: AskUserQuestion answered in TUI → PostToolUse freeze with actual 
 LOG_BEFORE_TC2=$(wc -l < "$LOG_FILE")
 
 pane_log "[tc2] BEFORE AskUserQuestion prompt"
-inject_prompt "Use the AskUserQuestion tool with header 'TC29_TC2' and exactly two options: 'Yes_29' (description: 'Affirmative'), 'No_29' (description: 'Negative'). Question: 'Please choose one.' Select whichever option you prefer WITHOUT waiting for user input — call the tool, pick the first option immediately in the same turn."
+inject_prompt "Use the AskUserQuestion tool with header 'TC29_TC2' and exactly two options: 'Yes_29' (description: 'Affirmative'), 'No_29' (description: 'Negative'). Question: 'Please choose one.' Call the tool and wait for the user to answer."
 pane_log "[tc2] AFTER AskUserQuestion prompt inject"
 
 # Wait for AskUserQuestion sent in log
@@ -156,18 +156,24 @@ pane_log "[tc2] AFTER AQ detected"
 if [ "$TC2_AQ_FOUND" = "true" ] && [ -n "$TC2_AQ_MSG_ID" ]; then
   pass "TC2: AskUserQuestion sent (msg_id=$TC2_AQ_MSG_ID uuid=$TC2_AQ_UUID)"
 
-  # Respond via /tool/respond to simulate TUI answer selection
-  pane_log "[tc2] BEFORE tool/respond API call"
-  RESPOND_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/tool/respond?msg_id=$TC2_AQ_MSG_ID&tool=AskUserQuestion&question=0&option=0")
-  pane_log "[tc2] AFTER tool/respond API call"
+  # Answer the AskUserQuestion IN the CC TUI (select the highlighted first option), not via API.
+  # This exercises the real PostToolUse → FreezeWaitEntryOnDesktop path.
+  pane_log "[tc2] BEFORE TUI answer (send Enter)"
+  $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
+  pane_log "[tc2] AFTER TUI answer"
 
-  # Wait for PostToolUse correlation → FreezeWaitEntry or Resolved on desktop
+  # Wait for PostToolUse correlation → FreezeWaitEntry: EDIT completed
   ELAPSED=0
   TC2_FROZEN=false
+  TC2_EDIT_FAILED=false
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
     TC2_LOGS=$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")
-    if echo "$TC2_LOGS" | grep -E "FreezeWaitEntry\(AskQ\):|Resolved on desktop:" > /dev/null 2>&1; then
+    if echo "$TC2_LOGS" | grep "FreezeWaitEntry: EDIT completed" > /dev/null 2>&1; then
       TC2_FROZEN=true
+      break
+    fi
+    if echo "$TC2_LOGS" | grep "FreezeWaitEntry: EDIT failed" > /dev/null 2>&1; then
+      TC2_EDIT_FAILED=true
       break
     fi
     sleep 2
@@ -176,26 +182,25 @@ if [ "$TC2_AQ_FOUND" = "true" ] && [ -n "$TC2_AQ_MSG_ID" ]; then
 
   pane_log "[tc2] AFTER freeze wait"
 
-  if [ "$TC2_FROZEN" = "true" ]; then
-    pass "TC2: FreezeWaitEntry(AskQ) or Resolved on desktop logged (PostToolUse correlation)"
+  if [ "$TC2_EDIT_FAILED" = "true" ]; then
+    fail "TC2: FreezeWaitEntry: EDIT failed — TG button freeze error"
+  elif [ "$TC2_FROZEN" = "true" ]; then
+    pass "TC2: FreezeWaitEntry: EDIT completed (PostToolUse correlation)"
 
-    # Verify the freeze label contains actual answer text (not a generic placeholder)
+    # Verify the freeze label contains actual answer text (⌨️ + Yes_29 or No_29, not ❌ Cancelled)
     TC2_LOGS=$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")
-    FREEZE_LINE=$(echo "$TC2_LOGS" | grep -E "FreezeWaitEntry\(AskQ\):" | tail -1 || true)
+    FREEZE_LINE=$(echo "$TC2_LOGS" | grep -E "FreezeWaitEntry: EDIT completed" | tail -1 || true)
     DESKTOP_LINE=$(echo "$TC2_LOGS" | grep "Resolved on desktop:" | tail -1 || true)
-    if [ -n "$FREEZE_LINE" ]; then
-      # The label should contain the actual answer, not just a blank or "❌ Cancelled"
-      if echo "$FREEZE_LINE" | grep -v "❌ Cancelled" > /dev/null 2>&1; then
-        pass "TC2: Freeze label contains actual answer (not generic cancel): $FREEZE_LINE"
-      else
-        warn "TC2: Freeze label is '❌ Cancelled' — expected actual answer text"
-      fi
-    elif [ -n "$DESKTOP_LINE" ]; then
-      pass "TC2: Resolved on desktop logged: $DESKTOP_LINE"
+    echo "  [tc2 diagnostic] Resolved on desktop: $DESKTOP_LINE"
+    # The TUI-answer freeze label is "⌨️ Answered on desktop" (FreezeWaitEntryOnDesktop via the
+    # Stop→CancelPendingWaitBySession path, pending.go:51), not "❌ Cancelled".
+    if [ -n "$FREEZE_LINE" ] && echo "$FREEZE_LINE" | grep -F "⌨️ Answered on desktop" > /dev/null 2>&1; then
+      pass "TC2: Freeze label = ⌨️ Answered on desktop (TUI answer): $FREEZE_LINE"
+    else
+      fail "TC2: Freeze label not '⌨️ Answered on desktop', got: $FREEZE_LINE"
     fi
   else
-    # May have been answered before PostToolUse arrived — check if session idle
-    warn "TC2: FreezeWaitEntry(AskQ) not logged within ${TIMEOUT}s (may have been answered in TUI before PostToolUse)"
+    fail "TC2: FreezeWaitEntry: EDIT completed not logged within ${TIMEOUT}s"
   fi
 
   wait_for_idle
@@ -248,18 +253,27 @@ pane_log "[tc3] AFTER permission detected"
 if [ "$TC3_FOUND" = "true" ] && [ -n "$TC3_UUID" ]; then
   pass "TC3: PermissionRequest triggered (uuid=$TC3_UUID)"
 
-  # Cancel via /pending/cancel
-  pane_log "[tc3] BEFORE cancel API call"
-  curl -s -X POST "http://127.0.0.1:$TEST_PORT/pending/cancel?uuid=$TC3_UUID" > /dev/null 2>&1 || true
-  pane_log "[tc3] AFTER cancel API call"
+  # Cancel via the CC TUI: press Escape in the pane (NOT the /pending/cancel API — the TG-button/API
+  # cancel path is tested in phase8/phase10). Escape denies the Bash permission → CC kills the blocking
+  # hook → its SIGTERM handler (hook.go:185) POSTs /pending/cancel → freeze with label "❌ Cancelled".
+  pane_log "[tc3] BEFORE TUI cancel (send Escape)"
+  $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
+  pane_log "[tc3] AFTER TUI cancel (Escape)"
 
-  # Wait for cancel confirmation and freeze label log
+  # Wait for the cancel-freeze EDIT to complete. The Escape→hook-SIGTERM→/pending/cancel path logs
+  # "/pending/cancel EDIT completed"; also accept "FreezeWaitEntry: EDIT completed" in case the freeze
+  # comes via the Stop→CancelPendingWaitBySession path. Either way the label must be "❌ Cancelled".
   ELAPSED=0
   TC3_CANCELLED=false
+  TC3_EDIT_FAILED=false
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
     TC3_LOGS=$(tail -n +"$((LOG_BEFORE_TC3 + 1))" "$LOG_FILE")
-    if echo "$TC3_LOGS" | grep -E "Permission cancelled:|pendingConnect grace expired:.*cancelled|FreezeWaitEntry\(Perm\):" > /dev/null 2>&1; then
+    if echo "$TC3_LOGS" | grep -E "/pending/cancel EDIT completed|FreezeWaitEntry: EDIT completed" > /dev/null 2>&1; then
       TC3_CANCELLED=true
+      break
+    fi
+    if echo "$TC3_LOGS" | grep -E "/pending/cancel EDIT failed|FreezeWaitEntry: EDIT failed" > /dev/null 2>&1; then
+      TC3_EDIT_FAILED=true
       break
     fi
     sleep 2
@@ -268,23 +282,21 @@ if [ "$TC3_FOUND" = "true" ] && [ -n "$TC3_UUID" ]; then
 
   pane_log "[tc3] AFTER cancel logged"
 
-  if [ "$TC3_CANCELLED" = "true" ]; then
-    pass "TC3: Permission cancel logged"
+  if [ "$TC3_EDIT_FAILED" = "true" ]; then
+    fail "TC3: cancel-freeze EDIT failed — TG button freeze error"
+  elif [ "$TC3_CANCELLED" = "true" ]; then
+    pass "TC3: cancel-freeze EDIT completed (TUI Escape)"
 
-    # Characterise: check freeze label is ❌ Cancelled
+    # Assert freeze label is ❌ Cancelled (required check)
     TC3_LOGS=$(tail -n +"$((LOG_BEFORE_TC3 + 1))" "$LOG_FILE")
-    FREEZE_PERM_LINE=$(echo "$TC3_LOGS" | grep "FreezeWaitEntry(Perm):" | tail -1 || true)
-    if [ -n "$FREEZE_PERM_LINE" ]; then
-      if echo "$FREEZE_PERM_LINE" | grep -F "❌ Cancelled" > /dev/null 2>&1; then
-        pass "TC3: FreezeWaitEntry(Perm) label=❌ Cancelled (correct cancel freeze)"
-      else
-        pass_opt "TC3: FreezeWaitEntry(Perm) label unexpected: $FREEZE_PERM_LINE"
-      fi
+    FREEZE_PERM_LINE=$(echo "$TC3_LOGS" | grep -E "/pending/cancel EDIT completed|FreezeWaitEntry: EDIT completed" | tail -1 || true)
+    if [ -n "$FREEZE_PERM_LINE" ] && echo "$FREEZE_PERM_LINE" | grep -F "❌ Cancelled" > /dev/null 2>&1; then
+      pass "TC3: cancel-freeze EDIT completed with label=❌ Cancelled (correct TUI-Escape cancel freeze)"
     else
-      pass_opt "TC3: No FreezeWaitEntry(Perm) line found (cancel may have been handled differently)"
+      fail "TC3: cancel-freeze EDIT completed but label ❌ Cancelled not found — got: $FREEZE_PERM_LINE"
     fi
   else
-    fail "TC3: Permission cancel not logged within ${TIMEOUT}s"
+    fail "TC3: cancel-freeze EDIT completed not logged within ${TIMEOUT}s"
   fi
 
   wait_for_idle

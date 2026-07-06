@@ -19,7 +19,7 @@ import json
 f='$TEST_CONFIG_DIR/config.json'
 d=json.load(open(f))
 d['toolNotifyCompact']=True
-d['toolNotifyList']=['Read','Bash','Edit','Glob','Grep']
+d['toolNotifyList']=['Read','Bash','Edit','Glob','Grep','Other']
 json.dump(d,open(f,'w'))
 "
 
@@ -83,7 +83,7 @@ import json
 f='$TEST_CONFIG_DIR/config.json'
 d=json.load(open(f))
 d['toolNotifyCompact']=True
-d['toolNotifyList']=['Read']
+d['toolNotifyList']=['Read','Other']
 json.dump(d,open(f,'w'))
 "
 
@@ -141,7 +141,7 @@ import json
 f='$TEST_CONFIG_DIR/config.json'
 d=json.load(open(f))
 d['toolNotifyCompact']=True
-d['toolNotifyList']=['Read']
+d['toolNotifyList']=['Read','Other']
 json.dump(d,open(f,'w'))
 "
 TC6_FILE1="/tmp/tg-cli-test-compact-tc6-1-$$.txt"
@@ -164,6 +164,25 @@ if [ "$SENT_COUNT_TC6" -ge 2 ]; then
 else
   fail "TC6: expected sent>=2 (each narrated text block resets compact cycle, register.go:619), got sent=$SENT_COUNT_TC6"
 fi
+
+# TC7 (round 8): SEND-anchored text-before-tool ordering. The bounded PreToolUse wait
+# (streamFlushAwaitToolBoundary) must flush the pre-tool text to Telegram BEFORE the tool notification.
+# Anchor on bot SEND log lines ('Stream send:' for a text bubble, 'compact tool sent' for the tool),
+# NOT MessageDisplay delta-receipt lines. Before round 8 the tool notification could overtake the text
+# (PreToolUse hook arrives before MessageDisplay; StreamFlush returned instantly on a stale bubble).
+set +eo pipefail
+TC6_SLICE=$(tail -n +"$((LOG_BEFORE_TC6 + 1))" "$LOG_FILE")
+FIRST_TEXT_LINE=$(printf '%s\n' "$TC6_SLICE" | grep -n "Stream send:" | head -1 | cut -d: -f1)
+FIRST_TOOL_LINE=$(printf '%s\n' "$TC6_SLICE" | grep -n "compact tool sent" | head -1 | cut -d: -f1)
+LATE_MD_COUNT=$(printf '%s\n' "$TC6_SLICE" | grep -c "late MD after tool notify")
+set -eo pipefail
+if [ -n "$FIRST_TEXT_LINE" ] && [ -n "$FIRST_TOOL_LINE" ] && [ "$FIRST_TEXT_LINE" -lt "$FIRST_TOOL_LINE" ]; then
+  pass "TC7: pre-tool text SEND precedes tool-notification SEND (first Stream send line=$FIRST_TEXT_LINE < first compact tool sent line=$FIRST_TOOL_LINE)"
+else
+  fail "TC7: text-before-tool ordering FAIL (first Stream send=$FIRST_TEXT_LINE, first compact tool sent=$FIRST_TOOL_LINE)"
+fi
+# TC8 (round 8): late-MD residual-inversion marker is countable; 0 = no inversions (informational, not a gate).
+echo "  TC8 [info]: late-MD residual-inversion markers in TC6 = ${LATE_MD_COUNT:-0} (0 = ideal)"
 
 # Restore config for subsequent phases
 python3 -c "

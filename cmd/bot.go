@@ -62,12 +62,12 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 					if !paneRunning {
 						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
 						if bs.InjectQueue.HasItems(info.TmuxTarget) {
-						sid, _ := bs.SessionState.FindByTarget(info.TmuxTarget)
-						bs.SessionEvents.DispatchAsync(sid, "flush:ticker", func() error {
-							flushInjectQueue(bs, info.TmuxTarget)
-							return nil
-						})
-					}
+							sid, _ := bs.SessionState.FindByTarget(info.TmuxTarget)
+							bs.SessionEvents.DispatchAsync(sid, "flush:ticker", func() error {
+								flushInjectQueue(bs, info.TmuxTarget)
+								return nil
+							})
+						}
 						return
 					}
 					// Check if this tick was cancelled (next tick arrived)
@@ -85,7 +85,6 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 		}
 	}
 }
-
 
 var BotCmd = &cobra.Command{
 	Use:   "bot",
@@ -130,6 +129,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 }
 
 func runBot(cmd *cobra.Command, args []string) {
+	startTime := time.Now()
 	if tmuxServerFlag != "" {
 		injector.ServerName = tmuxServerFlag
 	}
@@ -185,8 +185,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		Creds:           &creds,
 		Port:            port,
 		ConfigDir:       configDir,
-		Pages:         stores.NewPageCacheStore(),
-		SessionState:  stores.NewSessionStateStore(configDir),
+		Pages:           stores.NewPageCacheStore(),
+		SessionState:    stores.NewSessionStateStore(configDir),
 		SessionCounts:   stores.NewSessionCountStore(),
 		MergeBuffers:    stores.NewMergeBufferStore(configDir),
 		InjectQueue:     stores.NewInjectQueueStore(configDir),
@@ -203,9 +203,8 @@ func runBot(cmd *cobra.Command, args []string) {
 		CompactTools:    stores.NewCompactToolStore(),
 		Streams:         stores.NewStreamStore(),
 		PendingWait:     stores.NewPendingWaitStore(),
-		NotifOpQueue:    stores.NewNotifOpQueue(),
+		PendingMsgStore: stores.NewPendingMsgStore(),
 	}
-	defer bs.NotifOpQueue.Close()
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
 		logger.Error(fmt.Sprintf("Failed to load command stats: %v", err))
@@ -252,13 +251,15 @@ func runBot(cmd *cobra.Command, args []string) {
 	handlers.Register(bs)
 	// Scan pending directory to rebuild in-memory state after restart
 	hookCB := hooks.Callbacks{
-		ResolveChat:              resolveChat,
-		ProcessTranscriptUpdates: processTranscriptUpdates,
-		SendEventNotification:    sendEventNotification,
-		TypingLog:                typingLog,
-		FlushInjectQueue:         flushInjectQueue,
-		CheckSessionVersion:      checkSessionVersion,
-		StreamFlush:              streamFlush,
+		ResolveChat:                  resolveChat,
+		ProcessTranscriptUpdates:     processTranscriptUpdates,
+		SendEventNotification:        sendEventNotification,
+		TypingLog:                    typingLog,
+		FlushInjectQueue:             flushInjectQueue,
+		CheckSessionVersion:          checkSessionVersion,
+		StreamFlush:                  streamFlush,
+		StreamFlushAwaitNewText:      streamFlushAwaitNewText,
+		StreamFlushAwaitToolBoundary: streamFlushAwaitToolBoundary,
 	}
 	hooks.ScanPendingDir(bs, hookCB, func(bsArg *BotState) { handlers.ScanLaunchDir(bsArg) })
 	// Restore persisted sessions and clean up stale routes
@@ -270,10 +271,19 @@ func runBot(cmd *cobra.Command, args []string) {
 	bs.InjectQueue.Load()
 	bs.AtChannels.Load()
 	bs.MergeBuffers.Load()
+	// Compute the running binary's md5 once (used by /health and the startup log).
+	binaryMD5 := "unknown"
+	if exePath, err := os.Executable(); err == nil {
+		if data, err := os.ReadFile(exePath); err == nil {
+			h := md5.Sum(data)
+			binaryMD5 = hex.EncodeToString(h[:])
+		}
+	}
 	// Setup HTTP server
 	mux := http.NewServeMux()
 	hooks.Register(mux, bs, port, hookCB)
 	api.Register(mux, bs)
+	registerHealth(mux, startTime, binaryMD5)
 	registerMailboxAPI(mux, bs)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	handler := http.Handler(mux)
@@ -316,6 +326,19 @@ func runBot(cmd *cobra.Command, args []string) {
 					bs.PendingWait.Remove(uuid)
 					logger.Info(fmt.Sprintf("Swept undelivered pending wait entry: uuid=%s", uuid))
 				}
+			}
+		}
+	}()
+	// Periodic ticker: sweep PendingMsgStore closed tombstones older than 60s.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				bs.PendingMsgStore.Sweep(60 * time.Second)
 			}
 		}
 	}()
@@ -366,13 +389,6 @@ func runBot(cmd *cobra.Command, args []string) {
 				}
 			}
 		}()
-	}
-	binaryMD5 := "unknown"
-	if exePath, err := os.Executable(); err == nil {
-		if data, err := os.ReadFile(exePath); err == nil {
-			h := md5.Sum(data)
-			binaryMD5 = hex.EncodeToString(h[:])
-		}
 	}
 	logger.Info(fmt.Sprintf("Starting tg-cli bot... version=%s binary_md5=%s", Version, binaryMD5))
 	bot.Start()

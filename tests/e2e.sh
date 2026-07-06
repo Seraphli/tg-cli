@@ -53,6 +53,12 @@ run_phase() {
   local script="$1"
   echo ""
   local rc=0
+  local log_before_phase
+  log_before_phase=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  # Export the phase's starting log offset and clear the inline-validation flag, so a phase can run
+  # validate_phase_inline itself (while its CC pane is still alive) and signal us to skip the fallback below.
+  export PHASE_LOG_BEFORE="$log_before_phase"
+  rm -f "$TEST_CONFIG_DIR/.phase-validated" 2>/dev/null || true
   bash "$script" || rc=$?
   if [ $rc -ne 0 ]; then
     pane_log "[$(basename "$script")] CRASH capture"
@@ -76,6 +82,11 @@ run_phase() {
     if [ "$pending_count" -gt 0 ]; then
       echo "  WARN: inject queue not empty after $(basename "$script"): $queue_status"
       fail "Phase $(basename "$script") left $pending_count items in inject queue"
+    fi
+    # Post-phase bot-log validations (V1 raw-payload, V2 content, V3 ordering); CC-scoped, no-op otherwise.
+    # Fallback only: phases that ran validate_phase_inline (live pane) touch a flag so we skip here (no double count).
+    if [ ! -f "$TEST_CONFIG_DIR/.phase-validated" ]; then
+      validate_phase_log "$(basename "$script")" "$log_before_phase"
     fi
   fi
 }

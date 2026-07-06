@@ -34,7 +34,7 @@ type BotState struct {
 	CompactTools    *stores.CompactToolStore
 	Streams         *stores.StreamStore
 	PendingWait     *stores.PendingWaitStore
-	NotifOpQueue    *stores.NotifOpQueue
+	PendingMsgStore *stores.PendingMsgStore
 	FlushInFlight   sync.Map
 
 	LaunchPending         sync.Map
