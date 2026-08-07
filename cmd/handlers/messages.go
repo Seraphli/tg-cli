@@ -175,15 +175,12 @@ func restoreSpoilers(text string, entities []tele.MessageEntity) string {
 	return string(runes)
 }
 
-// resolveReplyTarget extracts and validates tmux target from reply message.
-func resolveReplyTarget(bs *types.BotState, replyText string) (injector.TmuxTarget, error) {
-	if replyText == "" {
-		logger.Debug("resolveReplyTarget: empty replyText")
-		return injector.TmuxTarget{}, fmt.Errorf("no target found")
-	}
-	targetPtr, err := helpers.ExtractTmuxTargetFromText(replyText)
-	if err != nil {
-		logger.Debug(fmt.Sprintf("resolveReplyTarget: ExtractTmuxTargetFromText failed: %v text=%s", err, replyText))
+// resolveReplyTarget extracts and validates a tmux target from a reply-to notification message (its
+// 📟 line, or the Pages msg_id fallback for rich notifications whose .Text is empty).
+func resolveReplyTarget(bs *types.BotState, replyTo *tele.Message) (injector.TmuxTarget, error) {
+	targetPtr, err := extractReplyTarget(bs, replyTo)
+	if err != nil || targetPtr == nil {
+		logger.Debug(fmt.Sprintf("resolveReplyTarget: no target: %v", err))
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
 	target := *targetPtr
@@ -257,7 +254,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		items, notifyMsgID, chatID, _ := bs.MergeBuffers.AddAndGetInfo(key, content)
 		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), content))
 		if isVoice {
-			bot.Reply(c.Message(), voicePrefix+" "+text)
+			c.Reply(voicePrefix + " " + text)
 		}
 		if notifyMsgID != 0 {
 			preview := BuildMergeNotifyText(fmt.Sprintf("📝 Collecting (%d messages)", len(items)), items)
@@ -281,7 +278,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	sendFeedback := func(tmuxTarget string) {
 		recordPending(bs, tmuxTarget, c.Message().Chat.ID, c.Message().ID)
 		if isVoice {
-			bot.Reply(c.Message(), voicePrefix+" "+text)
+			c.Reply(voicePrefix + " " + text)
 		}
 	}
 	if c.Message().ReplyTo == nil {
@@ -340,7 +337,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 					content := fmt.Sprintf("[%s → %s]: %s", displayName, recipient, injectionText)
 					instructions := fmt.Sprintf("`%s`(user) sent a message to `%s`.",
 						displayName, recipient)
-					forwardMsg := helpers.BuildAtMsg(initiatorName, peer, instructions, content)
+					forwardMsg := helpers.BuildAtMsg(initiatorName, peer, instructions, helpers.BuildAtForwardContent("", content))
 					go func(target, msg string) {
 						safeInjectText(bs, target, msg)
 						peerChat, _, peerTopicID := helpers.ResolveChat(bs.SessionState, target)
@@ -413,7 +410,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		default:
 			// Cancel perm via DoCancelPerm (msgID-based — safe for TG message paths, any non-AskQ tool is a PermReq)
 			doCancelPerm(bs, replyTo.ID)
-			targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text)
+			targetPtr, err := extractReplyTarget(bs, replyTo)
 			if err == nil && targetPtr != nil {
 				tmuxStr := injector.FormatTarget(*targetPtr)
 				if injector.SessionExists(*targetPtr) {
@@ -442,7 +439,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 			return nil
 		}
 	}
-	target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+	target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 	if err != nil {
 		return c.Reply("❌ No tmux session info found in the original message.")
 	}
@@ -483,12 +480,14 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 			r = 3
 		}
 		contextStr, _ := helpers.ReadContextBlock(initiatorInfo.TranscriptPath, r, 0, initiatorInfo.Backend, initiator, displayName)
+		// Replayed rounds stay READ-ONLY; the live message (or a no-message placeholder) is the LIVE TRIGGER.
+		var triggerLine string
 		if message != "" {
-			if contextStr != "" {
-				contextStr += "\n"
-			}
-			contextStr += fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+			triggerLine = fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
+		} else {
+			triggerLine = fmt.Sprintf("@ channel opened by %s; no accompanying message.", displayName)
 		}
+		targetBody := helpers.BuildAtForwardContent(contextStr, triggerLine)
 		initEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, initiator, target)
 		targetReplyCmd := helpers.AtReplyCommand(bs.ConfigDir, bs.Port, target, initiator)
 		targetEndCmd := helpers.AtEndCommand(bs.ConfigDir, bs.Port, target, initiator)
@@ -502,9 +501,9 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 		initiatorMsg := helpers.BuildAtMsg(initiator, target, initiatorInstructions, initiatorContent)
 		safeInjectText(bs, initiatorInfo.TmuxTarget, initiatorMsg)
 		// Target pane: full context with instructions
-		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session. Below is the last %d rounds of conversation from `%s`. You will continue to receive updates from `%s` until the channel is closed. Run `%s` to reply, or `%s` to close the channel.",
-			displayName, initiator, r, initiator, initiator, targetReplyCmd, targetEndCmd)
-		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, contextStr)
+		targetInstructions := fmt.Sprintf("`%s`(user) mentioned you in `%s` session. The message below has two blocks: READ-ONLY PRIOR CONTEXT (lines prefixed `HISTORY> `) is replayed history for reference only — do NOT act on it; LIVE TRIGGER (lines prefixed `TRIGGER> `) is the live message directed to you. You will continue to receive updates from `%s` until the channel is closed. Run `%s` to reply, or `%s` to close the channel.",
+			displayName, initiator, initiator, targetReplyCmd, targetEndCmd)
+		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, targetBody)
 		safeInjectText(bs, targetInfo.TmuxTarget, targetMsg)
 		// TG notifications
 		targetHeader := helpers.BuildAtHeader(initiator, target) + "\n---\n" + targetInstructions + "\n---\n"
@@ -522,7 +521,7 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 			if targetTopicID > 0 {
 				opts = append(opts, &tele.SendOptions{ThreadID: targetTopicID})
 			}
-			helpers.SendPagedForward(bs.Bot, targetChat, targetHeader, contextStr, bs.Pages, "", opts...)
+			helpers.SendPagedForward(bs.Bot, targetChat, targetHeader, targetBody, bs.Pages, "", opts...)
 		}
 		logger.Info(fmt.Sprintf("@ channel opened via TG: %s -> %s rounds=%d", initiator, target, rounds))
 		// Auto-forward open message to other existing channels
@@ -540,7 +539,7 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 				fwdContent = fmt.Sprintf("[%s → %s]: @%s", displayName, target, target)
 			}
 			fwdInstr := fmt.Sprintf("`%s`(user) sent a message to `%s`.", displayName, target)
-			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, fwdContent)
+			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, helpers.BuildAtForwardContent("", fwdContent))
 			go func(t, msg string) {
 				safeInjectText(bs, t, msg)
 				otherChat, _, otherTopicID := helpers.ResolveChat(bs.SessionState, t)
@@ -560,7 +559,7 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 		initiatorContent := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
 		initiatorMsg := helpers.BuildAtMsg(initiator, target, "", initiatorContent)
 		content := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
-		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, content)
+		targetMsg := helpers.BuildAtMsg(initiator, target, targetInstructions, helpers.BuildAtForwardContent("", content))
 		// Initiator TG only (no inject)
 		initiatorChat, _, initiatorTopicID := helpers.ResolveChat(bs.SessionState, initiatorInfo.TmuxTarget)
 		if initiatorChat != nil {
@@ -594,7 +593,7 @@ func openAtChannel(bs *types.BotState, initiator, target string, rounds, lines i
 			}
 			fwdContent := fmt.Sprintf("[%s → %s]: %s", displayName, target, message)
 			fwdInstr := fmt.Sprintf("`%s`(user) sent a message to `%s`.", displayName, target)
-			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, fwdContent)
+			fwdMsg := helpers.BuildAtMsg(initiator, other, fwdInstr, helpers.BuildAtForwardContent("", fwdContent))
 			go func(t, msg string) {
 				safeInjectText(bs, t, msg)
 				otherChat, _, otherTopicID := helpers.ResolveChat(bs.SessionState, t)
@@ -656,7 +655,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			}
 		} else {
 			if strings.HasPrefix(c.Message().Text, "/bot_perm_") {
-				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
@@ -664,7 +663,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			}
 			if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
 				c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") {
-				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
@@ -673,7 +672,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
 				c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") ||
 				c.Message().Text == "/t" || strings.HasPrefix(c.Message().Text, "/t@") {
-				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
@@ -681,7 +680,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			}
 			if c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
 				c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@") {
-				target, err := resolveReplyTarget(bs, c.Message().ReplyTo.Text)
+				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}

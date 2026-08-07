@@ -16,7 +16,7 @@ wait_for_idle $TIMEOUT
 LOG_BEFORE_TOOL=$(wc -l < "$LOG_FILE")
 
 pane_log "[codex/post_tool] BEFORE PostToolUse prompt"
-inject_prompt "Run this exact bash command and report the output: echo codex_post_tool_ok"
+inject_prompt "Use the Bash tool to run this exact command and report the output: echo codex_post_tool_ok"
 pane_log "[codex/post_tool] AFTER sending PostToolUse prompt"
 
 # Wait for PostToolUse log entry in bot log

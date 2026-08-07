@@ -82,6 +82,46 @@ func (iq *InjectQueueStore) Flush(tmuxTarget string) []InjectItem {
 	return items
 }
 
+// PurgeMatching removes queued items for the given tmux target whose text contains any of the
+// provided markers. Returns the number of items removed. Used on @ channel close to drop stale
+// forwards/replies that would otherwise be flushed into the pane after the channel is gone.
+func (iq *InjectQueueStore) PurgeMatching(tmuxTarget string, markers ...string) int {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	items := iq.queues[tmuxTarget]
+	if len(items) == 0 {
+		return 0
+	}
+	kept := make([]InjectItem, 0, len(items))
+	removed := 0
+	for _, it := range items {
+		match := false
+		for _, m := range markers {
+			if m != "" && strings.Contains(it.Text, m) {
+				match = true
+				break
+			}
+		}
+		if match {
+			removed++
+			continue
+		}
+		kept = append(kept, it)
+	}
+	if removed == 0 {
+		return 0
+	}
+	if len(kept) == 0 {
+		delete(iq.queues, tmuxTarget)
+		delete(iq.injectIDs, tmuxTarget)
+		delete(iq.notifyMsgs, tmuxTarget)
+	} else {
+		iq.queues[tmuxTarget] = kept
+	}
+	iq.saveLocked()
+	return removed
+}
+
 // HasItems reports whether the queue for a tmux target is non-empty.
 func (iq *InjectQueueStore) HasItems(tmuxTarget string) bool {
 	iq.mu.Lock()
@@ -89,10 +129,66 @@ func (iq *InjectQueueStore) HasItems(tmuxTarget string) bool {
 	return len(iq.queues[tmuxTarget]) > 0
 }
 
+// ClearTarget drops the inject queue AND the notify/inject-id metadata for a tmux target whose pane is
+// confirmed dead. Deletes all three maps even when the queue is empty (a metadata-only leftover must not
+// survive a target death). Returns the number of QUEUED ITEMS dropped (0 when only metadata was cleared).
+// Logs each dropped item (target + text preview + reason) plus a summary count — only when items were
+// actually dropped.
+func (iq *InjectQueueStore) ClearTarget(tmuxTarget string) int {
+	iq.mu.Lock()
+	items := iq.queues[tmuxTarget]
+	_, hadNotify := iq.notifyMsgs[tmuxTarget]
+	_, hadID := iq.injectIDs[tmuxTarget]
+	if len(items) == 0 && !hadNotify && !hadID {
+		iq.mu.Unlock()
+		return 0
+	}
+	delete(iq.queues, tmuxTarget)
+	delete(iq.notifyMsgs, tmuxTarget)
+	delete(iq.injectIDs, tmuxTarget)
+	iq.saveLocked()
+	iq.mu.Unlock()
+	for _, it := range items {
+		preview := it.Text
+		if len(preview) > 80 {
+			preview = preview[:80]
+		}
+		logger.Info(fmt.Sprintf("InjectQueue.ClearTarget: dropped orphaned item target=%s text=%q reason=target-dead", tmuxTarget, preview))
+	}
+	if len(items) > 0 {
+		logger.Info(fmt.Sprintf("InjectQueue.ClearTarget: cleared %d item(s) for dead target=%s", len(items), tmuxTarget))
+	}
+	return len(items)
+}
+
+// ClearDeadTargets clears the queue+metadata for every QUEUED target whose pane is no longer alive.
+// SessionState-independent: reaps orphans left by removal paths that bypass CleanDeadSession
+// (startup ValidateAlive, SetName auto-clean) and by a queue persisted for a target that died while the
+// bot was down. Returns total items cleared.
+func (iq *InjectQueueStore) ClearDeadTargets(sessionExists func(target string) bool) int {
+	iq.mu.Lock()
+	targets := make([]string, 0, len(iq.queues))
+	for t := range iq.queues {
+		targets = append(targets, t)
+	}
+	iq.mu.Unlock()
+	total := 0
+	for _, t := range targets {
+		if !sessionExists(t) {
+			total += iq.ClearTarget(t)
+		}
+	}
+	return total
+}
+
 // SetNotifyMsg stores the Telegram message ID for the inject notification.
+// No-op when the target has no queued items (prevents metadata resurrection after ClearTarget).
 func (iq *InjectQueueStore) SetNotifyMsg(tmuxTarget string, msgID int) {
 	iq.mu.Lock()
 	defer iq.mu.Unlock()
+	if len(iq.queues[tmuxTarget]) == 0 {
+		return
+	}
 	iq.notifyMsgs[tmuxTarget] = msgID
 }
 
@@ -247,4 +343,109 @@ func (ic *InjectConfirmStore) Cancel(tmuxTarget string) {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
 	delete(ic.entries, tmuxTarget)
+}
+
+// InjectMode is the delivery mode chosen by the event-driven inject-queue router (R2).
+type InjectMode int
+
+const (
+	// InjectModeQueuedCommand injects the merged queued text as a CC queued command (Force inject-while-busy).
+	// Used on PreToolUse(non-AskUserQuestion) within the window and on the 5s timeout.
+	InjectModeQueuedCommand InjectMode = iota
+	// InjectModeAskQCustomReply delivers the merged queued text as the AskUserQuestion custom reply.
+	// Used on PreToolUse(AskUserQuestion) within the window.
+	InjectModeAskQCustomReply
+	// InjectModeIdle waits for idle then injects WITHOUT Force. Used on Stop within the window.
+	InjectModeIdle
+)
+
+// RouteInjectMode is the PURE routing DECISION (R2/R5): given the triggering hook event and tool name,
+// it returns the delivery mode. Kept side-effect-free so it is unit-testable without tmux/TG.
+//   - "PreToolUse" + tool != "AskUserQuestion" -> queued-command
+//   - "PreToolUse" + tool == "AskUserQuestion" -> AskQ-custom-reply
+//   - "Stop"                                   -> idle
+//   - "" (5s timeout, no subsequent hook)      -> queued-command (case-1 behavior)
+func RouteInjectMode(event, toolName string) InjectMode {
+	if event == "Stop" {
+		return InjectModeIdle
+	}
+	if event == "PreToolUse" && toolName == "AskUserQuestion" {
+		return InjectModeAskQCustomReply
+	}
+	// PreToolUse(non-AskUserQuestion) and the "" timeout event both map to queued-command.
+	return InjectModeQueuedCommand
+}
+
+// InjectRouteStore holds the per-target event-driven routing state for the inject queue (R2). It is a
+// dedicated sibling of InjectConfirmStore — NOT a reuse of it — so the single-slot, type-gated
+// delivery-confirmation store is never overwritten/blocked by a routing decision.
+//
+// Exactly-once semantics: ArmRoute atomically CLAIMs the target. Only ONE pending routing decision may
+// exist per target at a time; a second MD-final (they can fire multiple times per turn) or a supplement
+// check (R4) that races the first is rejected by the claim. Resolve/Timeout release the claim.
+type InjectRouteStore struct {
+	mu     sync.Mutex
+	routes map[string]*injectRoute
+}
+
+type injectRoute struct {
+	ch       chan string // receives the triggering hook event ("PreToolUse"/"Stop"); closed/drained on release
+	toolName chan string // paired tool name for the event (buffered, 1)
+	deadline time.Time
+}
+
+// NewInjectRouteStore creates an empty InjectRouteStore.
+func NewInjectRouteStore() *InjectRouteStore {
+	return &InjectRouteStore{routes: make(map[string]*injectRoute)}
+}
+
+// ArmRoute atomically claims a routing window for the target. Returns (eventCh, toolCh, true) to the
+// EXACTLY-ONE caller that wins the claim; returns (nil, nil, false) if a window is already armed. The
+// winner owns the window and MUST call Release(target) when done (after routing on an event or a timeout).
+func (ir *InjectRouteStore) ArmRoute(tmuxTarget string, window time.Duration) (<-chan string, <-chan string, bool) {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	if _, exists := ir.routes[tmuxTarget]; exists {
+		return nil, nil, false
+	}
+	r := &injectRoute{ch: make(chan string, 1), toolName: make(chan string, 1), deadline: time.Now().Add(window)}
+	ir.routes[tmuxTarget] = r
+	return r.ch, r.toolName, true
+}
+
+// IsArmed reports whether a routing window is currently claimed for the target.
+func (ir *InjectRouteStore) IsArmed(tmuxTarget string) bool {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	_, ok := ir.routes[tmuxTarget]
+	return ok
+}
+
+// SignalEvent delivers a subsequent hook event ("PreToolUse"/"Stop") to an armed routing window. Returns
+// true if the event was accepted by a waiting window; false if no window is armed or one already received
+// an event (only the FIRST subsequent hook routes). Non-blocking.
+func (ir *InjectRouteStore) SignalEvent(tmuxTarget, event, toolName string) bool {
+	ir.mu.Lock()
+	r, ok := ir.routes[tmuxTarget]
+	ir.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case r.ch <- event:
+		select {
+		case r.toolName <- toolName:
+		default:
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// Release removes the routing claim for the target so a subsequent MD-final can arm a fresh window.
+func (ir *InjectRouteStore) Release(tmuxTarget string) {
+	ir.mu.Lock()
+	defer ir.mu.Unlock()
+	delete(ir.routes, tmuxTarget)
 }

@@ -1,7 +1,6 @@
 package helpers
 
 import (
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -58,15 +57,7 @@ func GetPaneCLICommand(tmuxTarget string) string {
 	if err != nil {
 		return ""
 	}
-	shellPID := strings.TrimSpace(string(pidOut))
-	if shellPID == "" {
-		return ""
-	}
-	cmdOut, err := exec.Command("ps", "--ppid", shellPID, "-o", "cmd", "--no-headers").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(cmdOut))
+	return psCliCommandForPID(strings.TrimSpace(string(pidOut)))
 }
 
 // GetPaneLabel returns a human-readable label (session:window.pane) for the given tmux target.
@@ -206,17 +197,26 @@ func ListProjectSessionsByDir(dir string, limit int, excludeID string) ([]Sessio
 }
 
 // DetectBackend determines the CLI backend running in the tmux pane.
-// Returns "cc", "codex", or "" (unknown/exited).
+// Returns "cc", "codex", or "" (unknown/exited). This is the live path: it reads the pane's current
+// command via tmux and, only for a "node" pane, resolves the real CLI via GetPaneCLICommand.
 func DetectBackend(tmuxTarget string) string {
-	cmd := GetPaneCommand(tmuxTarget)
-	switch cmd {
+	return detectBackend(GetPaneCommand(tmuxTarget), func() string {
+		return GetPaneCLICommand(tmuxTarget)
+	})
+}
+
+// detectBackend maps a pane's current command to "cc"/"codex"/"" — the single backend switch shared by
+// the live path (DetectBackend, above) and the batched path (PaneState). cliCommand is a closure so it
+// is invoked ONLY for a "node" pane; claude/codex/other panes never trigger the extra pid fetch or the
+// ps call, so removing the duplication adds no exec on the live path.
+func detectBackend(command string, cliCommand func() string) string {
+	switch command {
 	case "claude":
 		return "cc"
 	case "codex":
 		return "codex"
 	case "node":
-		cliCmd := GetPaneCLICommand(tmuxTarget)
-		for _, token := range strings.Fields(cliCmd) {
+		for _, token := range strings.Fields(cliCommand()) {
 			base := filepath.Base(token)
 			if base == "codex" {
 				return "codex"

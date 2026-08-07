@@ -62,7 +62,7 @@ fi
 # Inject new prompt to trigger route resolution
 LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
 pane_log "[group_routing] BEFORE 'say test routing' prompt"
-inject_prompt "say test routing"
+inject_prompt "Reply with exactly: test_routing_ok. Do not run any tools or commands."
 pane_log "[group_routing] AFTER routing prompt"
 
 # Wait for Stop notification
@@ -126,7 +126,7 @@ LOG_BEFORE_DEFAULT=$(wc -l < "$LOG_FILE")
 ROUTE_COUNT_BEFORE=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep -c "Route resolved: name=" || echo 0)
 
 pane_log "[group_routing] BEFORE 'say test default' prompt"
-inject_prompt "say test default"
+inject_prompt "Reply with exactly: test_default_ok. Do not run any tools or commands."
 pane_log "[group_routing] AFTER default prompt"
 
 # Wait for Stop notification

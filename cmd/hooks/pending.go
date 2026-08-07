@@ -20,15 +20,22 @@ import (
 
 // Callbacks holds cmd-level functions injected into hooks to avoid circular imports.
 type Callbacks struct {
-	ResolveChat                  func(bs *types.BotState, tmuxTarget string) (*tele.Chat, string, int)
-	ProcessTranscriptUpdates     func(bs *types.BotState, sessionID, transcriptPath string, isQuestion ...bool) string
-	SendEventNotification        func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int
-	TypingLog                    func(format string, args ...interface{})
-	FlushInjectQueue             func(bs *types.BotState, tmuxTarget string)
-	CheckSessionVersion          func(bs *types.BotState, tmuxTarget string)
-	StreamFlush                  func(bs *types.BotState, sessionID string, stop bool)
-	StreamFlushAwaitNewText      func(bs *types.BotState, sessionID string)
-	StreamFlushAwaitToolBoundary func(bs *types.BotState, sessionID, promptID, toolUseID string) string
+	ResolveChat              func(bs *types.BotState, tmuxTarget string) (*tele.Chat, string, int)
+	ProcessTranscriptUpdates func(bs *types.BotState, sessionID, transcriptPath string, isQuestion ...bool) string
+	SendEventNotification    func(bs *types.BotState, chat *tele.Chat, chatID, sessionID, event, project, cwd, tmuxTarget, body, toolName, agentName string, topicID int) int
+	TypingLog                func(format string, args ...interface{})
+	// RouteInjectQueue is the event-driven inject-queue trigger (R2/R5): on an MD-final it claims the target
+	// exactly-once, waits up to 5s for the next hook event (PreToolUse/Stop delivered via InjectRoute.SignalEvent),
+	// routes to the delivery mode, and dispatches the DELIVERY off the Hook FIFO.
+	RouteInjectQueue        func(bs *types.BotState, tmuxTarget, toolUseID string)
+	CheckSessionVersion     func(bs *types.BotState, tmuxTarget string)
+	StreamFlush             func(bs *types.BotState, sessionID string, stop bool)
+	StreamFlushAwaitNewText func(bs *types.BotState, sessionID string)
+	// FlushStreamOp is the plain NON-DRAINING pre-tool flush (S6): it snapshots the stream under DataMu and
+	// enqueues ONE render op onto the Message FIFO (async) WITHOUT any drainUntilComplete grace. The S6
+	// queue-lookahead already drained/waited for the pre-tool MessageDisplay on the Hook FIFO, so this must
+	// NOT re-drain (that would be the StreamFlush drain-then-flush path). No-op when nothing is renderable.
+	FlushStreamOp func(bs *types.BotState, sessionID string)
 }
 
 // GetHookSessionLock returns (or creates) the mutex for a session.
@@ -64,8 +71,9 @@ func CancelPendingWaitBySession(bs *types.BotState, sessionID, skipToolName, ski
 		if skipUUID != "" && snap.UUID == skipUUID {
 			continue // this tool's own pending entry — do not cancel it
 		}
-		// FreezeWaitEntryOnDesktop handles ResolveIfUnresolved + EditOrDefer internally
-		helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.PendingMsgStore, snap, "⌨️ Answered on desktop")
+		// FreezeWaitEntryOnDesktop handles ResolveIfUnresolved (state, Hook FIFO) + EditOrDefer that enqueues
+		// msg:freeze-edit onto the Message FIFO (B.8)
+		helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.MessageQueue, bs.PendingWait, bs.PendingMsgStore, snap, "⌨️ Answered on desktop")
 		logger.Info(fmt.Sprintf("CancelPendingWaitBySession: uuid=%s session=%s", snap.UUID, sessionID))
 	}
 }
@@ -145,15 +153,17 @@ func preparePendingMessage(bs *types.BotState, cb Callbacks, entry *stores.Pendi
 		bs.PendingMsgStore.SetAndDrain(capturedEntry.UUID, result.MsgID, result.ChatID, result.MsgText, result.TopicID)
 		// Backfill MsgID/ChatID/TopicID/MsgText into PendingWait for TG-button callback correlation
 		bs.PendingWait.BackfillMsgID(capturedEntry.UUID, result.MsgID, result.ChatID, result.TopicID, result.MsgText)
-		// Send "update" frame to the ndjson stream
+		// Send "update" frame to the ndjson stream (includes Rich so reconnect can restore it)
 		type updateMsg struct {
 			Type    string `json:"type"`
 			MsgID   int    `json:"msg_id"`
 			ChatID  int64  `json:"chat_id"`
 			TopicID int    `json:"topic_id"`
 			MsgText string `json:"msg_text,omitempty"`
+			Rich    bool   `json:"rich,omitempty"`
 		}
-		if err := sendFrame(updateMsg{Type: "update", MsgID: result.MsgID, ChatID: result.ChatID, TopicID: result.TopicID, MsgText: result.MsgText}); err != nil {
+		entryRich := capturedEntry.Rich
+		if err := sendFrame(updateMsg{Type: "update", MsgID: result.MsgID, ChatID: result.ChatID, TopicID: result.TopicID, MsgText: result.MsgText, Rich: entryRich}); err != nil {
 			logger.Debug(fmt.Sprintf("preparePendingMessage: sendFrame update failed uuid=%s err=%v", capturedEntry.UUID, err))
 		}
 		return nil
@@ -168,8 +178,18 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 	if p.AgentID == "" {
 		if p.Backend == "codex" {
 			if updateBody := cb.ProcessTranscriptUpdates(bs, p.SessionID, p.TranscriptPath, true); updateBody != "" {
-				cb.SendEventNotification(bs, chat, chatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updateBody, "", agentName, topicID)
-				bs.CompactTools.Reset(p.SessionID)
+				// §F #8: executeSendPendingMessage runs ON the Hook FIFO (send:pending job), so the codex Update
+				// blocking send must go onto the Message FIFO. DispatchAsync in Hook-FIFO order (the msg_id is
+				// not reused). The compact reset + log stay on the Hook FIFO (state ordering).
+				updChat := chat
+				updChatID := chatID
+				updBody := updateBody
+				bs.MessageQueue.DispatchAsync(p.SessionID, "msg:codex-update", func() error {
+					cb.SendEventNotification(bs, updChat, updChatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updBody, "", agentName, topicID)
+					return nil
+				})
+				// S9a: discard the compact entry (Hook FIFO) + schedule the ordered map-delete (Message FIFO).
+				resetCompactAndScheduleDelete(bs, p.SessionID)
 				logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", entry.UUID, chatIDInt))
 			}
 		} else {
@@ -254,16 +274,26 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 		}
 		rows = append(rows, markup.Row(btnToolCancel))
 		markup.Inline(rows...)
-		var askSendOpts []interface{}
-		askSendOpts = append(askSendOpts, markup)
-		if topicID > 0 {
-			askSendOpts = append(askSendOpts, &tele.SendOptions{ThreadID: topicID})
-		}
-		askSendOpts = append(askSendOpts, tele.ModeHTML)
-		sent, err := helpers.RetrySend(bs.Bot, chat, text, askSendOpts...)
+		// R5 (S11): route the blocking AskUserQuestion SEND onto the Message FIFO via a SYNC Dispatch —
+		// executeSendPendingMessage runs ON the Hook FIFO (send:pending job), so per INV2 any blocking send
+		// reachable on the Hook FIFO must go onto the Message FIFO. SYNC because the caller needs the returned
+		// TG msg_id for the pending store (AskQ keeps using the TG msg_id directly — NOT the internal-id
+		// mechanism, which is compact/tool-notify only). Rich send: question/options are prose → keep entity
+		// detection ON (C3).
+		var sent *tele.Message
+		var err error
+		bs.MessageQueue.Dispatch(p.SessionID, "msg:ask-send", func() error {
+			sent, err = helpers.RetrySendRich(bs.Bot, chat, text, helpers.RichSendOpts{
+				TopicID:    topicID,
+				Markup:     markup,
+				LegacyHTML: text,
+			})
+			return nil
+		})
 		if err != nil {
 			return stores.SendResult{MainErr: fmt.Errorf("send AskUserQuestion: %w", err)}
 		}
+		entry.Rich = true
 		var qSummaries []string
 		for _, q := range askInput.Questions {
 			var labels []string
@@ -274,7 +304,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 		}
 		contentSummary := strings.Join(qSummaries, " | ")
 		logger.Info(fmt.Sprintf("TG question message sent full_text:\n%s", text))
-		logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d questions=%d tmux=%s content=%s uuid=%s", sent.ID, len(askInput.Questions), p.TmuxTarget, contentSummary, entry.UUID))
+		logger.Info(fmt.Sprintf("AskUserQuestion sent: msg_id=%d questions=%d tmux=%s content=%s uuid=%s fmt=rich", sent.ID, len(askInput.Questions), p.TmuxTarget, contentSummary, entry.UUID))
 		// Forward AskUserQuestion to @ channel peers
 		if agentName != "" {
 			atTargets := bs.AtChannels.GetTargets(agentName)
@@ -289,19 +319,20 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 				if peerInfo == nil {
 					continue
 				}
-				var contentLines []string
+				var historyLines []string
 				for _, e := range buffered {
-					contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: %s", agentName, dn, e))
+					historyLines = append(historyLines, fmt.Sprintf("[%s → %s]: %s", agentName, dn, e))
 				}
+				var triggerLines []string
 				for _, q := range askInput.Questions {
-					contentLines = append(contentLines, fmt.Sprintf("[%s → %s]: ❓ %s", agentName, dn, q.Header))
-					contentLines = append(contentLines, q.Question)
+					triggerLines = append(triggerLines, fmt.Sprintf("[%s → %s]: ❓ %s", agentName, dn, q.Header))
+					triggerLines = append(triggerLines, q.Question)
 					for _, o := range q.Options {
-						contentLines = append(contentLines, fmt.Sprintf("- %s — %s", o.Label, o.Description))
+						triggerLines = append(triggerLines, fmt.Sprintf("- %s — %s", o.Label, o.Description))
 					}
 				}
-				content := strings.Join(contentLines, "\n")
-				instructions := fmt.Sprintf("`%s` is asking a question. Below is the update and question.", agentName)
+				content := helpers.BuildAtForwardContent(strings.Join(historyLines, "\n"), strings.Join(triggerLines, "\n"))
+				instructions := fmt.Sprintf("`%s` is asking a question. The message below has a READ-ONLY PRIOR CONTEXT block (lines prefixed `HISTORY> `, reference only) and a LIVE TRIGGER block (lines prefixed `TRIGGER> `) with the question.", agentName)
 				msg := helpers.BuildAtMsg(agentName, peerName, instructions, content)
 				peerChat, _, peerTopicID := cb.ResolveChat(bs, peerInfo.TmuxTarget)
 				if peerChat != nil {
@@ -365,7 +396,12 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 		permBtnRows = append(permBtnRows, row2)
 	}
 	permBtnRows = append(permBtnRows, markup.Row(btnPermCancel))
-	permChunks := helpers.SplitBody(text, 3900)
+	// Rich cap: permission bodies split at the rich rune/block limit (was 3900 legacy HTML).
+	richMax := 30000
+	if permCfg, cfgErr := config.LoadAppConfig(); cfgErr == nil && permCfg.RichMaxRunes > 0 {
+		richMax = permCfg.RichMaxRunes
+	}
+	permChunks := helpers.SplitBody(text, richMax)
 	if len(permChunks) <= 1 {
 		if btnLabel != "" {
 			markup.Inline(markup.Row(row1...), markup.Row(markup.Data(btnLabel, "perm", "sAll")), markup.Row(btnPermCancel))
@@ -377,16 +413,27 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 		kb := helpers.BuildPageKeyboardWithExtra(1, len(permChunks), permBtnRows)
 		markup = kb
 	}
-	var permSendOpts []interface{}
-	permSendOpts = append(permSendOpts, markup)
-	if topicID > 0 {
-		permSendOpts = append(permSendOpts, &tele.SendOptions{ThreadID: topicID})
-	}
-	permSendOpts = append(permSendOpts, tele.ModeHTML)
-	sent, err := helpers.RetrySend(bs.Bot, chat, text, permSendOpts...)
+	// R5 (S11): route the blocking PermissionRequest SEND onto the Message FIFO via a SYNC Dispatch —
+	// executeSendPendingMessage runs ON the Hook FIFO (send:pending job), so per INV2 any blocking send
+	// reachable on the Hook FIFO must go onto the Message FIFO. SYNC because the caller needs the returned TG
+	// msg_id for the pending store (permission keeps using the TG msg_id directly — NOT the internal-id
+	// mechanism). Rich send: permission body has old_string/new_string in <pre> (code/diff) → skip entity
+	// detection so file paths/@words/flags are not turned into spurious links (C3).
+	var sent *tele.Message
+	var err error
+	bs.MessageQueue.Dispatch(p.SessionID, "msg:perm-send", func() error {
+		sent, err = helpers.RetrySendRich(bs.Bot, chat, text, helpers.RichSendOpts{
+			TopicID:             topicID,
+			Markup:              markup,
+			SkipEntityDetection: true,
+			LegacyHTML:          text,
+		})
+		return nil
+	})
 	if err != nil {
 		return stores.SendResult{MainErr: fmt.Errorf("send PermissionRequest: %w", err)}
 	}
+	entry.Rich = true
 	if len(permChunks) > 1 {
 		bs.Pages.Store(sent.ID, p.SessionID, &stores.PageEntry{
 			Chunks:     permChunks,
@@ -396,9 +443,10 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 			TmuxTarget: p.TmuxTarget,
 			PermRows:   permBtnRows,
 			ChatID:     chatIDInt,
+			Rich:       true,
 		})
 	}
-	logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d) uuid=%s", p.ToolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks), entry.UUID))
+	logger.Info(fmt.Sprintf("Permission request sent: tool=%s project=%s tmux=%s (msg_id=%d pages=%d) uuid=%s fmt=rich", p.ToolName, p.Project, p.TmuxTarget, sent.ID, len(permChunks), entry.UUID))
 	logger.Info(fmt.Sprintf("TG permission message sent full_text:\n%s", text))
 	bs.SessionWatch.Notify(agentName, stores.WatchEvent{
 		Event:   "PermissionRequest",
@@ -426,6 +474,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 		chatIDStr := r.URL.Query().Get("chat_id")
 		topicIDStr := r.URL.Query().Get("topic_id")
 		msgTextQ := r.URL.Query().Get("msg_text")
+		richQ := r.URL.Query().Get("rich") == "1" // Rich=true when hook reconnects after restart and rich=1 was set
 		msgIDQ, _ := strconv.Atoi(msgIDStr)
 		chatIDQ, _ := strconv.ParseInt(chatIDStr, 10, 64)
 		topicIDQ, _ := strconv.Atoi(topicIDStr)
@@ -513,6 +562,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 				SessionID:          p.SessionID,
 				TmuxTarget:         p.TmuxTarget,
 				Payload:            raw,
+				Rich:               richQ, // restore persisted Rich flag (default false = legacy for old entries)
 			}
 			parseEntryFields(entry, raw, &p)
 			if msgTextQ != "" {
@@ -521,7 +571,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			// Seed PendingMsgStore with known coords BEFORE Register so any racing EDIT finds them
 			bs.PendingMsgStore.SetAndDrain(uuid, msgIDQ, chatIDQ, entry.MsgText, topicIDQ)
 			bs.PendingWait.Register(entry)
-			logger.Info(fmt.Sprintf("hook reattached (restart): uuid=%s msg_id=%d", uuid, entry.MsgID))
+			logger.Info(fmt.Sprintf("hook reattached (restart): uuid=%s msg_id=%d rich=%v", uuid, entry.MsgID, richQ))
 		} else {
 			// First connect — parse payload fields BEFORE Register, then prepare op, TryEnqueue SEND
 			entry = &stores.PendingWaitEntry{
@@ -561,20 +611,23 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 			return
 		}
 
-		// Send registered ack — use GetSnapshot for MsgID/ChatID/TopicID
+		// Send registered ack — use GetSnapshot for MsgID/ChatID/TopicID/Rich
 		type registeredMsg struct {
 			Type    string `json:"type"`
 			MsgID   int    `json:"msg_id"`
 			ChatID  int64  `json:"chat_id"`
 			TopicID int    `json:"topic_id"`
+			Rich    bool   `json:"rich,omitempty"`
 		}
 		var regMsgID int
 		var regChatID int64
 		var regTopicID int
+		var regRich bool
 		if snap, ok := bs.PendingWait.GetSnapshot(uuid); ok {
 			regMsgID = snap.MsgID
 			regChatID = snap.ChatID
 			regTopicID = snap.TopicID
+			regRich = snap.Rich
 		}
 		if regMsgID == 0 {
 			if qMsgID, qChatID, _, _, ok := bs.PendingMsgStore.Get(uuid); ok && qMsgID != 0 {
@@ -582,7 +635,7 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 				regChatID = qChatID
 			}
 		}
-		if err := send(registeredMsg{Type: "registered", MsgID: regMsgID, ChatID: regChatID, TopicID: regTopicID}); err != nil {
+		if err := send(registeredMsg{Type: "registered", MsgID: regMsgID, ChatID: regChatID, TopicID: regTopicID, Rich: regRich}); err != nil {
 			logger.Error(fmt.Sprintf("pendingConnect: send registered failed uuid=%s err=%v", uuid, err))
 			return
 		}
@@ -621,8 +674,9 @@ func pendingConnectHandler(bs *types.BotState, cb Callbacks) http.HandlerFunc {
 				if !snapOk || waitSnap.Resolved {
 					return
 				}
-				// Hook stayed away — cancel via ResolveIfUnresolved + EditOrDefer
-				helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.PendingWait, bs.PendingMsgStore, waitSnap, "❌ Cancelled")
+				// Hook stayed away — cancel via ResolveIfUnresolved (state) + EditOrDefer that enqueues
+				// msg:freeze-edit onto the Message FIFO (B.8)
+				helpers.FreezeWaitEntryOnDesktop(bs.Bot, bs.MessageQueue, bs.PendingWait, bs.PendingMsgStore, waitSnap, "❌ Cancelled")
 				bs.PendingWait.Remove(capturedUUID)
 				logger.Info(fmt.Sprintf("pendingConnect grace expired: cancelled uuid=%s", capturedUUID))
 			}()

@@ -864,6 +864,54 @@ func TestBuildCompactToolLineBashNoDescription(t *testing.T) {
 	}
 }
 
+// Fix 13b: a no-arg tool (e.g. TaskList with tool_input {}) has no arg info, but the compact line must
+// still show at least the tool name (with its emoji) so the tool call is visible in compact display.
+func TestBuildCompactToolLineNoArgTool(t *testing.T) {
+	result := BuildCompactToolLine("TaskList", []byte(`{}`), "/tmp", 60)
+	if result != "📋 TaskList" {
+		t.Errorf("no-arg compact line should be name-only %q, got %q", "📋 TaskList", result)
+	}
+}
+
+// Fix 14: BuildCompactToolDetails wraps the compact one-line summary in a collapsed <details> block
+// whose body is the full tool args, so the user can expand to see the actual command. A no-arg tool has
+// no expandable body → just the summary line, no <details>.
+func TestBuildCompactToolDetails(t *testing.T) {
+	got := BuildCompactToolDetails("Bash", []byte(`{"command":"echo hello world"}`), "/tmp", 50)
+	if !strings.HasPrefix(got, "<details><summary>") {
+		t.Errorf("expected a <details><summary> prefix, got %q", got)
+	}
+	if !strings.Contains(got, "</summary>") || !strings.HasSuffix(got, "</details>") {
+		t.Errorf("expected a complete <details> block, got %q", got)
+	}
+	// The <summary> is the compact one-liner; the collapsed body carries the full command.
+	if !strings.Contains(got, "💻 Bash") || !strings.Contains(got, "echo hello world") {
+		t.Errorf("expected the compact summary and full command, got %q", got)
+	}
+	// No-arg tool: no expandable body → plain summary, no <details>.
+	na := BuildCompactToolDetails("TaskList", []byte(`{}`), "/tmp", 50)
+	if strings.Contains(na, "<details>") {
+		t.Errorf("no-arg tool should not be wrapped in <details>, got %q", na)
+	}
+	if na != "📋 TaskList" {
+		t.Errorf("no-arg compact details should be the plain summary %q, got %q", "📋 TaskList", na)
+	}
+}
+
+// Fix 17: the compact Read summary shows only the filename (basename), not the tail path — the full
+// path lives in the collapsed details body. Edit/Write keep the 3-segment tail path (unchanged).
+func TestBuildCompactToolLineReadBasename(t *testing.T) {
+	got := BuildCompactToolLine("Read", []byte(`{"file_path":"/tmp/claude-1000/-home-seraphli/tasks/ba96hbxz8.output"}`), "/tmp", 60)
+	if got != "📖 Read: ba96hbxz8.output" {
+		t.Errorf("compact Read should show basename only, got %q", got)
+	}
+	// Edit still shows the tail path (last 3 segments), not just the basename.
+	edit := BuildCompactToolLine("Edit", []byte(`{"file_path":"/tmp/claude-1000/tasks/ba96hbxz8.output"}`), "/tmp", 60)
+	if !strings.Contains(edit, "tasks/ba96hbxz8.output") {
+		t.Errorf("compact Edit should keep the tail path, got %q", edit)
+	}
+}
+
 func TestTruncateMiddle(t *testing.T) {
 	tests := []struct {
 		name     string

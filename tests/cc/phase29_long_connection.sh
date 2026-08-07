@@ -25,7 +25,7 @@ wait_for_idle
 LOG_BEFORE_TC1=$(wc -l < "$LOG_FILE")
 
 pane_log "[tc1] BEFORE permission prompt"
-inject_prompt "First write one sentence: TC29_PRE. Then run this exact bash command: echo tc29_perm_test > /tmp/tg-cli-phase29-tc1.txt. Run only this command and nothing else."
+inject_prompt "First write one sentence: TC29_PRE. Then use the Bash tool to run this exact command: echo tc29_perm_test > /tmp/tg-cli-phase29-tc1.txt. Run only this command and nothing else."
 pane_log "[tc1] AFTER permission prompt inject"
 
 # Wait for Permission request sent in log
@@ -98,11 +98,12 @@ if [ "$TC1_FOUND" = "true" ] && [ -n "$TC1_MSG_ID" ]; then
     fail "TC1: Permission not resolved within ${TIMEOUT}s"
   fi
 
-  # Wait for CC to finish (Stream relabel ✅)
+  # Wait for CC to finish — accept Stream relabel ✅ OR the dump-at-Stop delivery path
+  # (: Stop [ / Stop terminal: outcome=direct_send), which are mutually exclusive per turn.
   ELAPSED=0
   TC1_STOP=false
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
-    if tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -E "Stream relabel ✅:|: Stop \[|Stop terminal: outcome=direct_send" > /dev/null 2>&1; then
       TC1_STOP=true
       break
     fi
@@ -113,7 +114,7 @@ if [ "$TC1_FOUND" = "true" ] && [ -n "$TC1_MSG_ID" ]; then
   if [ "$TC1_STOP" = "true" ]; then
     pass "TC1: Stream relabel ✅ received (CC turn complete after permission)"
   else
-    fail "TC1: Stream relabel ✅ not received within ${TIMEOUT}s"
+    fail "TC1: Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s"
   fi
 else
   fail "TC1: PermissionRequest not triggered within ${TIMEOUT}s"
@@ -231,7 +232,7 @@ echo "  TC3: cancel via /pending/cancel → ❌ Cancelled label"
 LOG_BEFORE_TC3=$(wc -l < "$LOG_FILE")
 
 pane_log "[tc3] BEFORE permission cancel prompt"
-inject_prompt "Write one sentence: TC29_TC3_CANCEL. Then run this exact bash command: echo tc29_cancel_test > /tmp/tg-cli-phase29-tc3.txt. Run only this command, nothing else."
+inject_prompt "Write one sentence: TC29_TC3_CANCEL. Then use the Bash tool to run this exact command: echo tc29_cancel_test > /tmp/tg-cli-phase29-tc3.txt. Run only this command, nothing else."
 pane_log "[tc3] AFTER inject"
 
 # Wait for Permission request sent
@@ -318,7 +319,7 @@ echo "  TC4: bot restart while PermissionRequest pending → original button res
 LOG_BEFORE_TC4=$(wc -l < "$LOG_FILE")
 
 pane_log "[tc4] BEFORE permission restart prompt"
-inject_prompt "Write one sentence: TC29_TC4_RESTART. Then run this exact bash command: echo tc29_restart_test > /tmp/tg-cli-phase29-tc4.txt. Run only this command, nothing else."
+inject_prompt "Write one sentence: TC29_TC4_RESTART. Then use the Bash tool to run this exact command: echo tc29_restart_test > /tmp/tg-cli-phase29-tc4.txt. Run only this command, nothing else."
 pane_log "[tc4] AFTER inject"
 
 # Wait for Permission request sent and hook connected
@@ -392,11 +393,12 @@ if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
     pass_opt "TC4: /permission/decide returned: $DECIDE_RESP (may resolve via alternate path after restart)"
   fi
 
-  # Wait for CC to complete (Stream relabel ✅)
+  # Wait for CC to complete — accept Stream relabel ✅ OR the dump-at-Stop delivery path
+  # (: Stop [ / Stop terminal: outcome=direct_send), which are mutually exclusive per turn.
   ELAPSED=0
   TC4_STOP=false
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
-    if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -E "Stream relabel ✅:|: Stop \[|Stop terminal: outcome=direct_send" > /dev/null 2>&1; then
       TC4_STOP=true
       break
     fi
@@ -409,7 +411,7 @@ if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
   if [ "$TC4_STOP" = "true" ]; then
     pass "TC4: Stream relabel ✅ received (CC turn complete after restart + resolve)"
   else
-    fail "TC4: Stream relabel ✅ not received within ${TIMEOUT}s after restart"
+    fail "TC4: Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s after restart"
   fi
 else
   fail "TC4: hook connected not logged within ${TIMEOUT}s"

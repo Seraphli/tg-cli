@@ -11,6 +11,7 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -46,7 +47,7 @@ func DoRespondAsk(
 	if len(snap.Questions) > 0 {
 		frozenMarkup = BuildFrozenMarkup(snap.Questions, frozenLabel)
 		msgText = snap.MsgText
-		reactionTracker.RecordPending(snap.TmuxTarget, snap.ChatID, msgID)
+		reactionTracker.RecordPending(bot, snap.TmuxTarget, snap.ChatID, msgID)
 	}
 	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{
 		Type:   "answer",
@@ -58,9 +59,10 @@ func DoRespondAsk(
 	if frozenMarkup != nil && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
 		capturedLabel := frozenLabel
+		capturedRich := snap.Rich
 		pendingMsgStore.EditOrDefer(uuid, func(eID int, chatID int64, editMsgText string, topicID int) {
 			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 			if err != nil {
 				logger.Error(fmt.Sprintf("DoRespondAsk: EDIT failed msg_id=%d label=%s err=%v", eID, capturedLabel, err))
 			} else {
@@ -70,7 +72,7 @@ func DoRespondAsk(
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
+		RetryFreezeEditAuto(bot, editMsg, snap.Rich, msgText, frozenMarkup)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion responded: msg_id=%d uuid=%s answers=%v", msgID, uuid, answers))
 	return nil
@@ -106,9 +108,10 @@ func DoCancelAsk(
 	if won && frozenMarkup != nil {
 		if pendingMsgStore != nil {
 			capturedMarkup := frozenMarkup
+			capturedRich := snap.Rich
 			pendingMsgStore.EditOrDefer(uuid, func(eID int, eChatID int64, editMsgText string, topicID int) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-				_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 				if err != nil {
 					logger.Error(fmt.Sprintf("DoCancelAsk: EDIT failed msg_id=%d err=%v", eID, err))
 				} else {
@@ -117,7 +120,7 @@ func DoCancelAsk(
 			})
 		} else {
 			editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-			RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
+			RetryFreezeEditAuto(bot, editMsg, snap.Rich, msgText, frozenMarkup)
 		}
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion cancelled: msg_id=%d uuid=%s", msgID, uuid))
@@ -152,7 +155,7 @@ func DoChatAsk(
 	if len(snap.Questions) > 0 {
 		frozenMarkup = BuildFrozenMarkup(snap.Questions, "💬 Chat mode selected")
 		msgText = snap.MsgText
-		reactionTracker.RecordPending(snap.TmuxTarget, snap.ChatID, msgID)
+		reactionTracker.RecordPending(bot, snap.TmuxTarget, snap.ChatID, msgID)
 	}
 	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{
 		Type:   "answer",
@@ -163,9 +166,10 @@ func DoChatAsk(
 	}
 	if frozenMarkup != nil && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
+		capturedRich := snap.Rich
 		pendingMsgStore.EditOrDefer(uuid, func(eID int, chatID int64, editMsgText string, topicID int) {
 			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: chatID}}
-			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 			if err != nil {
 				logger.Error(fmt.Sprintf("DoChatAsk: EDIT failed msg_id=%d err=%v", eID, err))
 			} else {
@@ -175,7 +179,7 @@ func DoChatAsk(
 	} else if frozenMarkup != nil {
 		// Fallback: direct edit using snap coordinates
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
+		RetryFreezeEditAuto(bot, editMsg, snap.Rich, msgText, frozenMarkup)
 	}
 	logger.Info(fmt.Sprintf("AskUserQuestion chat mode: msg_id=%d uuid=%s", msgID, uuid))
 	return nil
@@ -210,17 +214,76 @@ type SafeInjectTextParams struct {
 	FormatPaneID     func(string) string
 	Force            bool   // Skip busy check — used by flushInjectQueue
 	AltSnippet       string // Alternative snippet for CapturePane (e.g. "[Image" for image inject)
+	// AwaitAskQReady, when set, makes the phase-1 state check BOUNDED-WAIT (R1) for the PendingWait
+	// AskUserQuestion snapshot to appear before deciding. PendingWait registers in /pending/connect (NOT
+	// the PreToolUse hook), so at AskQ-custom-reply routing time the entry may not exist yet. Used only by
+	// the event-driven inject-queue router in AskQ-custom-reply mode.
+	AwaitAskQReady bool
+	// InjectDiag, if set, captures the pane immediately before/after the Enter keypress on the
+	// direct-inject path (flush only) for diagnostics. phase is "before-enter"/"after-enter".
+	InjectDiag func(phase, pane string)
+	// Requeued, when non-nil, is set to true if phase1 re-queued the text (CC busy or PermissionRequest
+	// pending) instead of injecting/answering. Lets a caller (deliverInjectQueue) log/notify accurately
+	// rather than reporting a re-queue as "Injected". Nil for callers that do not care.
+	Requeued *bool
 }
 
 // injectResult carries the outcome of safeInjectPhase1 to safeInjectPhase2.
 type injectResult struct {
 	err           error
 	ch            chan bool
-	confirmType   string // "askq", "prompt", ""
+	confirmType   string // "askq", "prompt", "codex_slash", ""
 	shouldSubmit  bool
 	captureTarget injector.TmuxTarget
 	snippet       string
 	altSnippet    string
+	submitted     bool // f29 C: codex_slash — the phase1 transaction pressed Enter (composer confirmed)
+}
+
+// isCodexSlash reports whether text is a codex slash-command — the scope of the f29 C inject-confirmation
+// transaction; every other case keeps the existing UPS/capture path. Source-faithful to the codex 0.144.x
+// slash grammar (codex-rs tui/src/bottom_pane/prompt_args.rs parse_slash_name +
+// tui/src/slash_input.rs validate_submission/inline_command): the input must LITERALLY start with "/"
+// (codex treats space-led input as ordinary text — no trimming), the first whitespace-delimited token
+// must name a non-empty command (parse_slash_name returns None for a bare "/"), and the name itself may
+// not contain "/" — which excludes multi-slash file paths like /tmp/x.jpg. Root-path single-slash image
+// paths (/image.jpg) still pass this text predicate and are excluded at the gate by codexSlashGate's
+// AltSnippet image bypass.
+func isCodexSlash(backend, text string) bool {
+	if backend != "codex" || !strings.HasPrefix(text, "/") {
+		return false
+	}
+	token := strings.Fields(text)[0]
+	return len(token) > 1 && !strings.Contains(token[1:], "/")
+}
+
+// codexSlashGate decides whether the f29 C codex-slash transaction runs for an inject. Image injects are
+// bypassed unconditionally: AltSnippet is set ONLY by the image-inject path (messages.go, "[Image"), and
+// codex renders a valid pasted image path as an attachment chip — the composer never shows the pasted
+// text, so compose-confirm could never match and the transaction would always veto with a false
+// ErrInjectNotConfirmed (the attempt-5 codex phase14 regression). A root-path image like /image.jpg is a
+// legal single-slash token the text predicate alone cannot exclude, hence this explicit bypass.
+func codexSlashGate(backend, text, altSnippet string) bool {
+	return altSnippet == "" && isCodexSlash(backend, text)
+}
+
+// codexComposerHasText reports whether the codex composer (a line led by the "›" prompt char) currently
+// shows our pasted snippet — the compose-confirm predicate for the f29 C codex-slash transaction. Scans
+// bottom-up so the live composer line (nearest the bottom) is matched, mirroring the phase2 prompt scan.
+func codexComposerHasText(pane, snippet string) bool {
+	lines := strings.Split(pane, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		raw := strings.TrimRight(lines[i], " \t")
+		j := strings.Index(raw, "›")
+		if j < 0 {
+			continue
+		}
+		after := strings.TrimLeft(raw[j+len("›"):], " \xc2\xa0")
+		if after != "" && strings.Contains(after, snippet) {
+			return true
+		}
+	}
+	return false
 }
 
 // SafeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
@@ -287,6 +350,28 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 	if err != nil {
 		return injectResult{err: err}
 	}
+	// R1 (AskQ handshake): the AskQ-custom-reply router routes on PreToolUse(AskUserQuestion), but the
+	// PendingWait AskQ entry registers in /pending/connect — it may not exist yet. Bounded-wait (up to 3s)
+	// for the AskQ snapshot to appear before the state check below, so we do not fall through to a direct
+	// inject that races the picker. If a non-AskQ (PermissionRequest) entry appears first, stop waiting —
+	// the permission guard below keeps the queue. Polling releases the session lock so /pending/connect
+	// (which needs the same lock via hook processing) is not blocked.
+	if p.AwaitAskQReady {
+		waitDeadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(waitDeadline) {
+			snap, ok := p.PendingWait.FindByTmuxTarget(tmuxTarget)
+			if ok && snap != nil {
+				break // an entry (AskQ or PermissionRequest) is registered — proceed to the state check
+			}
+			if sessionMu != nil {
+				sessionMu.Unlock()
+			}
+			time.Sleep(150 * time.Millisecond)
+			if sessionMu != nil {
+				sessionMu.Lock()
+			}
+		}
+	}
 	// PRE-INJECT: check if there's a pending entry (AskQ or PermissionRequest) via PendingWait
 	pwSnap, hasPending := p.PendingWait.FindByTmuxTarget(tmuxTarget)
 	hasAskQ := hasPending && pwSnap != nil && pwSnap.ToolName == "AskUserQuestion"
@@ -304,22 +389,25 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if chat != nil {
 			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
 			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), truncateQueueTexts(allTexts, 3500))
-			var sendOpts []interface{}
-			if topicID > 0 {
-				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-			}
+			// Fix 19: rich notification (RetrySendRich/RetryEditRich) so long queued content is not
+			// truncated by the 4096 plain-text cap; HTML-escape the user text for correct rich rendering.
+			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), markdown.EscapeHTML(truncateQueueTexts(allTexts, 3500)))
 			if existingMsgID, ok := p.InjectQueue.GetNotifyMsg(tmuxTarget); ok {
 				editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
-				RetryEdit(p.Bot, editMsg, notifyText)
+				RetryEditRich(p.Bot, editMsg, notifyText, RichSendOpts{})
 			} else {
-				sent, _ := RetrySend(p.Bot, chat, notifyText, sendOpts...)
+				sent, _ := RetrySendRich(p.Bot, chat, notifyText, RichSendOpts{TopicID: topicID})
 				if sent != nil {
 					p.InjectQueue.SetNotifyMsg(tmuxTarget, sent.ID)
 				}
 			}
 		}
-		if sessionMu != nil { sessionMu.Unlock() }
+		if sessionMu != nil {
+			sessionMu.Unlock()
+		}
+		if p.Requeued != nil {
+			*p.Requeued = true
+		}
 		return injectResult{}
 	}
 	// Answer pending AskUserQuestion via PendingWait (atomic CAS)
@@ -355,9 +443,10 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 					if frozenMarkup != nil {
 						capturedMarkup := frozenMarkup
 						capturedUUID := pwSnap.UUID
+						capturedRich := pwSnap.Rich
 						p.PendingMsgStore.EditOrDefer(capturedUUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
 							editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-							_, err := RetryFreezeEdit(p.Bot, editMsg, editMsgText, capturedMarkup)
+							_, err := RetryFreezeEditAuto(p.Bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 							if err != nil {
 								logger.Error(fmt.Sprintf("safeInjectText: AskQ EDIT failed msg_id=%d err=%v", msgID, err))
 							} else {
@@ -369,7 +458,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 					// Fallback: direct edit using snap coordinates
 					if len(pwSnap.Questions) > 0 {
 						editMsg := &tele.Message{ID: pwSnap.MsgID, Chat: &tele.Chat{ID: pwSnap.ChatID}}
-						RetryFreezeEdit(p.Bot, editMsg, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"))
+						RetryFreezeEditAuto(p.Bot, editMsg, pwSnap.Rich, pwSnap.MsgText, BuildFrozenMarkup(pwSnap.Questions, "✅ Custom reply"))
 					}
 				}
 				logger.Info(fmt.Sprintf("safeInjectText: answered AskUserQuestion uuid=%s text=%s", pwSnap.UUID, text))
@@ -394,42 +483,75 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		if chat != nil {
 			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
 			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), truncateQueueTexts(allTexts, 3500))
-			var sendOpts []interface{}
-			if topicID > 0 {
-				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-			}
+			// Fix 19: rich notification (RetrySendRich/RetryEditRich) so long queued content is not
+			// truncated by the 4096 plain-text cap; HTML-escape the user text for correct rich rendering.
+			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n🔒 PermissionRequest pending\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), markdown.EscapeHTML(truncateQueueTexts(allTexts, 3500)))
 			if existingMsgID, ok := p.InjectQueue.GetNotifyMsg(tmuxTarget); ok {
 				editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
-				RetryEdit(p.Bot, editMsg, notifyText)
+				RetryEditRich(p.Bot, editMsg, notifyText, RichSendOpts{})
 			} else {
-				sent, _ := RetrySend(p.Bot, chat, notifyText, sendOpts...)
+				sent, _ := RetrySendRich(p.Bot, chat, notifyText, RichSendOpts{TopicID: topicID})
 				if sent != nil {
 					p.InjectQueue.SetNotifyMsg(tmuxTarget, sent.ID)
 				}
 			}
 		}
-		if sessionMu != nil { sessionMu.Unlock() }
+		if sessionMu != nil {
+			sessionMu.Unlock()
+		}
+		if p.Requeued != nil {
+			*p.Requeued = true
+		}
 		return injectResult{}
 	}
 	logger.Info(fmt.Sprintf("safeInjectText: direct inject path, target=%s text=%s", tmuxTarget, text))
 	// Wait for Stop event cooldown before injecting
 	p.StopCooldown.WaitIfNeeded(tmuxTarget, 3*time.Second)
 	shouldSubmit := len(submit) == 0 || submit[0]
-	ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmUserPromptSubmit, text)
-	if err := injector.InjectText(target, text, shouldSubmit); err != nil {
-		p.InjectConfirm.Cancel(tmuxTarget)
-		if sessionMu != nil { sessionMu.Unlock() }
-		return injectResult{err: err}
-	}
-	// Release lock after injection — CapturePane and confirmation wait happen in phase2
-	if sessionMu != nil { sessionMu.Unlock() }
 	snippet := text
 	if idx := strings.Index(snippet, "\n"); idx >= 0 {
 		snippet = snippet[:idx]
 	}
 	if len(snippet) > 50 {
 		snippet = snippet[:50]
+	}
+	// f29 C: codex slash-command inject confirmation. codex emits NO UserPromptSubmit for a local slash
+	// command, and by the time a post-hoc capture runs the composer is already cleared — so the normal path
+	// yields a false ErrInjectNotConfirmed even though the command executed. Instead we OWN the Enter: paste
+	// WITHOUT Enter and poll the composer for our text UNDER the inject lock (still under sessionMu here, so
+	// the busy/pending state-check→mutation stays atomic — no TOCTOU), submit on confirm, then phase2 polls
+	// for the Working indicator. Scope: codex backend + leading "/" only; normal prompts keep the UPS path.
+	if shouldSubmit && p.SessionState != nil {
+		if info := p.SessionState.FindInfoByTarget(tmuxTarget); info != nil && codexSlashGate(info.Backend, text, p.AltSnippet) {
+			submitted, injErr := injector.InjectTextConfirmSubmit(target, text, func(pane string) bool {
+				return codexComposerHasText(pane, snippet)
+			}, 3*time.Second, 250*time.Millisecond)
+			if sessionMu != nil {
+				sessionMu.Unlock()
+			}
+			if injErr != nil {
+				return injectResult{err: injErr}
+			}
+			return injectResult{confirmType: "codex_slash", captureTarget: target, snippet: snippet, submitted: submitted}
+		}
+	}
+	ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmUserPromptSubmit, text)
+	var injErr error
+	if p.InjectDiag != nil {
+		injErr = injector.InjectTextDiag(target, text, shouldSubmit, p.InjectDiag)
+	} else {
+		injErr = injector.InjectText(target, text, shouldSubmit)
+	}
+	if injErr != nil {
+		p.InjectConfirm.Cancel(tmuxTarget)
+		if sessionMu != nil {
+			sessionMu.Unlock()
+		}
+		return injectResult{err: injErr}
+	}
+	// Release lock after injection — CapturePane and confirmation wait happen in phase2
+	if sessionMu != nil {
+		sessionMu.Unlock()
 	}
 	return injectResult{ch: ch, confirmType: "prompt", captureTarget: target, snippet: snippet, altSnippet: p.AltSnippet, shouldSubmit: shouldSubmit}
 }
@@ -441,7 +563,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		select {
 		case ok := <-res.ch:
 			if ok {
-				p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
+				p.ReactionTracker.ClearReactions(p.Bot, tmuxTarget)
 				logger.Info(fmt.Sprintf("safeInjectText: AskQ answer confirmed via PostToolUse, target=%s", tmuxTarget))
 			} else {
 				logger.Info(fmt.Sprintf("safeInjectText: AskQ answer content mismatch, target=%s", tmuxTarget))
@@ -451,6 +573,32 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer not confirmed (PostToolUse timeout), target=%s", tmuxTarget))
 		}
 		return nil
+	}
+	if res.confirmType == "codex_slash" {
+		// f29 C: the clear+paste+compose-confirm+submit already ran in phase1 under sessionMu. If the
+		// composer never showed our text, the transaction pressed nothing → unconfirmed (soft
+		// delivery-status) path.
+		if !res.submitted {
+			logger.Info(fmt.Sprintf("safeInjectText: codex slash compose not confirmed (no submit), target=%s", tmuxTarget))
+			return fmt.Errorf("%w for target=%s", ErrInjectNotConfirmed, tmuxTarget)
+		}
+		// Working-confirm (read-only, OUTSIDE any lock): poll for the codex Working indicator
+		// (IsSessionRunning true = the canonical busy pane-title spinner) up to workingTimeout. A
+		// TUI-exiting command (/quit, /exit) never shows Working, so it soft-annotates unconfirmed though
+		// it executed — known behavior, no special-casing.
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			if IsSessionRunning(tmuxTarget) {
+				p.ReactionTracker.ClearReactions(p.Bot, tmuxTarget)
+				logger.Info(fmt.Sprintf("safeInjectText: codex slash inject confirmed (Working), target=%s", tmuxTarget))
+				return nil
+			}
+			if time.Now().After(deadline) {
+				logger.Info(fmt.Sprintf("safeInjectText: codex slash inject not confirmed (Working timeout), target=%s", tmuxTarget))
+				return fmt.Errorf("%w for target=%s", ErrInjectNotConfirmed, tmuxTarget)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
 	}
 	// confirmType == "prompt"
 	// CapturePane verification — scan bottom-up, distinguish idle/staged/submitted states
@@ -542,7 +690,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		}
 	}
 	if confirmed {
-		p.ReactionTracker.PromotePending(p.Bot, tmuxTarget)
+		p.ReactionTracker.ClearReactions(p.Bot, tmuxTarget)
 		logger.Info(fmt.Sprintf("safeInjectText: inject confirmed, target=%s capturePane=%v", tmuxTarget, captureConfirmed))
 	} else {
 		logger.Info(fmt.Sprintf("safeInjectText: inject not confirmed, target=%s", tmuxTarget))
@@ -570,7 +718,7 @@ func cleanupAskState(
 	}
 	if !snap.Resolved && len(snap.Questions) > 0 {
 		editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-		RetryFreezeEdit(bot, editMsg, snap.MsgText, BuildFrozenMarkup(snap.Questions, "❌ Cancelled"))
+		RetryFreezeEditAuto(bot, editMsg, snap.Rich, snap.MsgText, BuildFrozenMarkup(snap.Questions, "❌ Cancelled"))
 	}
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }

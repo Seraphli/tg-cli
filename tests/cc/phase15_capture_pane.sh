@@ -82,6 +82,9 @@ echo "  DEBUG: TC15-2 page_entry RESP: $PE_RESP"
 pane_log "[TC15-2] AFTER page_entry check"
 
 set +eo pipefail
+# TC15-2-3: capture is delivered as a RICH message (Bot API 10.1) WITHOUT a <pre> block — raw
+# terminal content is HTML-escaped and sent as rich text (up to RichMaxRunes). So the PageEntry is
+# rich==True (raw_mode is false/unset).
 echo "$PE_RESP" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -89,13 +92,14 @@ ok = (d.get('exists') and
       '📺 Pane Capture' in d.get('header','') and
       d.get('collapsed') == False and
       d.get('current_page') == 1 and
-      d.get('raw_mode') == True)
+      d.get('rich') == True and
+      d.get('raw_mode') != True)
 sys.exit(0 if ok else 1)
 "
 _rc=$?
 set -eo pipefail
 if [ "$_rc" -eq 0 ]; then
-  pass "TC15-2-3: page_entry header/collapsed/current_page/raw_mode correct"
+  pass "TC15-2-3: page_entry header/collapsed/current_page correct, rich=True (no raw_mode)"
 else
   fail "TC15-2-3: page_entry fields wrong (resp=$PE_RESP)"
 fi
@@ -135,19 +139,23 @@ echo "  DEBUG: TC15-2-5 expand RESP (${#EXPAND_RESP} chars)"
 pane_log "[TC15-2] AFTER expand"
 
 set +eo pipefail
+# TC15-2-5: expanded capture shows the HTML-escaped content as rich text (header + chunk), with NO
+# <pre> wrapping. collapsibleBody returns header+chunk (chunk already escaped) for capture rich entries.
 echo "$EXPAND_RESP" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
+t=d.get('text','')
 ok = (d.get('collapsed') == False and
-      'hello-capture-single' in d.get('text',''))
+      'hello-capture-single' in t and
+      '<pre>' not in t)
 sys.exit(0 if ok else 1)
 "
 _rc=$?
 set -eo pipefail
 if [ "$_rc" -eq 0 ]; then
-  pass "TC15-2-5: expand → collapsed=false, text contains hello-capture-single"
+  pass "TC15-2-5: expand → collapsed=false, content rich (escaped, no <pre>)"
 else
-  fail "TC15-2-5: expand wrong (collapsed=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") has_content=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('hello-capture-single' in d.get('text',''))"))"
+  fail "TC15-2-5/TC12: expand wrong (collapsed=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") text=$(echo "$EXPAND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(repr(d.get('text','')[:120]))"))"
 fi
 
 # TC15-4c: del persists after expand
@@ -185,7 +193,9 @@ echo "  [TC15-3] Multi-page capture collapse button with CurrentPage restore"
 MULTI_JSON=$(python3 -c "
 import json
 lines = ['__P1_MARKER__']
-for i in range(1, 31):
+# Capture now uses the RICH threshold (RichMaxRunes ~30000), not the 500-rune paginationMaxRunes.
+# Generate >30000 chars so the body still splits into >=2 pages.
+for i in range(1, 2001):
     lines.append(f'line-{i}-abcdefghij')
 lines.append('__P2_MARKER__')
 content = '\n'.join(lines)
@@ -213,7 +223,7 @@ if [ "$_rc" -eq 0 ]; then
   TOTAL_CHUNKS=$(echo "$CAP3_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('chunks',0))")
   pass "TC15-3-1: chunks>=2 (got $TOTAL_CHUNKS)"
 else
-  fail "TC15-3-1: chunks<2 — paginationMaxRunes config may not be set to 500 (resp=$CAP3_RESP)"
+  fail "TC15-3-1: chunks<2 — capture content may not exceed RichMaxRunes (~30000) (resp=$CAP3_RESP)"
 fi
 
 # Assert initial current_page==chunks (starts at last page)
@@ -350,4 +360,49 @@ if [ "$_rc" -eq 0 ]; then
   pass "TC15-3-8: expand restores to page 2 (collapsed=false, P2 present, P1 absent)"
 else
   fail "TC15-3-8: expand did not restore to page 2 (collapsed=$(echo "$E3_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") has_P2=$(echo "$E3_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('__P2_MARKER__' in d.get('text',''))") has_P1=$(echo "$E3_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('__P1_MARKER__' in d.get('text',''))"))"
+fi
+
+# ============================================================
+# TC15-9 (Fix: /p hang): a large raw capture containing tag-like sequences (<b>, <td>, </li>, Vec<T>)
+# must return a message, not hang. Regression for the production /p bug where a 163KB pane capture
+# with tag-like terminal text spun SplitBody forever (captured N bytes, then NO send and NO error).
+# SendCaptureReply now HTML-escapes BEFORE splitting, and SplitBody has a forward-progress guard, so
+# this completes quickly and returns a msg_id.
+# ============================================================
+pane_log "[TC15-9] BEFORE large tag-like capture"
+# The ~180KB body is written to a file and sent via --data @file: passing it as a -d "$VAR"
+# command-line argument exceeds ARG_MAX ("Argument list too long").
+BIG_JSON_FILE=$(mktemp)
+python3 -c "
+import json
+content = '__HANG_P1__\n' + ('<b>x <td>y </li> a<c>d Vec<T>\n' * 6000) + '__HANG_P2__'
+print(json.dumps({'target': '$E2E_PANE', 'content': content}))
+" > "$BIG_JSON_FILE"
+set +eo pipefail
+BIG_RESP=$(curl -sf --max-time 60 -X POST "http://127.0.0.1:$TEST_PORT/test/capture_message" \
+  -H "Content-Type: application/json" \
+  --data @"$BIG_JSON_FILE")
+CURL_RC=$?
+set -eo pipefail
+rm -f "$BIG_JSON_FILE"
+echo "  DEBUG: TC15-9 big capture curl_rc=$CURL_RC RESP: ${BIG_RESP:0:200}"
+pane_log "[TC15-9] AFTER large tag-like capture"
+
+if [ "$CURL_RC" -ne 0 ]; then
+  fail "TC15-9: /test/capture_message did not respond within 60s (curl rc=$CURL_RC) — SplitBody hang regression?"
+else
+  set +eo pipefail
+  echo "$BIG_RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+sys.exit(0 if d.get('msg_id') and d.get('chunks',0)>=1 else 1)
+"
+  _rc=$?
+  set -eo pipefail
+  if [ "$_rc" -eq 0 ]; then
+    CH=$(echo "$BIG_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('chunks',0))")
+    pass "TC15-9: large tag-like capture returned a msg_id, chunks=$CH (no SplitBody hang)"
+  else
+    fail "TC15-9: large tag-like capture returned no msg_id (resp=${BIG_RESP:0:200})"
+  fi
 fi

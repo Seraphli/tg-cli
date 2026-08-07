@@ -63,6 +63,12 @@ func Debug(message string) {
 	writeLog(entry)
 }
 
+func Warn(message string) {
+	entry := formatEntry("WARN", message)
+	fmt.Fprintln(os.Stderr, entry)
+	writeLog(entry)
+}
+
 func Error(message string) {
 	entry := formatEntry("ERROR", message)
 	fmt.Fprintln(os.Stderr, entry)

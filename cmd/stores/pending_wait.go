@@ -57,6 +57,7 @@ type PendingWaitEntry struct {
 	Questions          []QuestionMeta  // AskUserQuestion prompts for this entry
 	MsgText            string          // original TG message text
 	PermSuggestions    json.RawMessage // raw permission suggestions JSON
+	Rich               bool            // true = message was sent as rich (Bot API 10.1); persisted across restarts
 }
 
 // EntrySnapshot is an immutable copy of key PendingWaitEntry fields.
@@ -74,6 +75,7 @@ type EntrySnapshot struct {
 	Questions       []QuestionMeta
 	MsgText         string
 	PermSuggestions json.RawMessage
+	Rich            bool // true = message was sent as rich (Bot API 10.1); drives mixed-era edit path (G1)
 }
 
 func snapshotOf(e *PendingWaitEntry) EntrySnapshot {
@@ -91,6 +93,7 @@ func snapshotOf(e *PendingWaitEntry) EntrySnapshot {
 		Questions:       deepCopyQuestions(e.Questions),
 		MsgText:         e.MsgText,
 		PermSuggestions: append([]byte(nil), e.PermSuggestions...),
+		Rich:            e.Rich,
 	}
 }
 
@@ -337,7 +340,7 @@ func (s *PendingWaitStore) ResolveIfUnresolved(uuid string, ev WaitEvent) (won b
 	return true, snap, true
 }
 
-// BackfillMsgID sets the MsgID, ChatID, TopicID, and MsgText on an existing entry.
+// BackfillMsgID sets the MsgID, ChatID, TopicID, MsgText, and Rich on an existing entry.
 func (s *PendingWaitStore) BackfillMsgID(uuid string, msgID int, chatID int64, topicID int, msgText string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -349,6 +352,15 @@ func (s *PendingWaitStore) BackfillMsgID(uuid string, msgID int, chatID int64, t
 	e.ChatID = chatID
 	e.TopicID = topicID
 	e.MsgText = msgText
+}
+
+// SetRich marks the entry as having been sent in rich format (persisted across bot restarts).
+func (s *PendingWaitStore) SetRich(uuid string, rich bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[uuid]; ok {
+		e.Rich = rich
+	}
 }
 
 // ToggleQuestionOption toggles the selected state of an option in a multi-select question.

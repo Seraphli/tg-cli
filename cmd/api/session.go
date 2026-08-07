@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Seraphli/tg-cli/cmd/handlers"
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/cmd/types"
+	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
@@ -60,8 +61,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			if title != "" && backend != "" {
 				idle = !helpers.IsSessionRunning(targetFilter)
 			} else if title != "" {
-				r, _ := utf8.DecodeRuneInString(title)
-				idle = !(r >= 0x2800 && r <= 0x28FF)
+				idle = !helpers.TitleIsBusy("codex", title)
 			}
 			allIdle = idle
 			result[targetFilter] = sessionIdleEntry{Target: targetFilter, Idle: idle}
@@ -81,6 +81,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, errMsg, 400)
 			return
 		}
+		bs.InjectQueue.ClearDeadTargets(injector.TargetExists)
 		logger.Info(fmt.Sprintf("Session name set via API: session=%s name=%s", sessionID, name))
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -117,9 +118,10 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			}
 			if frozenMarkup != nil {
 				capturedMarkup := frozenMarkup
+				capturedRich := snap.Rich
 				bs.PendingMsgStore.EditOrDefer(uuid, func(msgID int, chatID int64, editMsgText string, topicID int) {
 					editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-					_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+					_, err := helpers.RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 					if err != nil {
 						logger.Error(fmt.Sprintf("/pending/cancel EDIT failed msg_id=%d uuid=%s err=%v", msgID, uuid, err))
 					} else {
@@ -356,34 +358,77 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			injectText = fmt.Sprintf("---\n💬 Message from agent [%s]\n---\n%s", req.From, req.Text)
 		}
 		p := buildSafeInjectParams(bs)
-		if err := helpers.SafeInjectText(p, info.TmuxTarget, injectText); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		injErr := helpers.SafeInjectText(p, info.TmuxTarget, injectText)
+		status, deliveryStatus, doNotify := sessionSendResult(injErr)
+		if !doNotify {
+			// Hard pre-delivery failure: no notification, report the error.
+			http.Error(w, injErr.Error(), status)
 			return
 		}
-		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s noHeader=%t text=%s injectText=%q", req.Name, info.TmuxTarget, req.From, req.NoHeader, req.Text, injectText))
-		// Send TG notification to the target session's chat
+		logger.Info(fmt.Sprintf("Session send via API: name=%s target=%s from=%s noHeader=%t delivery_status=%q text=%s injectText=%q", req.Name, info.TmuxTarget, req.From, req.NoHeader, deliveryStatus, req.Text, injectText))
+		// Send TG notification to the target session's chat. The neutral SessionSend header is built by
+		// BuildNotificationText; the raw req.Text is paginated via SplitRichLegacyBodyPages (paired
+		// rich/legacy BODY chunks). The rich payload gets the <hr/> boundary (InsertRichHr); legacy does not.
 		chat, _, topicID := helpers.ResolveChat(bs.SessionState, info.TmuxTarget)
 		if chat != nil {
-			fromLine := fmt.Sprintf("📤 From: %s\n", req.From)
-			header := "💬 CLI Send"
-			if req.NoHeader {
-				header = "📨 CLI Send (silent)"
+			cfg, _ := config.LoadAppConfig()
+			richMax := cfg.RichMaxRunes
+			if richMax <= 0 {
+				richMax = 30000
 			}
-			notifyText := fmt.Sprintf("%s\n%s━━━━━━━━━━\n%s", header, fromLine, req.Text)
-			var sendOpts []interface{}
-			if topicID > 0 {
-				sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+			baseND := notify.NotificationData{
+				Event:          "SessionSend",
+				SendFrom:       req.From,
+				SendNoHeader:   req.NoHeader,
+				TmuxTarget:     info.TmuxTarget,
+				ContextUsedPct: -1,
+				DeliveryStatus: deliveryStatus,
 			}
-			chunks := helpers.SplitBody(notifyText, 4000)
-			if len(chunks) <= 1 {
-				helpers.RetrySend(bot, chat, notifyText, sendOpts...)
+			chunks, legacyChunks, err := helpers.SplitRichLegacyBodyPages(req.Text, baseND, richMax)
+			if err != nil {
+				// Minimal, independently bounded fallback: fixed message + sender; no pagination, no loop.
+				fallback := fmt.Sprintf("💬 CLI Send from %s: message too large to render", req.From) + notify.DeliveryStatusTag(deliveryStatus)
+				helpers.RetrySendRich(bot, chat, fallback, helpers.RichSendOpts{TopicID: topicID, LegacyHTML: fallback})
+				logger.Info(fmt.Sprintf("Session send fallback: target=%s from=%s err=%v", req.Name, req.From, err))
 			} else {
-				helpers.RetrySend(bot, chat, chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), sendOpts...)
+				pageND := func(page int) notify.NotificationData {
+					nd := baseND
+					if len(chunks) > 1 {
+						nd.Page = page
+						nd.TotalPages = len(chunks)
+					}
+					return nd
+				}
+				nd1 := pageND(1)
+				nd1.Body = chunks[0]
+				richText := helpers.InsertRichHr(notify.BuildNotificationText(nd1))
+				nd1Legacy := pageND(1)
+				nd1Legacy.Body = legacyChunks[0]
+				legacyText := notify.BuildNotificationText(nd1Legacy)
+				opts := helpers.RichSendOpts{TopicID: topicID, LegacyHTML: legacyText}
+				if len(chunks) > 1 {
+					opts.Markup = helpers.BuildPageKeyboard(1, len(chunks))
+				}
+				sent, serr := helpers.RetrySendRich(bot, chat, richText, opts)
+				if serr == nil && len(chunks) > 1 {
+					bs.Pages.Store(sent.ID, "", &stores.PageEntry{
+						Chunks:         chunks,
+						LegacyChunks:   legacyChunks,
+						Event:          "SessionSend",
+						TmuxTarget:     info.TmuxTarget,
+						ContextUsedPct: -1,
+						SendFrom:       req.From,
+						SendNoHeader:   req.NoHeader,
+						DeliveryStatus: deliveryStatus,
+						ChatID:         chat.ID,
+						Rich:           true,
+					})
+				}
+				logger.Info(fmt.Sprintf("Session send notification: target=%s from=%s pages=%d text=%s", req.Name, req.From, len(chunks), req.Text))
 			}
-			logger.Info(fmt.Sprintf("Session send notification: target=%s from=%s text=%s", req.Name, req.From, req.Text))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
+		w.Write([]byte(sessionSendBody(deliveryStatus)))
 	})
 	mux.HandleFunc("/session/exit", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -493,6 +538,33 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "timeout"})
 		}
 	})
+}
+
+// sessionSendResult classifies a SafeInjectText outcome for /session/send. A nil error or a
+// post-paste "text reached the pane" sentinel (ErrInjectNotConfirmed / ErrSubmitAfterPaste) is a
+// SOFT result: HTTP 200 + a delivery-status annotation, and the TG notification is still sent (the
+// message WAS delivered; a 500 would invite a dangerous re-send). Any pre-delivery error is HARD:
+// HTTP 500, no notification.
+func sessionSendResult(injErr error) (status int, deliveryStatus string, doNotify bool) {
+	if injErr == nil {
+		return http.StatusOK, "", true
+	}
+	if errors.Is(injErr, helpers.ErrInjectNotConfirmed) {
+		return http.StatusOK, "unconfirmed", true
+	}
+	if errors.Is(injErr, injector.ErrSubmitAfterPaste) {
+		return http.StatusOK, "submit_failed", true
+	}
+	return http.StatusInternalServerError, "", false
+}
+
+// sessionSendBody builds the /session/send JSON response. delivery_status is omitted when empty so
+// the normal-path body stays byte-identical to the historical {"ok":true}.
+func sessionSendBody(deliveryStatus string) string {
+	if deliveryStatus == "" {
+		return `{"ok":true}`
+	}
+	return fmt.Sprintf(`{"ok":true,"delivery_status":%q}`, deliveryStatus)
 }
 
 // buildSafeInjectParams constructs SafeInjectTextParams from BotState.

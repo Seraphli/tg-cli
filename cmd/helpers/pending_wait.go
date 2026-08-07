@@ -40,10 +40,13 @@ func FormatAnswers(answers map[string]string) string {
 }
 
 // FreezeWaitEntryOnDesktop edits the stored TG message for a pending entry using the bot.
-// Takes an EntrySnapshot to avoid data races. Uses ResolveIfUnresolved for atomic CAS,
-// then EditOrDefer to freeze TG buttons. EditFunc uses PendingMsgStore-provided msgID/chatID.
-func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStore, pendingMsgStore *stores.PendingMsgStore, snap stores.EntrySnapshot, label string) {
-	// Pre-build frozen markup BEFORE CAS (data race B3 prevention)
+// Takes an EntrySnapshot to avoid data races. B.8: the STATE (BuildFrozenMarkup + ResolveIfUnresolved)
+// stays on the Hook FIFO; the EditOrDefer callback ONLY captures the coords and enqueues a msg:freeze-edit
+// op onto the Message FIFO that performs the actual freeze edit I/O (INV2) — for BOTH the immediate
+// (coords already known) AND the deferred (SetAndDrain) paths. The freeze SEMANTICS are unchanged: still
+// exactly-once (ResolveIfUnresolved CAS) and still both PendingMsgStore paths.
+func FreezeWaitEntryOnDesktop(bot *tele.Bot, messageQueue *stores.SessionEventStore, pendingWait *stores.PendingWaitStore, pendingMsgStore *stores.PendingMsgStore, snap stores.EntrySnapshot, label string) {
+	// Pre-build frozen markup BEFORE CAS (data race B3 prevention) — STATE on the Hook FIFO.
 	var frozenMarkup *tele.ReplyMarkup
 	if snap.ToolName == "AskUserQuestion" {
 		frozenMarkup = BuildFrozenMarkup(snap.Questions, label)
@@ -60,13 +63,21 @@ func FreezeWaitEntryOnDesktop(bot *tele.Bot, pendingWait *stores.PendingWaitStor
 	}
 	capturedLabel := label
 	capturedMarkup := frozenMarkup
+	capturedRich := snap.Rich
+	capturedSession := snap.SessionID
 	pendingMsgStore.EditOrDefer(snap.UUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
-		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
-		if err != nil {
-			logger.Error(fmt.Sprintf("FreezeWaitEntry: EDIT failed msg_id=%d label=%s err=%v", msgID, capturedLabel, err))
-		} else {
-			logger.Info(fmt.Sprintf("FreezeWaitEntry: EDIT completed msg_id=%d label=%s", msgID, capturedLabel))
-		}
+		// I/O-only callback: capture the resolved coords and enqueue msg:freeze-edit onto the Message FIFO
+		// (INV2). Fire-and-forget — no returned msg_id is reused, so DispatchAsync in Hook-FIFO order.
+		editMsgTextCaptured := editMsgText
+		messageQueue.DispatchAsync(capturedSession, "msg:freeze-edit", func() error {
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
+			_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgTextCaptured, capturedMarkup)
+			if err != nil {
+				logger.Error(fmt.Sprintf("FreezeWaitEntry: EDIT failed msg_id=%d label=%s err=%v", msgID, capturedLabel, err))
+			} else {
+				logger.Info(fmt.Sprintf("FreezeWaitEntry: EDIT completed msg_id=%d label=%s", msgID, capturedLabel))
+			}
+			return nil
+		})
 	})
 }

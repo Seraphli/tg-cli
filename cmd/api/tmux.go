@@ -101,7 +101,7 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		logger.Info(fmt.Sprintf("tmux kill-pane via API: target=%s", formatted))
-		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, formatted)
+		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, formatted)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -182,10 +182,11 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 					notifyChat = &tele.Chat{ID: chatID}
 				}
 			}
+			bs.InjectQueue.ClearDeadTargets(injector.TargetExists)
 			for _, si := range bs.SessionState.All() {
 				target, err := injector.ParseTarget(si.TmuxTarget)
 				if err != nil || !injector.SessionExists(target) {
-					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, si.TmuxTarget)
+					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, si.TmuxTarget)
 				}
 			}
 			if notifyChat != nil {

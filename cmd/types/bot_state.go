@@ -16,12 +16,13 @@ type BotState struct {
 	Port      int    // resolved bot HTTP port; used to render @ channel reply/end CLI instructions
 	ConfigDir string // resolved config dir; used to render @ channel reply/end CLI instructions
 
-	Pages         *stores.PageCacheStore
-	SessionState  *stores.SessionStateStore
+	Pages           *stores.PageCacheStore
+	SessionState    *stores.SessionStateStore
 	SessionCounts   *stores.SessionCountStore
 	MergeBuffers    *stores.MergeBufferStore
 	InjectQueue     *stores.InjectQueueStore
 	InjectConfirm   *stores.InjectConfirmStore
+	InjectRoute     *stores.InjectRouteStore // event-driven inject-queue routing (MD-final trigger, R2)
 	CronJobs        *stores.CronJobStore
 	ReactionTracker *stores.ReactionTrackerStore
 	HookRunning     *stores.HookRunningStateStore
@@ -29,13 +30,20 @@ type BotState struct {
 	SessionWatch    *stores.SessionWatchStore
 	ToolUseMsgs     *stores.ToolUseMsgStore
 	CommandStats    *stores.CommandStatsStore
-	SessionEvents   *stores.SessionEventStore
+	SessionEvents   *stores.SessionEventStore // Hook FIFO (per-session serialized; uses drain/wait/await)
+	MessageQueue    *stores.SessionEventStore // Message FIFO (per-session serialized; owns TG send/edit I/O + MsgIDMap mutations)
+	MsgIDMap        *stores.MsgIDMap          // internal-id -> (TG-msg-id, sessionID); written/read/deleted ONLY on the Message FIFO
 	AtChannels      *stores.AtChannelStore
 	CompactTools    *stores.CompactToolStore
 	Streams         *stores.StreamStore
 	PendingWait     *stores.PendingWaitStore
 	PendingMsgStore *stores.PendingMsgStore
-	FlushInFlight   sync.Map
+	BusyStatus      *stores.BusyStatusStore
+
+	// f29 D: per-target previous running state for busy→idle 401 detection. Owned by the SERIAL
+	// runBusyTick loop (ticker-serialized, no lock needed); doubles as the once-per-stall dedup (rearm on
+	// false→true). Lazily initialized in runBusyTick.
+	BusyPrevRunning map[string]bool
 
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map

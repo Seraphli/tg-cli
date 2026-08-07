@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Seraphli/tg-cli/internal/config"
+	"github.com/Seraphli/tg-cli/internal/notify"
 	"github.com/spf13/cobra"
 )
 
@@ -21,27 +23,27 @@ var SessionCmd = &cobra.Command{
 }
 
 var (
-	sessionPort        int
-	sessionName        string
-	sessionSelf        bool
-	sessionLines       int
-	sessionNoTools     bool
-	sessionFormat      string
-	sessionText        string
-	sessionSendFrom    string
-	sessionSession     string
-	sessionWorkDir     string
-	sessionCommand     string
-	sessionHost        string
-	sessionToken       string
-	sessionNewName     string
-	sessionPermMode    string
-	sessionPermStatus  bool
-	sessionNoHeader    bool
-	sessionSetName     string
-	sessionSendWatch   bool
-	sessionAtRounds    int
-	sessionAtLines     int
+	sessionPort       int
+	sessionName       string
+	sessionSelf       bool
+	sessionLines      int
+	sessionNoTools    bool
+	sessionFormat     string
+	sessionText       string
+	sessionSendFrom   string
+	sessionSession    string
+	sessionWorkDir    string
+	sessionCommand    string
+	sessionHost       string
+	sessionToken      string
+	sessionNewName    string
+	sessionPermMode   string
+	sessionPermStatus bool
+	sessionNoHeader   bool
+	sessionSetName    string
+	sessionSendWatch  bool
+	sessionAtRounds   int
+	sessionAtLines    int
 )
 
 var sessionListCmd = &cobra.Command{
@@ -192,6 +194,37 @@ func apiRequest(method, url string, body io.Reader, token string) (*http.Respons
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return http.DefaultClient.Do(req)
+}
+
+// getWithUpgradeReconnect performs a long-poll GET that survives a service upgrade. On a connection
+// drop it inspects config.UpgradeFlagActive(): while an upgrade is in progress it prints a reconnect
+// notice and retries with a 2s backoff until the service answers again; when no upgrade is in progress
+// the drop is abnormal and it returns the connection error for the caller to surface. The request is
+// rebuilt each attempt (long-poll: no client timeout). A cancelled ctx (e.g. SIGINT) aborts the loop
+// and returns ctx.Err() so the caller can exit quietly rather than report a lost connection.
+func getWithUpgradeReconnect(ctx context.Context, apiURL, token string) (*http.Response, error) {
+	client := &http.Client{Timeout: 0}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !config.UpgradeFlagActive() {
+			return nil, err
+		}
+		fmt.Fprintln(os.Stderr, "Service upgrading, reconnecting...")
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func getSessionPort() int {
@@ -456,12 +489,27 @@ func runSessionSend(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", string(respBody))
 		os.Exit(1)
 	}
+	respBody, _ := io.ReadAll(resp.Body)
+	var res struct {
+		DeliveryStatus string `json:"delivery_status"`
+	}
+	json.Unmarshal(respBody, &res)
 	fmt.Printf("Message sent to %s.\n", name)
+	if res.DeliveryStatus != "" {
+		// Soft delivery: the keys reached the pane but delivery/submit was not confirmed. Warn the
+		// operator NOT to re-send, and skip --watch — a soft-delivery command emits no session events
+		// so the watch would block until timeout. Exit 0 (the message WAS delivered).
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", notify.DeliveryStatusWarning(res.DeliveryStatus))
+		if sessionSendWatch {
+			fmt.Fprintln(os.Stderr, "Note: --watch skipped (delivery not confirmed; no events expected).")
+		}
+		return
+	}
 	if sessionSendWatch {
 		watchURL := buildAPIURL(sessionHost, port, fmt.Sprintf("/session/watch?name=%s", name))
-		watchResp, err := apiRequest("GET", watchURL, nil, sessionToken)
+		watchResp, err := getWithUpgradeReconnect(context.Background(), watchURL, sessionToken)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error watching: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Connection lost: server unreachable (not an upgrade)")
 			os.Exit(1)
 		}
 		defer watchResp.Body.Close()
@@ -505,9 +553,9 @@ func runSessionWatch(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	url := buildAPIURL(sessionHost, port, fmt.Sprintf("/session/watch?name=%s", sessionName))
-	resp, err := apiRequest("GET", url, nil, sessionToken)
+	resp, err := getWithUpgradeReconnect(context.Background(), url, sessionToken)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Connection lost: server unreachable (not an upgrade)")
 		os.Exit(1)
 	}
 	defer resp.Body.Close()

@@ -18,7 +18,7 @@ TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Inject prompt that triggers Bash tool (Codex uses PreToolUse hook for permission)
 pane_log "[codex/pretool] BEFORE permission prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo pretool_test_ok > /tmp/tg-cli-codex-pretool.txt. Run only this one command and nothing else."
+inject_prompt "First write a brief paragraph explaining what you are about to do, then use the Bash tool to run this exact command: echo pretool_test_ok > /tmp/tg-cli-codex-pretool.txt. Run only this one command and nothing else."
 pane_log "[codex/pretool] AFTER sending permission prompt"
 
 # Wait for PreToolUse notification in bot log
@@ -28,7 +28,7 @@ PERM_MSG_ID=""
 while [ $ELAPSED -lt $TIMEOUT ]; do
   LOG_NOW=$(wc -l < "$LOG_FILE")
   if [ "$LOG_NOW" -gt "$LOG_BEFORE_PERM" ]; then
-    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Notification sent.*PreToolUse\|Permission request sent" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Notification sent.*ToolUse\|Permission request sent" > /dev/null 2>&1; then
       PRETOOL_FOUND=true
       PERM_MSG_ID=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -oPm1 'msg_id=\K[0-9]+' || true)
       break

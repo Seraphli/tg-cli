@@ -52,6 +52,14 @@ fi
 
 pass "AskUserQuestion triggered for escape test"
 
+# Rich migration (v9): the AskUserQuestion under ESC-freeze test is sent via sendRichMessage,
+# so its ESC-cancel freeze edit takes the rich (RetryFreezeEditAuto→rich) path.
+if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -q "AskUserQuestion sent:.*fmt=rich" 2>/dev/null; then
+  pass "Escape-test AskUserQuestion sent via rich message path (fmt=rich)"
+else
+  fail "Escape-test AskUserQuestion sent marker missing fmt=rich (expected rich message path)"
+fi
+
 # 3. Capture pane BEFORE escape — verify AskUserQuestion UI is visible
 BEFORE_ESCAPE=$(curl -s "http://127.0.0.1:$TEST_PORT/capture?target=$ENCODED_TARGET" | jq -r '.content // empty')
 
@@ -158,4 +166,12 @@ if [ "$UPS_FOUND" = true ]; then
   pass "CC received follow-up message (UserPromptSubmit triggered)"
 else
   fail "CC did not receive follow-up message (no UserPromptSubmit within ${TIMEOUT}s)"
+fi
+
+# Rich-freeze regression guard (v9 ESC-freeze): the AskQ freeze edit after ESC uses the rich
+# (RetryFreezeEditAuto→rich) path; a rich-payload rejection would log an "EDIT failed" line.
+if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -qE "(DoCancelAsk|CancelAskBySnapshot|CleanupPendingState): EDIT failed" 2>/dev/null; then
+  fail "AskUserQuestion rich freeze edit failed after escape (rich edit rejected)"
+else
+  pass "AskUserQuestion rich freeze edit succeeded after escape (no EDIT failed)"
 fi

@@ -29,36 +29,84 @@ import (
 // Using a fixed value keeps send-time and edit-time chunk splits consistent.
 const mailboxBodyMaxRunes = 3000
 
-// buildMailboxChunks renders a mailbox notification into TG-ready message texts.
+// buildMailboxChunks renders a mailbox notification into TG-ready rich message texts.
 // firstLine is the notification title (e.g. "📤 Mail Sent", "📥 Mail Received", or "").
-// subject and text are raw markdown; both are rendered to Telegram HTML.
-// status is the pre-escaped status line appended to the END of the LAST chunk
-// (e.g. "📫 Unread", "📭 Read — 2026-04-11 10:00"). Multi-chunk edit path only
-// edits the last message; single-chunk path includes status in the one message.
+// subject and text are raw markdown; both are rendered to rich HTML.
+// status is the pre-escaped status line appended to the END of the LAST chunk.
 // Returns one or more message texts; len > 1 means multi-message delivery with "📄 i/N" markers.
 func buildMailboxChunks(firstLine, from, to, timestamp, msgID, subject, text, status string) []string {
 	esc := markdown.EscapeHTML
+	renderedSubject := markdown.RenderRichHTML(subject)
+	renderedText := markdown.RenderRichHTML(text)
+	// Use RichMaxRunes threshold for rich messages; subtract 500 runes for header headroom
+	cfg, _ := config.LoadAppConfig()
+	richMax := cfg.RichMaxRunes
+	if richMax <= 0 {
+		richMax = 30000
+	}
+	return assembleMailboxChunks(true, firstLine, from, to, timestamp, msgID, esc, renderedSubject, renderedText, status, richMax-500)
+}
+
+// buildMailboxChunksLegacy renders a mailbox notification using legacy Telegram HTML.
+// Used to produce LegacyHTML fallback bodies for RetrySendRich / RetryEditRich.
+func buildMailboxChunksLegacy(firstLine, from, to, timestamp, msgID, subject, text, status string) []string {
+	esc := markdown.EscapeHTML
 	renderedSubject := markdown.RenderTelegramHTML(subject)
 	renderedText := markdown.RenderTelegramHTML(text)
+	// Legacy fallback uses the fixed small budget to stay within Telegram's HTML message limits
+	return assembleMailboxChunks(false, firstLine, from, to, timestamp, msgID, esc, renderedSubject, renderedText, status, mailboxBodyMaxRunes)
+}
+
+// mailboxSepText is the legacy-HTML separator (plain Unicode line; parse_mode=HTML supports no <hr>).
+const mailboxSepText = "━━━━━━━━━━"
+
+// mailboxSepRich is the rich-message separator: <hr/> renders a gray divider (official rich-HTML dialect).
+const mailboxSepRich = "<hr/>"
+
+// assembleMailboxChunks builds the final chunk list from pre-rendered subject and text HTML.
+// bodyBudget is the max rune count for the body per chunk. When rich is true the metadata header is a
+// collapsible <details> block (summary = From → To; body = timestamp, mailbox hex ID, and an archive-ID
+// placeholder filled at send time); the bold Subject line sits directly under the block (no separator —
+// the block boundary is the divider), followed by a single <hr/> before the body. When rich is false
+// (legacy fallback), the header is flat text with ━━━ separators (legacy HTML has no <details>/<hr>),
+// and no archive-ID placeholder (the legacy path is sent verbatim, not finalized).
+func assembleMailboxChunks(rich bool, firstLine, from, to, timestamp, msgID string, esc func(string) string, renderedSubject, renderedText, status string, bodyBudget int) []string {
+	sep := mailboxSepText
 	var headerParts []string
 	if firstLine != "" {
 		headerParts = append(headerParts, firstLine)
 	}
-	headerParts = append(headerParts,
-		"📤 From: "+esc(from),
-		"📥 To: "+esc(to),
-		"🕐 "+esc(timestamp),
-		"🆔 "+esc(msgID),
-		"━━━━━━━━━━",
-		"Subject: "+renderedSubject,
-		"━━━━━━━━━━",
-	)
+	if rich {
+		sep = mailboxSepRich
+		// 🔖 = the mailbox system hex ID; 🆔 = the tg-cli archive ID (filled from the placeholder at send).
+		detailLines := []string{
+			"🕐 " + esc(timestamp),
+			"🔖 " + esc(msgID),
+			helpers.ArchiveIDPlaceholder,
+		}
+		details := "<details><summary>📬 From: " + esc(from) + " → " + esc(to) + "</summary>\n" + strings.Join(detailLines, "\n") + "\n</details>"
+		// Fix 1: no separator between the collapsed <details> header and Subject — the block boundary is
+		// its own visual divider. Fix 2: bold the Subject line so it stands out. The one remaining sep
+		// (<hr/>) sits between Subject and the body; RichifyNewlines drops the <br> right after it (Fix 3)
+		// so the body starts directly under the rule.
+		headerParts = append(headerParts, details, "<b>Subject: "+renderedSubject+"</b>", sep)
+	} else {
+		headerParts = append(headerParts,
+			"📤 From: "+esc(from),
+			"📥 To: "+esc(to),
+			"🕐 "+esc(timestamp),
+			"🔖 "+esc(msgID),
+			sep,
+			"Subject: "+renderedSubject,
+			sep,
+		)
+	}
 	header := strings.Join(headerParts, "\n") + "\n"
 	statusSuffix := ""
 	if status != "" {
-		statusSuffix = "\n━━━━━━━━━━\n" + status
+		statusSuffix = "\n" + sep + "\n" + status
 	}
-	chunks := helpers.SplitBody(renderedText, mailboxBodyMaxRunes)
+	chunks := helpers.SplitBody(renderedText, bodyBudget)
 	if len(chunks) <= 1 {
 		body := ""
 		if len(chunks) == 1 {
@@ -83,16 +131,24 @@ func buildMailboxChunks(firstLine, from, to, timestamp, msgID, subject, text, st
 	return result
 }
 
-// sendMailboxChunks sends a slice of pre-built chunks as separate TG messages.
+// sendMailboxChunks sends a slice of rich pre-built chunks as separate TG messages.
+// legacyChunks must be the same length as chunks and contains the legacy-HTML fallback bodies.
+// topicID is the forum thread ID (0 = no thread).
 // Returns the full slice of sent messages (in send order) so callers can record
-// every chunk's msg ID — the channel-post caller stores them into mailboxMessage.TGMsgIDs
-// so editTGReadReceipt can edit the LAST chunk (which holds the status line at its end).
-// All messages are sent with tele.ModeHTML parse mode.
-func sendMailboxChunks(bot *tele.Bot, target tele.Recipient, chunks []string, extraOpts ...interface{}) ([]*tele.Message, error) {
+// every chunk's msg ID — stored into mailboxMessage.TGMsgIDs so editTGReadReceipt
+// can edit the LAST chunk (which holds the status line at its end).
+func sendMailboxChunks(bot *tele.Bot, target tele.Recipient, chunks, legacyChunks []string, topicID int) ([]*tele.Message, error) {
 	sentMsgs := make([]*tele.Message, 0, len(chunks))
-	for _, chunk := range chunks {
-		opts := append([]interface{}{tele.ModeHTML}, extraOpts...)
-		sent, err := helpers.RetrySend(bot, target, chunk, opts...)
+	for i, chunk := range chunks {
+		legacy := ""
+		if i < len(legacyChunks) {
+			legacy = legacyChunks[i]
+		}
+		sent, err := helpers.RetrySendRich(bot, target, chunk, helpers.RichSendOpts{
+			TopicID:             topicID,
+			SkipEntityDetection: false,
+			LegacyHTML:          legacy,
+		})
 		if err != nil {
 			return sentMsgs, err
 		}
@@ -111,6 +167,7 @@ type mailboxMessage struct {
 	FileID    string    `json:"file_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	Read      bool      `json:"read"`
+	Rich      bool      `json:"rich,omitempty"` // true = TG messages sent via rich path (Bot API 10.1)
 	TGMsgIDs  []int     `json:"tg_msg_ids,omitempty"`
 }
 
@@ -383,7 +440,7 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 			if fileData != nil {
 				// Attachment path: plain-text caption with status at body end,
 				// truncated to TG 1024 char limit. Full content is in the attached file.
-				caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📫 Unread",
+				caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🔖 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n📫 Unread",
 					from, to, timestampStr, id, subject, text)
 				if runes := []rune(caption); len(runes) > 1024 {
 					caption = string(runes[:1024])
@@ -401,10 +458,16 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 					if tgMsg.Document != nil {
 						msg.FileID = tgMsg.Document.FileID
 					}
+					// Bump float marker: belt-and-suspenders for mailbox channels (usually not a
+					// CC route, but ensures re-float detection is correct if they are).
+					if helpers.FloatMarker != nil {
+						helpers.FloatMarker.Mark(channel.ID, 0, time.Now())
+					}
 				}
 			} else {
 				chunks := buildMailboxChunks("", from, to, timestampStr, id, subject, text, "📫 Unread")
-				sentMsgs, sendErr := sendMailboxChunks(bot, channel, chunks)
+				legacyChunks := buildMailboxChunksLegacy("", from, to, timestampStr, id, subject, text, "📫 Unread")
+				sentMsgs, sendErr := sendMailboxChunks(bot, channel, chunks, legacyChunks, 0)
 				if sendErr != nil {
 					logger.Error(fmt.Sprintf("Mailbox TG send failed: %v", sendErr))
 				}
@@ -413,8 +476,12 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 					for i, m := range sentMsgs {
 						msg.TGMsgIDs[i] = m.ID
 					}
+					msg.Rich = true
 				}
 				logger.Info(fmt.Sprintf("Mailbox channel post: id=%s chunks=%d sent=%d tg_msg_ids=%v", id, len(chunks), len(sentMsgs), msg.TGMsgIDs))
+				if len(chunks) > 0 {
+					logger.Info(fmt.Sprintf("Mailbox notification body: id=%s body=%s", id, chunks[0]))
+				}
 			}
 		}
 	}
@@ -440,6 +507,7 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 // editTGReadReceipt edits the LAST TG message of a mailbox notification to mark it as read.
 // status is appended to the end of the last chunk (at body bottom), so multi-chunk messages
 // only need the final message rewritten; earlier chunks contain no status and stay unchanged.
+// The edit API must match the era the message was sent in (msg.Rich = true → rich edit, false → legacy).
 func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
 	if len(msg.TGMsgIDs) == 0 {
 		return
@@ -449,8 +517,8 @@ func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
 	lastMsgID := msg.TGMsgIDs[len(msg.TGMsgIDs)-1]
 	editMsg := &tele.Message{ID: lastMsgID, Chat: &tele.Chat{ID: chatID}}
 	if msg.FileName != "" {
-		// Attachment path: plain-text caption with status at body end, truncated to 1024.
-		caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🆔 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n%s",
+		// Attachment path: plain-text caption with status at body end, truncated to 1024. Unchanged.
+		caption := fmt.Sprintf("📤 From: %s\n📥 To: %s\n🕐 %s\n🔖 %s\n━━━━━━━━━━\nSubject: %s\n━━━━━━━━━━\n%s\n━━━━━━━━━━\n%s",
 			msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, status)
 		if runes := []rune(caption); len(runes) > 1024 {
 			caption = string(runes[:1024])
@@ -458,7 +526,21 @@ func editTGReadReceipt(bot *tele.Bot, msg mailboxMessage, chatID int64) {
 		bot.EditCaption(editMsg, caption)
 		return
 	}
-	chunks := buildMailboxChunks("", msg.From, msg.To, msg.Timestamp.Format(time.RFC3339), msg.ID, msg.Subject, msg.Text, status)
+	ts := msg.Timestamp.Format(time.RFC3339)
+	if msg.Rich {
+		chunks := buildMailboxChunks("", msg.From, msg.To, ts, msg.ID, msg.Subject, msg.Text, status)
+		legacyChunks := buildMailboxChunksLegacy("", msg.From, msg.To, ts, msg.ID, msg.Subject, msg.Text, status)
+		lastChunk := chunks[len(chunks)-1]
+		lastLegacy := legacyChunks[len(legacyChunks)-1]
+		if _, err := helpers.RetryEditRich(bot, editMsg, lastChunk, helpers.RichSendOpts{
+			SkipEntityDetection: false,
+			LegacyHTML:          lastLegacy,
+		}); err != nil {
+			logger.Error(fmt.Sprintf("editTGReadReceipt(rich) failed: msg_id=%d err=%v", lastMsgID, err))
+		}
+		return
+	}
+	chunks := buildMailboxChunksLegacy("", msg.From, msg.To, ts, msg.ID, msg.Subject, msg.Text, status)
 	if _, err := helpers.RetryEdit(bot, editMsg, chunks[len(chunks)-1], tele.ModeHTML); err != nil {
 		logger.Error(fmt.Sprintf("editTGReadReceipt failed: msg_id=%d err=%v", lastMsgID, err))
 	}
@@ -512,11 +594,8 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 			if chat != nil {
 				timestampStr := time.Now().Format(time.RFC3339)
 				chunks := buildMailboxChunks("📥 Mail Received", from, to, timestampStr, msgID, subject, text, "")
-				var sendOpts []interface{}
-				if topicID > 0 {
-					sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
-				}
-				if _, err := sendMailboxChunks(bot, chat, chunks, sendOpts...); err != nil {
+				legacyChunks := buildMailboxChunksLegacy("📥 Mail Received", from, to, timestampStr, msgID, subject, text, "")
+				if _, err := sendMailboxChunks(bot, chat, chunks, legacyChunks, topicID); err != nil {
 					logger.Error(fmt.Sprintf("Mailbox receiver notify failed: to=%s id=%s err=%v", to, msgID, err))
 				}
 				logger.Info(fmt.Sprintf("Mailbox receiver notify: to=%s id=%s chunks=%d", to, msgID, len(chunks)))
@@ -529,11 +608,8 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 			if fromChat != nil {
 				timestampStr := time.Now().Format(time.RFC3339)
 				chunks := buildMailboxChunks("📤 Mail Sent", from, to, timestampStr, msgID, subject, text, "")
-				var senderOpts []interface{}
-				if fromTopicID > 0 {
-					senderOpts = append(senderOpts, &tele.SendOptions{ThreadID: fromTopicID})
-				}
-				if _, err := sendMailboxChunks(bot, fromChat, chunks, senderOpts...); err != nil {
+				legacyChunks := buildMailboxChunksLegacy("📤 Mail Sent", from, to, timestampStr, msgID, subject, text, "")
+				if _, err := sendMailboxChunks(bot, fromChat, chunks, legacyChunks, fromTopicID); err != nil {
 					logger.Error(fmt.Sprintf("Mailbox sender notify failed: from=%s id=%s err=%v", from, msgID, err))
 				}
 				logger.Info(fmt.Sprintf("Mailbox sender notify: from=%s id=%s chunks=%d", from, msgID, len(chunks)))

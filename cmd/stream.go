@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -17,93 +16,6 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-// renderTableImages renders each table in mdBody as a PNG image (shared by streaming finalize and sendEventNotification).
-func renderTableImages(mdBody, tableMode string) [][]byte {
-	if tableMode == "" {
-		tableMode = "image"
-	}
-	if tableMode != "image" {
-		return nil
-	}
-	var imgs [][]byte
-	for _, t := range markdown.ExtractTableData(mdBody) {
-		img, err := markdown.RenderTableImageChromeFormatted(t.Headers, t.Rows, t.HeadersHTML, t.RowsHTML)
-		if err != nil {
-			if img, err = markdown.RenderTableImage(t.Headers, t.Rows); err != nil {
-				logger.Error(fmt.Sprintf("Table image render failed: %v", err))
-				continue
-			}
-		}
-		imgs = append(imgs, img)
-	}
-	return imgs
-}
-
-// sendTableImages sends pre-rendered table images as TG photo messages.
-func sendTableImages(bs *BotState, chat *tele.Chat, topicID int, imgs [][]byte, logCtx string) {
-	for i, b := range imgs {
-		var opts []interface{}
-		if topicID > 0 {
-			opts = append(opts, &tele.SendOptions{ThreadID: topicID})
-		}
-		sent, err := helpers.RetrySend(bs.Bot, chat, &tele.Photo{File: tele.FromReader(bytes.NewReader(b))}, opts...)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Table image %d send failed (%s): %v", i+1, logCtx, err))
-			continue
-		}
-		mid := 0
-		if sent != nil {
-			mid = sent.ID
-		}
-		logger.Info(fmt.Sprintf("Stream table image sent: %s idx=%d photo_msg_id=%d chat=%d", logCtx, i+1, mid, chat.ID))
-	}
-}
-
-// drainUntilComplete waits for the session's last message to become complete (or timeout).
-// Allows async deltas to catch up before a boundary action (PreToolUse, Ask, Stop).
-func drainUntilComplete(bs *BotState, sessionID string, timeout time.Duration) {
-	start := time.Now()
-	grace := 400 * time.Millisecond // initial wait for the FIRST delta to appear at all
-	for {
-		has, complete := bs.Streams.LastStatus(sessionID)
-		if has && complete {
-			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=text_complete", sessionID, time.Since(start).Milliseconds()))
-			return
-		}
-		elapsed := time.Since(start)
-		if !has && elapsed >= grace {
-			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=no_text_within_grace grace=%dms", sessionID, elapsed.Milliseconds(), grace.Milliseconds()))
-			return // no streamed text before this boundary
-		}
-		if elapsed >= timeout {
-			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=incomplete_within_timeout has=%v", sessionID, elapsed.Milliseconds(), has))
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// drainForNewFinal waits until a NEW text bubble completes (CompleteCount rises above the count captured at
-// entry) or the timeout elapses. Used at the AskUserQuestion boundary so the text bubble preceding the
-// question is flushed before the question is sent. Unlike drainUntilComplete it does NOT check whether the
-// current last bubble is already complete — a stale prior bubble would make that return instantly and miss a
-// bubble arriving over the off-FIFO MessageDisplay channel just before the boundary.
-func drainForNewFinal(bs *BotState, sessionID string, timeout time.Duration) {
-	start := time.Now()
-	baseline := bs.Streams.CompleteCount(sessionID)
-	for {
-		if bs.Streams.CompleteCount(sessionID) > baseline {
-			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=new_final_arrived baseline=%d", sessionID, time.Since(start).Milliseconds(), baseline))
-			return
-		}
-		if time.Since(start) >= timeout {
-			logger.Info(fmt.Sprintf("drain done: session=%s elapsed=%dms reason=timeout_no_new_final baseline=%d", sessionID, time.Since(start).Milliseconds(), baseline))
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 // setSent grows e.SentText to index i and assigns text.
 func setSent(e *stores.StreamEntry, i int, text string) {
 	for len(e.SentText) <= i {
@@ -112,28 +24,11 @@ func setSent(e *stores.StreamEntry, i int, text string) {
 	e.SentText[i] = text
 }
 
-// renderStreamChunks renders the entry's text into TG message(s): send new chunks, edit changed ones,
-// delete surplus old continuation messages if the re-render shrank the chunk count.
-func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, text string, cfg config.AppConfig, relabel bool) {
-	rendered := markdown.RenderTelegramHTML(text)
-	nd := notify.NotificationData{
-		Event:          "Message",
-		Project:        e.Project,
-		CWD:            e.CWD,
-		TmuxTarget:     e.TmuxTarget,
-		AgentName:      e.AgentName,
-		Backend:        e.Backend,
-		CLICommand:     helpers.GetPaneCLICommand(e.TmuxTarget),
-		ContextUsedPct: -1,
-	}
-	if pct, used, win, ok := helpers.ReadContextUsage(sessionID); ok {
-		nd.ContextUsedPct, nd.ContextUsedTokens, nd.ContextWindowSize = pct, used, win
-	}
-	paginationMax := 4000
-	if cfg.PaginationMaxRunes > 0 {
-		paginationMax = cfg.PaginationMaxRunes
-	}
-	chunks := helpers.SplitBody(rendered, paginationMax-notify.HeaderLen(nd)-100)
+// renderStreamChunks renders the entry's FROZEN plan (nd + rich/legacy chunk lists, built once in flushSession
+// p2) into TG message(s): send new chunks, edit changed ones, delete surplus old continuation messages if the
+// re-render shrank the chunk count. f25 MAJOR: it renders the frozen plan VERBATIM (no recompute of nd or
+// chunks) so the snapshot-time prediction equals the render exactly.
+func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, nd notify.NotificationData, chunks, legacyChunks []string, relabel bool) {
 	chat := &tele.Chat{ID: e.ChatID}
 	for i, chunk := range chunks {
 		nd.Body = chunk
@@ -145,34 +40,39 @@ func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, t
 			nd.Page = 0
 		}
 		out := notify.BuildNotificationText(nd)
+		// Build legacy parallel output for G2 fallback.
+		legacyBody := ""
+		if i < len(legacyChunks) {
+			legacyBody = legacyChunks[i]
+		}
+		ndLegacy := nd
+		ndLegacy.Body = legacyBody
+		outLegacy := notify.BuildNotificationText(ndLegacy)
 		if i < len(e.Msgs) {
 			if i < len(e.SentText) && e.SentText[i] == out {
 				continue
 			}
-			helpers.RetryEdit(bs.Bot, &tele.Message{ID: e.Msgs[i], Chat: chat}, out, tele.ModeHTML)
+			helpers.RetryEditRich(bs.Bot, &tele.Message{ID: e.Msgs[i], Chat: chat}, out, helpers.RichSendOpts{SkipEntityDetection: false, LegacyHTML: outLegacy, CCMessageID: e.MessageID})
 			setSent(e, i, out)
-			logger.Info(fmt.Sprintf("Stream edit: msg_id=%d message_id=%s turn_id=%s chunk=%d final=%v full_text:\n%s", e.Msgs[i], e.MessageID, e.TurnID, i, nd.Finalized, out))
+			logger.Debug(fmt.Sprintf("Stream edit: msg_id=%d message_id=%s turn_id=%s chunk=%d final=%v fmt=rich full_text:\n%s", e.Msgs[i], e.MessageID, e.TurnID, i, nd.Finalized, helpers.FinalizeRichHTML(out)))
 		} else {
-			opts := []interface{}{tele.ModeHTML}
-			if e.TopicID > 0 {
-				opts = append(opts, &tele.SendOptions{ThreadID: e.TopicID})
-			}
-			if sent, err := helpers.RetrySend(bs.Bot, chat, out, opts...); err == nil && sent != nil {
+			if sent, err := helpers.RetrySendRich(bs.Bot, chat, out, helpers.RichSendOpts{TopicID: e.TopicID, SkipEntityDetection: false, LegacyHTML: outLegacy, CCMessageID: e.MessageID}); err == nil && sent != nil {
 				e.Msgs = append(e.Msgs, sent.ID)
+				e.Rich = true
 				setSent(e, i, out)
-				logger.Info(fmt.Sprintf("Stream send: msg_id=%d message_id=%s turn_id=%s chunk=%d full_text:\n%s", sent.ID, e.MessageID, e.TurnID, i, out))
+				logger.Debug(fmt.Sprintf("Stream send: msg_id=%d message_id=%s turn_id=%s chunk=%d fmt=rich full_text:\n%s", sent.ID, e.MessageID, e.TurnID, i, helpers.FinalizeRichHTML(out)))
 			}
 		}
 	}
 	if relabel && len(e.Msgs) > 0 {
 		logger.Info(fmt.Sprintf("Stream relabel ✅: last_msg_id=%d message_id=%s session=%s", e.Msgs[len(e.Msgs)-1], e.MessageID, sessionID))
 	}
-	// Delete surplus old continuation messages if the re-render shrank the chunk count
+	// Delete surplus old continuation messages if the re-render shrank the chunk count.
 	for i := len(chunks); i < len(e.Msgs); i++ {
 		if err := bs.Bot.Delete(&tele.Message{ID: e.Msgs[i], Chat: chat}); err != nil {
-			helpers.RetryEdit(bs.Bot, &tele.Message{ID: e.Msgs[i], Chat: chat}, "<i>(obsolete)</i>", tele.ModeHTML)
+			helpers.RetryEditRich(bs.Bot, &tele.Message{ID: e.Msgs[i], Chat: chat}, "<i>(obsolete)</i>", helpers.RichSendOpts{LegacyHTML: "<i>(obsolete)</i>"})
 		}
-		logger.Info(fmt.Sprintf("Stream surplus removed: msg_id=%d message_id=%s chunk=%d", e.Msgs[i], e.MessageID, i))
+		logger.Info(fmt.Sprintf("Stream surplus removed: msg_id=%d message_id=%s chunk=%d fmt=rich", e.Msgs[i], e.MessageID, i))
 	}
 	if len(chunks) < len(e.Msgs) {
 		e.Msgs = e.Msgs[:len(chunks)]
@@ -182,27 +82,54 @@ func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, t
 	}
 }
 
-// flushSession renders the session's stream. stop=true means a Stop boundary (relabel the last message);
-// force=true is the 3s-deadline degradation that finalizes even an INCOMPLETE last message.
-func flushSession(bs *BotState, sessionID string, stop, force bool) {
+// flushDispatchMode selects how the render op produced by flushSession is enqueued onto the Message FIFO.
+type flushDispatchMode int
+
+const (
+	flushAsync flushDispatchMode = iota // DispatchAsync (guaranteed enqueue, blocks at cap) — non-stop boundaries
+	flushTry                            // TryDispatchAsync (nonblocking) — the ticker (S4)
+	flushSync                           // Dispatch (sync, awaits the render) — Stop boundary
+)
+
+// flushJob is one snapshotted renderable entry captured under DataMu, plus its immutable FROZEN render plan
+// (f25 MAJOR): nd + rich/legacy chunk lists are computed ONCE in flushSession p2 (outside DataMu) so the
+// snapshot-time chunk prediction and renderStreamChunks use the IDENTICAL data — prediction == render by
+// construction (GetPaneCLICommand is unbounded, so a recompute at render time could disagree). willSendBelow
+// (planned chunks > positionedAtSnapshot) means a NEW TG message will be sent below -> SendBelowSinceTool.
+type flushJob struct {
+	e                    *stores.StreamEntry
+	mid                  string
+	text                 string
+	complete             bool
+	finalize             bool
+	relabel              bool
+	nd                   notify.NotificationData
+	chunks               []string
+	legacyChunks         []string
+	positionedAtSnapshot int
+	willSendBelow        bool
+}
+
+// flushSession snapshots the session's stream under DataMu then enqueues ONE render op onto the Message FIFO
+// (dual-FIFO, S3). FlushMu is held across BOTH the snapshot AND the enqueue so ops enqueue in Hook-FIFO order
+// (INV3/R1); NO Message-FIFO op takes FlushMu, so a full-queue enqueue while holding FlushMu cannot deadlock
+// (INV6). stop=true means a Stop boundary (relabel the last message); force=true is the deadline degradation
+// that finalizes even an INCOMPLETE last message. mode picks the enqueue path (S3/S4). Returns true if a render
+// op was enqueued (false when nothing is renderable, or when a flushTry enqueue failed on a full queue).
+func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDispatchMode) bool {
 	ss := bs.Streams.Session(sessionID)
 	ss.FlushMu.Lock()
 	defer ss.FlushMu.Unlock()
 	cfg, _ := config.LoadAppConfig()
-	// Snapshot order + dirty-clear under DataMu (no I/O here). Abort if the session was reset.
+	// p1: snapshot order + dirty-clear + read PositionedChunks under DataMu (no I/O here). Abort if reset.
 	ss.DataMu.Lock()
 	if ss.Closed {
 		ss.DataMu.Unlock()
-		return
+		return false
 	}
 	order := append([]string(nil), ss.Order...)
 	lastIdx := len(order) - 1
-	type job struct {
-		e        *stores.StreamEntry
-		text     string
-		complete bool
-	}
-	var jobs []job
+	var jobs []flushJob
 	for i, mid := range order {
 		e := ss.Msgs[mid]
 		// Skip already-finalized messages — EXCEPT the turn's last one at Stop, which still needs the 💬→✅
@@ -212,122 +139,199 @@ func flushSession(bs *BotState, sessionID string, stop, force bool) {
 			continue
 		}
 		text, complete := e.AssembledText()
-		e.Dirty = false
-		e.LastFlush = time.Now()
-		jobs = append(jobs, job{e, text, complete})
-	}
-	ss.DataMu.Unlock()
-	// Telegram I/O happens OUTSIDE DataMu. Msgs/SentText are flush-only (FlushMu-serialized).
-	for i, j := range jobs {
-		isLast := i == len(jobs)-1
-		if strings.TrimSpace(j.text) == "" {
+		// Drop empty-text jobs from the snapshot itself so the "no renderable job" check below is accurate
+		// (an unconditional pre-tool flush is a cheap no-op when nothing renderable, rev 14 BLOCKER3).
+		if strings.TrimSpace(text) == "" {
 			continue
 		}
+		isLast := i == lastIdx
 		// Finalize (seal + table + ✅) ONLY when the message is actually complete, or on a forced deadline close.
 		// A non-forced Stop on an incomplete last message just best-effort flushes the partial 💬 — no seal/relabel,
 		// so a slightly-late final delta is still accepted on the next loop.
-		finalize := j.complete || (force && isLast)
+		finalize := complete || (force && isLast)
 		relabel := stop && isLast && finalize
-		renderStreamChunks(bs, sessionID, j.e, j.text, cfg, relabel)
-		if finalize && !j.e.TablesSent {
-			imgs := renderTableImages(j.text, cfg.TableMode)
-			// sendTableImages logs "Stream table image sent: ... photo_msg_id=..." per photo
-			sendTableImages(bs, &tele.Chat{ID: j.e.ChatID}, j.e.TopicID, imgs, "stream session="+sessionID+" message_id="+j.e.MessageID)
-			// TablesSent is read by AppendDelta under DataMu, so write it under DataMu.
-			ss.DataMu.Lock()
-			j.e.TablesSent = true
-			ss.DataMu.Unlock()
+		e.Dirty = false
+		e.LastFlush = time.Now()
+		jobs = append(jobs, flushJob{e: e, mid: mid, text: text, complete: complete, finalize: finalize, relabel: relabel, positionedAtSnapshot: e.PositionedChunks})
+	}
+	ss.DataMu.Unlock()
+	// No renderable job (all sealed / empty text) — return WITHOUT enqueuing so an unconditional pre-tool flush
+	// is a cheap no-op (S3).
+	if len(jobs) == 0 {
+		return false
+	}
+	// p2 (outside DataMu, FlushMu still held): build the FROZEN render plan per job (f25 MAJOR). Freeze nd
+	// (incl. the UNBOUNDED GetPaneCLICommand output + context usage) AND the rich/legacy chunk lists once, so
+	// the snapshot-time chunk prediction and renderStreamChunks use the IDENTICAL data — no TOCTOU, the -100
+	// budget margin is no longer load-bearing. planned=len(chunks) > positionedAtSnapshot => a new TG message
+	// will be SENT below (new bubble or pagination growth) => willSendBelow.
+	richMax := 30000
+	if cfg.RichMaxRunes > 0 {
+		richMax = cfg.RichMaxRunes
+	}
+	for i := range jobs {
+		j := &jobs[i]
+		nd := notify.NotificationData{
+			Event:          "Message",
+			Project:        j.e.Project,
+			CWD:            j.e.CWD,
+			TmuxTarget:     j.e.TmuxTarget,
+			AgentName:      j.e.AgentName,
+			Backend:        j.e.Backend,
+			CLICommand:     helpers.GetPaneCLICommand(j.e.TmuxTarget),
+			ContextUsedPct: -1,
 		}
-		if finalize {
+		if pct, used, win, ok := helpers.ReadContextUsage(sessionID); ok {
+			nd.ContextUsedPct, nd.ContextUsedTokens, nd.ContextWindowSize = pct, used, win
+		}
+		budget := richMax - notify.HeaderLen(nd) - 100
+		j.nd = nd
+		j.chunks = helpers.SplitBody(markdown.RenderRichHTML(j.text), budget)
+		j.legacyChunks = helpers.SplitBody(markdown.RenderTelegramHTML(j.text), budget)
+		j.willSendBelow = len(j.chunks) > j.positionedAtSnapshot
+	}
+	// The render op: takes DataMu ONLY (never FlushMu), revalidates each entry (ss.Closed / ss.Msgs[mid]==e),
+	// renders the FROZEN plan via renderStreamChunks (TG I/O), and sets Sealed/Relabeled under DataMu.
+	// TG I/O runs OUTSIDE DataMu; Msgs/SentText are Message-FIFO-only (INV4).
+	renderOp := func() error {
+		for _, j := range jobs {
 			ss.DataMu.Lock()
-			j.e.Sealed = true
-			if relabel {
-				j.e.Relabeled = true
+			if ss.Closed || ss.Msgs[j.mid] != j.e {
+				ss.DataMu.Unlock()
+				continue // session reset / entry rotated away between snapshot and render
 			}
 			ss.DataMu.Unlock()
+			renderStreamChunks(bs, sessionID, j.e, j.nd, j.chunks, j.legacyChunks, j.relabel)
+			if j.finalize {
+				ss.DataMu.Lock()
+				j.e.Sealed = true
+				if j.relabel {
+					j.e.Relabeled = true
+				}
+				ss.DataMu.Unlock()
+			}
 		}
+		return nil
 	}
+	switch mode {
+	case flushSync:
+		bs.MessageQueue.Dispatch(sessionID, "msg:stream-render", renderOp)
+	case flushTry:
+		if !bs.MessageQueue.TryDispatchAsync(sessionID, "msg:stream-render", renderOp) {
+			// Queue full (S4): re-mark the snapshotted entries Dirty under DataMu so the next tick retries;
+			// Dirty dedups (a concurrent delta may also have set it). Never inline the render. NO p3 commit —
+			// PositionedChunks/SendBelowSinceTool stay untouched so the retry recomputes willSendBelow against the
+			// unchanged count (f25: a full-queue miss must never produce a false split).
+			ss.DataMu.Lock()
+			for i := range jobs {
+				if e := ss.Msgs[jobs[i].mid]; e == jobs[i].e {
+					e.Dirty = true
+				}
+			}
+			ss.DataMu.Unlock()
+			return false
+		}
+	default: // flushAsync
+		bs.MessageQueue.DispatchAsync(sessionID, "msg:stream-render", renderOp)
+	}
+	// p3 (f25): reached ONLY on a SUCCESSFUL enqueue (the flushTry full-queue miss returned above). For flushSync
+	// the render already COMPLETED before this point, but FlushMu is held through p3, so no concurrent snapshot
+	// can observe an intermediate placement state — the commit still happens exactly once, at (post-)enqueue,
+	// totally ordered by FlushMu (B1: a later snapshot never re-splits).
+	commitPositioned(ss, jobs)
+	return true
 }
 
-// streamFlush is the Callbacks.StreamFlush implementation: drain then flush; Stop drains then closes.
+// commitPositioned is flushSession p3 (f25): under DataMu, for each STILL-LIVE snapshotted job (revalidating
+// ss.Closed / ss.Msgs[mid]==e exactly as the render op does, so a Rotate/EndSession between the p1 release and
+// here leaves no stale commit or signal — B2), commit PositionedChunks=len(chunks) and OR the placement signal
+// into ss.SendBelowSinceTool. Extracted so the lifecycle-revalidation path is unit-testable deterministically.
+func commitPositioned(ss *stores.SessionStream, jobs []flushJob) {
+	ss.DataMu.Lock()
+	sendBelow := false
+	for i := range jobs {
+		j := &jobs[i]
+		if ss.Closed || ss.Msgs[j.mid] != j.e {
+			continue // entry rotated away / session closed between snapshot and commit (B2)
+		}
+		j.e.PositionedChunks = len(j.chunks)
+		if j.willSendBelow {
+			sendBelow = true
+		}
+	}
+	if sendBelow {
+		ss.SendBelowSinceTool = true
+	}
+	ss.DataMu.Unlock()
+}
+
+// streamFlush is the Callbacks.StreamFlush implementation. S10 (no MD-waits): the Stop path NO LONGER drains
+// (drainUntilComplete removed) — the terminal outcome was already decided on the Hook FIFO (register.go S10).
+// It runs ONE SYNC stop render op (flushSession with stop=true, force=true) — the needRelabel snapshot
+// exception (:195) relabels a ticker-SEALED-!Relabeled last entry 💬→✅, force-finalizes an INCOMPLETE last
+// entry once, and renders nothing for a COMPLETE/already-relabeled/absent last entry — then TryClose falls
+// back to MarkStopped so the turn is always closed. The stop parameter is always true at every call site;
+// the non-stop branch is kept as a plain single async flush for any future non-terminal caller.
 func streamFlush(bs *types.BotState, sessionID string, stop bool) {
 	if !stop {
-		drainUntilComplete(bs, sessionID, 1500*time.Millisecond)
-		flushSession(bs, sessionID, false, false)
+		flushSession(bs, sessionID, false, false, flushAsync)
 		return
 	}
-	// Stop: loop drain→flush→TryClose until quiescent. A non-forced stop flush never seals an incomplete
-	// last message, so a slightly-late final delta is still picked up next loop.
 	bs.Streams.MarkStopRequested(sessionID)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		drainUntilComplete(bs, sessionID, 1500*time.Millisecond)
-		if time.Now().After(deadline) {
-			logger.Info(fmt.Sprintf("Stream force close: session=%s (final delta did not arrive within deadline; sealing partial)", sessionID))
-			flushSession(bs, sessionID, true, true) // degraded: finalize+relabel the partial last message
-			bs.Streams.MarkStopped(sessionID)
-			return
-		}
-		flushSession(bs, sessionID, true, false)
-		if bs.Streams.TryClose(sessionID) {
-			return
-		}
+	// Single SYNC stop render op (force=true seals+relabels the last message once). No drain loop.
+	flushSession(bs, sessionID, true, true, flushSync)
+	if !bs.Streams.TryClose(sessionID) {
+		bs.Streams.MarkStopped(sessionID)
 	}
 }
 
 // streamFlushAwaitNewText is the Callbacks.StreamFlushAwaitNewText implementation: the AskUserQuestion
-// boundary flush. It waits for a NEW completed text bubble (drainForNewFinal) so the text preceding the
-// question is sent before the question, then flushes. Scoped to AskQ; tool/Stop boundaries use streamFlush.
+// boundary flush. f23 (boss-ordered restoration): restore the in-flight pre-question text wait that 10de4d8
+// removed (drainForNewFinal 3s). A LITERAL sleep-poll of CompleteCount would SELF-STARVE now that
+// MessageDisplay is processed on the SAME Hook FIFO as this send:pending job (S0): the worker runs jobs one
+// at a time, so a blocking poll would starve the very pre-question MD it waits for. So, mirroring the S6 tool
+// boundary, DRAIN the in-flight pre-question MD on THIS worker (DrainAndRunMatching + an event-driven wait)
+// until a NEW text bubble completes (CompleteCount rises above the entry baseline) or the 3s budget elapses,
+// then flush. Prompt-agnostic (faithful to the original drainForNewFinal) — any MessageDisplay before the next
+// tool / turn-terminal is eligible. Runs in the send:pending Hook-FIFO job BEFORE the msg:ask-send question
+// dispatch (pending.go), so the text renders before the question. The baseline is captured at entry, so a
+// stale already-complete prior bubble does NOT satisfy it.
 func streamFlushAwaitNewText(bs *types.BotState, sessionID string) {
-	drainForNewFinal(bs, sessionID, 1000*time.Millisecond)
-	flushSession(bs, sessionID, false, false)
+	const askBudget = 3 * time.Second
+	start := time.Now()
+	deadline := start.Add(askBudget)
+	baseline := bs.Streams.CompleteCount(sessionID)
+	// eligible: any MessageDisplay arriving before the deadline (prompt-agnostic). boundary: the next tool /
+	// turn-terminal, or anything past the deadline — the front-scan stops there so a later-turn MD is not drained.
+	eligible := func(m stores.JobMeta) bool {
+		return m.Event == "MessageDisplay" && !m.ArrivedAt.After(deadline)
+	}
+	boundary := func(m stores.JobMeta) bool {
+		return m.Event == "PreToolUse" || m.Event == "Stop" || m.Event == "UserPromptSubmit" ||
+			m.Event == "SessionEnd" || m.ArrivedAt.After(deadline)
+	}
+	// (a) drain any already-queued pre-question MD now (runs its handler on THIS worker -> appends the text).
+	bs.SessionEvents.DrainAndRunMatching(sessionID, eligible, boundary)
+	branch := "drained_new_final"
+	// (b) if no NEW completed bubble yet, park (event-driven) until one completes (CompleteCount>baseline), a
+	// boundary is queued, or the 3s budget. No floor (zero) — an already-queued boundary resolves immediately.
+	if bs.Streams.CompleteCount(sessionID) <= baseline {
+		branch = bs.SessionEvents.WaitForMatchOrDeadlineFloored(sessionID, "", eligible, boundary,
+			func() bool { return bs.Streams.CompleteCount(sessionID) > baseline }, time.Time{}, deadline)
+	}
+	logger.Info(fmt.Sprintf("askq drain done: session=%s branch=%s elapsed_ms=%d baseline=%d budget_ms=%d",
+		sessionID, branch, time.Since(start).Milliseconds(), baseline, askBudget.Milliseconds()))
+	// (c) flush the pre-question text SYNC onto the Message FIFO BEFORE the msg:ask-send question dispatch, so
+	// the text renders before the question (FIFO order preserved).
+	flushSession(bs, sessionID, false, false, flushSync)
 }
 
-// streamFlushAwaitToolBoundary is the Callbacks.StreamFlushAwaitToolBoundary implementation: the PreToolUse
-// (non-AskUserQuestion) boundary flush under async hooks. It waits up to a 1.5s budget for the FIRST of:
-//
-//	B1 — a MessageDisplay-final for the same prompt_id becomes complete-but-unsealed (the pre-tool text),
-//	B2 — the PostToolUse for this tool_use_id has already arrived (fast tool; off-FIFO signal), or
-//	B3 — the budget elapses.
-//
-// In EVERY branch it flushes BEFORE returning, so the caller sends the tool notification AFTER any pre-tool
-// text (flush-before-notify). Returns the resolving branch label for observability. No transcript read.
-func streamFlushAwaitToolBoundary(bs *types.BotState, sessionID, promptID, toolUseID string) string {
-	const budget = 1500 * time.Millisecond
-	// b2Floor delays the B2 (PostToolUse-already-arrived) resolution until 500ms in, so a slow-to-arrive
-	// pre-tool text bubble has time to land and win via B1 (flush-before-notify) instead of the tool
-	// notification firing first. B1 is NOT floored — it still wins at any time, including inside the floor.
-	const b2Floor = 500 * time.Millisecond
-	start := time.Now()
-	qd := bs.SessionEvents.QueueDepth(sessionID)
-	branch := "b3_timeout"
-	for {
-		// B1 — the pre-tool text for this prompt is complete-but-unsealed. Wins at ANY time (incl. inside the
-		// 500ms floor), so text is always flushed before the tool notification.
-		if promptID != "" && bs.Streams.HasCompleteUnsealedForPrompt(sessionID, promptID) {
-			branch = "b1_prompt_text"
-			break
-		}
-		// B2 — the PostToolUse for this tool_use_id already arrived (fast/textless tool). Gated by the 500ms
-		// floor AND the in-flight rule: do NOT fire while pre-tool text is still streaming for this prompt
-		// (deltas without a final) — keep waiting for its final (B1) up to the full budget instead.
-		if toolUseID != "" && time.Since(start) >= b2Floor {
-			if _, ok := bs.Streams.GetPostToolArrived(sessionID, toolUseID); ok && !bs.Streams.HasInflightForPrompt(sessionID, promptID) {
-				branch = "b2_posttool"
-				break
-			}
-		}
-		// B3 — budget elapsed.
-		if time.Since(start) >= budget {
-			branch = "b3_timeout"
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	logger.Info(fmt.Sprintf("tool-boundary wait done: session=%s prompt=%s tool_use_id=%s branch=%s elapsed=%dms queue_depth=%d",
-		sessionID, promptID, toolUseID, branch, time.Since(start).Milliseconds(), qd))
-	flushSession(bs, sessionID, false, false)
-	return branch
+// flushStreamOp is the Callbacks.FlushStreamOp implementation: the plain NON-DRAINING pre-tool flush (S6).
+// It just snapshots the stream and enqueues ONE async render op — NO drainUntilComplete (the S6 queue-
+// lookahead already drained/waited for the pre-tool MessageDisplay on the Hook FIFO). No-op when nothing
+// is renderable (flushSession returns without enqueuing on an empty/sealed snapshot).
+func flushStreamOp(bs *types.BotState, sessionID string) {
+	flushSession(bs, sessionID, false, false, flushAsync)
 }
 
 // startStreamLoop is the background worker that throttle-flushes dirty sessions.
@@ -345,13 +349,12 @@ func startStreamLoop(ctx context.Context, bs *BotState) {
 				throttle = time.Duration(cfg.StreamThrottleMs) * time.Millisecond
 			}
 			for _, sid := range bs.Streams.DueSessions(throttle) {
-				// Serialize the ticker flush onto the per-session SessionEvents worker so it is FIFO-ordered
-				// with hook-event sends (e.g. PreToolUse tool notifications). DispatchAsync (guaranteed enqueue)
-				// not TryDispatchAsync — an inline fallback would reintroduce the text-overtakes-tool race.
-				bs.SessionEvents.DispatchAsync(sid, "flush:stream-ticker", func() error {
-					flushSession(bs, sid, false, false)
-					return nil
-				})
+				// S4: NONBLOCKING ticker flush. flushSession snapshots under DataMu then enqueues ONE render op
+				// onto the Message FIFO via TryDispatchAsync; on a full queue it re-marks the snapshot entries
+				// Dirty under DataMu and returns false, so the next tick retries (Dirty dedups). It NEVER inlines
+				// the render — a full session queue no longer stalls other sessions (MAJOR 3). Boundary flushes
+				// keep the blocking Dispatch/DispatchAsync paths.
+				flushSession(bs, sid, false, false, flushTry)
 			}
 			bs.Streams.SweepEnded(60 * time.Second)           // drop ended-session tombstones older than TTL
 			bs.Streams.SweepPostToolArrived(30 * time.Second) // drop never-consumed PostToolUse (B2) signals

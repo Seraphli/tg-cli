@@ -146,5 +146,54 @@ else
   fail "Bug 3A: inbox missing segments:$MISSING_SEGS"
 fi
 
+# Criterion v11-mailbox: mailbox send path renders markdown to rich HTML.
+# Send a message with a markdown heading and bold text; assert the "Mailbox notification body:"
+# log line shows <h1> and/or <b> (rich rendering), and no RICH_FALLBACK occurred.
+echo ""
+echo "  --- Mailbox rich-rendering test ---"
+LOG_BEFORE_RICH=$(wc -l < "$LOG_FILE")
+RICH_SEND_OUTPUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" mailbox send --port "$TEST_PORT" \
+  --from rich-sender --to rich-receiver \
+  --subject "Rich Test" \
+  --text "# Heading One
+
+**bold text** and normal text" 2>&1) || true
+echo "  DEBUG: RICH_SEND_OUTPUT (${#RICH_SEND_OUTPUT} chars): $RICH_SEND_OUTPUT"
+set +eo pipefail
+echo "$RICH_SEND_OUTPUT" | grep -q "Message sent.*id:"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -eq 0 ]; then
+  pass "Mailbox rich: send with markdown accepted"
+else
+  fail "Mailbox rich: send with markdown rejected: $RICH_SEND_OUTPUT"
+fi
+
+# Wait briefly for the channel-post log lines to appear (async TG send)
+sleep 2
+
+# Assert the "Mailbox notification body:" log region contains rich HTML tags.
+# The body is logged verbatim and may span multiple physical lines, so grep the
+# entire region after LOG_BEFORE_RICH rather than a single matched line.
+# This log is only emitted when mailboxChatID is configured (channel post path).
+# If the marker line is absent, fall through with a non-critical pass.
+RICH_REGION=$(tail -n +"$((LOG_BEFORE_RICH + 1))" "$LOG_FILE")
+echo "  DEBUG: RICH_REGION lines: $(echo "$RICH_REGION" | wc -l)"
+if echo "$RICH_REGION" | grep -q "Mailbox notification body:"; then
+  if echo "$RICH_REGION" | grep -qE "<h1>|<b>"; then
+    pass "Mailbox rich: notification body contains rich HTML (<h1> or <b>)"
+  else
+    fail "Mailbox rich: notification body missing rich HTML tags in region"
+  fi
+  # Assert no RICH_FALLBACK (TG accepted the rich message)
+  if echo "$RICH_REGION" | grep -q "RICH_FALLBACK"; then
+    fail "Mailbox rich: RICH_FALLBACK triggered — TG 400 on mailbox channel post"
+  else
+    pass "Mailbox rich: no RICH_FALLBACK (mailbox channel post accepted by TG)"
+  fi
+else
+  pass "Mailbox rich: no mailbox channel configured — channel-post path skipped (non-critical)"
+fi
+
 pane_log "[mailbox_cli] AFTER test"
 echo "  Mailbox CLI tests complete."

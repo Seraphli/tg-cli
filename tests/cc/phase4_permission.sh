@@ -17,7 +17,7 @@ TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[permission] BEFORE permission prompt"
-inject_prompt "Answer this question first in 2 sentences: what does the bash redirect operator '>' do when used with echo? After answering, run this exact bash command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "Answer this question first in 2 sentences: what does the bash redirect operator '>' do when used with echo? After answering, use the Bash tool to run this exact command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[permission] AFTER sending permission prompt"
 
 # Wait for permission request in bot log
@@ -41,6 +41,14 @@ pane_log "[permission] AFTER permission detected"
 
 if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   pass "PermissionRequest TG notification sent (msg_id=$PERM_MSG_ID)"
+
+  # TC9 rich migration (v9): PermissionRequest is sent via sendRichMessage → the sent marker
+  # carries fmt=rich. Guards against reverting the permission send to legacy HTML mode.
+  if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -q "Permission request sent:.*fmt=rich" 2>/dev/null; then
+    pass "TC9: PermissionRequest sent via rich message path (fmt=rich)"
+  else
+    fail "TC9: Permission request sent marker missing fmt=rich (expected rich message path)"
+  fi
 
   # Typing continuity: inject → PreToolUse (text generation before tool call)
   check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
@@ -99,11 +107,16 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   else
     fail "Permission debug log not found (expected 'Permission payload: toolInput=')"
   fi
-  # Wait for CC to complete the full turn (Bash execution + Stop hook)
+  # Wait for CC to complete the full turn (Bash execution + Stop hook). f22: the turn finalizes via
+  # EITHER (a) Stream relabel ✅ (incremental streaming) OR (b) a Stop direct-send — a short/fast reply
+  # whose deltas burst coincident with Stop is delivered via ": Stop [" / "Stop terminal:
+  # outcome=direct_send" with NO relabel that turn. This wait has no content token of its own (the
+  # post-permission reply content is not asserted here), so accept the Stop turn-completion markers as
+  # delivery, mirroring the f19 fallback shape already used in phase9/phase27/phase29.
   ELAPSED=0
   STOP4_FOUND=false
   while [ $ELAPSED -lt $TIMEOUT ]; do
-    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+    if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -E "Stream relabel ✅:|: Stop \[|Stop terminal: outcome=direct_send" > /dev/null 2>&1; then
       STOP4_FOUND=true
       break
     fi
@@ -111,9 +124,9 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
     ELAPSED=$((ELAPSED + 2))
   done
   if [ "$STOP4_FOUND" = true ]; then
-    pass "Stream relabel ✅ received (CC turn complete after permission)"
+    pass "Stream relabel ✅ or Stop direct-send received (CC turn complete after permission)"
   else
-    fail "Stream relabel ✅ not received within ${TIMEOUT}s"
+    fail "Neither Stream relabel ✅ nor Stop direct-send received within ${TIMEOUT}s"
   fi
 else
   fail "PermissionRequest not triggered within ${TIMEOUT}s"
@@ -127,7 +140,7 @@ wait_for_idle
 LOG_BEFORE_PCANCEL=$(wc -l < "$LOG_FILE")
 
 pane_log "[perm_cancel] BEFORE permission cancel prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo permission_cancel_test > /tmp/tg-cli-perm-cancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "I have a file-watcher running that fires the moment a specific flag file shows up, and I want to catch it firing live. Please create the flag for me with the Bash tool, exactly this command: echo permission_cancel_test > /tmp/tg-cli-perm-cancel-test.txt — just that one command, nothing else, and don't read the file back afterwards; my watcher has to be the first thing that touches it."
 pane_log "[perm_cancel] AFTER sending permission cancel prompt"
 
 # Wait for PermissionRequest notification
@@ -191,7 +204,7 @@ wait_for_idle
 LOG_BEFORE_PTXTCANCEL=$(wc -l < "$LOG_FILE")
 
 pane_log "[perm_txt_cancel] BEFORE permission text cancel prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo permission_text_cancel_test > /tmp/tg-cli-perm-txtcancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "First write a brief paragraph explaining what you are about to do, then use the Bash tool to run this exact command: echo permission_text_cancel_test > /tmp/tg-cli-perm-txtcancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[perm_txt_cancel] AFTER sending permission text cancel prompt"
 
 # Wait for PermissionRequest notification
@@ -258,7 +271,7 @@ PESC_SENTINEL="/tmp/tg-cli-perm-esc-test.txt"
 rm -f "$PESC_SENTINEL"
 
 pane_log "[perm_esc] BEFORE permission esc prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo perm_esc_test > $PESC_SENTINEL. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "First write a brief paragraph explaining what you are about to do, then use the Bash tool to run this exact command: echo perm_esc_test > $PESC_SENTINEL. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[perm_esc] AFTER sending permission esc prompt"
 
 # Wait for PermissionRequest (hook blocking on the streaming connection)

@@ -14,8 +14,11 @@ type StreamMeta struct {
 }
 
 // StreamEntry is one streamed assistant message (one message_id).
-// Deltas/FinalIdx/Dirty/LastFlush are guarded by SessionStream.DataMu.
-// Msgs/SentText/TablesSent/Sealed are mutated only by flush (serialized by SessionStream.FlushMu).
+// Deltas/FinalIdx/Dirty/LastFlush/PositionedChunks are guarded by SessionStream.DataMu.
+// Msgs/SentText/TablesSent are mutated only by flush (serialized by SessionStream.FlushMu).
+// Sealed is normally set by flush (FlushMu), but FinalizeLastWithText also sets it under DataMu to
+// install the authoritative Stop text and slam the drop-barrier on late MD — both writers are safe
+// because AppendDelta/AppendExisting read Sealed under the same DataMu.
 type StreamEntry struct {
 	MessageID  string
 	TurnID     string
@@ -34,9 +37,31 @@ type StreamEntry struct {
 	TablesSent bool
 	Sealed     bool // content done (no more delta / tables sent) — NOT the same as Stop relabel
 	Relabeled  bool // Stop header 💬→✅ already applied to this (last) message
+	Rich       bool // true = message was first sent as rich (Bot API 10.1); all edits must match
 	Dirty      bool
 	LastFlush  time.Time
+	// PositionedChunks is how many chunks have been placed/queued for this bubble so far (the enqueue-time
+	// high-water-mark, f25). flushSession reads it at snapshot (p1) and commits planned=len(chunks) at a
+	// SUCCESSFUL enqueue (p3) under DataMu — NOT at render completion — so a second snapshot under Message-FIFO
+	// lag sees the already-queued count and does not re-split. A planned chunk count exceeding this means a NEW
+	// TG message will be SENT below (new bubble or pagination growth) -> SendBelowSinceTool.
+	PositionedChunks int
+	// StopClass is the sticky post-Stop classification (commit 18) of an entry CREATED by the post-Stop state
+	// machine while ss.Stopped. Decided exactly once at the first non-empty delta: StopCopy (a verbatim
+	// paragraph run of the authoritative Stop body — every delta dropped, never armed) or New (a genuinely new
+	// message — streamed progressively once armed). Unclassified until then. Irrelevant for entries created by
+	// the normal AppendDelta path (they are armed from birth and never consult it).
+	StopClass StopClass
 }
+
+// StopClass is the sticky classification of a post-Stop MessageDisplay entry (commit 18).
+type StopClass int
+
+const (
+	StopClassUnclassified StopClass = iota // no non-empty delta seen yet (or a normal pre-Stop entry)
+	StopClassStopCopy                      // verbatim paragraph run of the Stop body → drop every delta, never arm
+	StopClassNew                           // genuinely new post-Stop message → stream progressively once armed
+)
 
 // AssembledText returns contiguous text from index 0 and whether the message is complete.
 func (e *StreamEntry) AssembledText() (string, bool) {
@@ -62,12 +87,11 @@ type PostToolSignal struct {
 	At       time.Time
 }
 
-// ToolNotifyMark records the last PreToolUse tool-notification send that resolved via B2/B3, so a same-prompt
-// MessageDisplay-final arriving shortly after can be logged as a residual inversion (observability only).
+// ToolNotifyMark records the last PreToolUse tool-notification send, so a same-prompt MessageDisplay-final
+// arriving shortly after can be logged as a residual inversion (observability only).
 type ToolNotifyMark struct {
 	PromptID string
 	At       time.Time
-	Branch   string
 }
 
 type SessionStream struct {
@@ -77,13 +101,25 @@ type SessionStream struct {
 	Order         []string
 	Stopped       bool // turn closed; drop late deltas
 	StopRequested bool
-	// NewTextSinceTool is set when a new assistant text bubble (message_id) starts; the PreToolUse FIFO
-	// handler consumes it (TakeNewTextSinceTool) to reset the compact-tool cycle, keeping Reset serialized
-	// with CompactTools Get/Store on the per-session worker (fixes the off-FIFO Reset-vs-Store race).
+	// LastStopBody is the trimmed authoritative Stop body (set by FinalizeLastWithText). Used for
+	// content-dedup of a late MessageDisplay after Stop: a post-Stop MD whose content equals this was
+	// already delivered by the Stop send (incl. the round-7 SealedMismatch direct-send), so it is dropped.
+	LastStopBody string
+	// NewTextSinceTool is set when any assistant text arrives since the last tool (a new bubble AND a
+	// continuation delta — both set sites). The PreToolUse FIFO handler consumes it (TakeNewTextSinceTool) to
+	// gate ONLY the pre-tool wait-skip (f25: it no longer drives the compact-tool cycle reset — that now keys on
+	// SendBelowSinceTool, the placement signal). Guarded by DataMu.
 	NewTextSinceTool bool
-	Closed           bool      // session ended/reset; in-flight flush must abort + AppendDelta drops
-	ClosedTurns      []string  // turn_ids whose stream is finalized; their late deltas are dropped (survives Rotate; capped)
-	EndedAt          time.Time // when SessionEnd marked this a tombstone (for TTL sweep)
+	// SendBelowSinceTool is set (f25) when a flush places (or will place at the pre-tool flush) a NEW TG text
+	// message BELOW the last tool notification since the last tool boundary — a new bubble or pagination growth
+	// (planned chunks > PositionedChunks). The PreToolUse FIFO handler consumes it (TakeSendBelowSinceTool) to
+	// reset the compact-tool cycle, so a continuation that only EDITS the bubble above the tool no longer falsely
+	// splits the compact group (rev 14 BLOCKER3 side effect). Set in flushSession p3 under DataMu; INV4-safe
+	// (the Hook FIFO reads this flag, never len(Msgs)).
+	SendBelowSinceTool bool
+	Closed             bool      // session ended/reset; in-flight flush must abort + AppendDelta drops
+	ClosedTurns        []string  // turn_ids whose stream is finalized; their late deltas are dropped (survives Rotate; capped)
+	EndedAt            time.Time // when SessionEnd marked this a tombstone (for TTL sweep)
 	// Round-8 async-race coordination, folded here (Occam — no separate store). Guarded by DataMu.
 	PostToolArrived map[string]*PostToolSignal // tool_use_id -> PostToolUse payload, set off-FIFO before Dispatch (B2)
 	LastToolNotify  ToolNotifyMark             // last B2/B3-resolved tool notification (late-MD observability marker)
@@ -140,7 +176,8 @@ func (s *StreamStore) AppendDelta(sessionID string, m StreamMeta, index int, del
 }
 
 // TakeNewTextSinceTool atomically reads+clears the per-session NewTextSinceTool flag (the PreToolUse FIFO
-// consumes it to reset the compact-tool cycle, serialized with CompactTools Get/Store). False if unknown.
+// consumes it to gate the pre-tool wait-skip; f25: it no longer drives the compact-tool cycle reset — see
+// TakeSendBelowSinceTool). False if unknown.
 func (s *StreamStore) TakeNewTextSinceTool(sessionID string) bool {
 	ss := s.lookup(sessionID)
 	if ss == nil {
@@ -150,6 +187,21 @@ func (s *StreamStore) TakeNewTextSinceTool(sessionID string) bool {
 	defer ss.DataMu.Unlock()
 	v := ss.NewTextSinceTool
 	ss.NewTextSinceTool = false
+	return v
+}
+
+// TakeSendBelowSinceTool atomically reads+clears the per-session SendBelowSinceTool placement signal (f25):
+// the PreToolUse FIFO consumes it AFTER the pre-tool flush to reset the compact-tool cycle iff a new TG text
+// message was (or will be) placed below the last tool notification since the last tool. False if unknown.
+func (s *StreamStore) TakeSendBelowSinceTool(sessionID string) bool {
+	ss := s.lookup(sessionID)
+	if ss == nil {
+		return false
+	}
+	ss.DataMu.Lock()
+	defer ss.DataMu.Unlock()
+	v := ss.SendBelowSinceTool
+	ss.SendBelowSinceTool = false
 	return v
 }
 
@@ -179,50 +231,280 @@ func recordClosedTurns(ss *SessionStream) {
 	}
 }
 
+// Post-Stop late-MessageDisplay design (commit 18) — residuals (accepted tradeoffs):
+//   (a) a NEW message whose first non-empty fragment verbatim-matches a paragraph run of the authoritative
+//       Stop body is classified STOP-COPY and dropped WHOLE (boss-accepted homogeneity tradeoff — dedup wins
+//       over the rare case of a genuinely-new message that happens to start with the Stop body verbatim).
+//   (b) no cross-turn tombstone is recorded if no late MD of that turn arrives before Rotate (maybeTombstone
+//       fires only on observation in the stopped handler).
+//   (c) incomplete late entries are cleared at Rotate (existing lifecycle — Rotate wipes ss.Msgs/ss.Order).
+//
+// PostStopAction tells the MessageDisplay handler what follow-up (if any) a delta requires while the session
+// is Stopped (commit 18). The non-stopped path always returns PostStopNone.
+type PostStopAction int
+
+const (
+	PostStopNone          PostStopAction = iota // not a post-Stop delta — use (handled, dropped) normally
+	PostStopDrop                                // classified STOP-COPY → dropped whole (INFO "dropped (stop-copy)")
+	PostStopDefer                               // empty delta on an unclassified placeholder → nothing to render yet
+	PostStopNeedsArm                            // a NEW entry gained content → caller ResolveChats then ArmStopped
+	PostStopArmedComplete                       // an ARMED entry became complete → caller StreamFlush(sessionID, true)
+	PostStopArmedProgress                       // an ARMED entry took a non-final delta → the ticker renders it
+)
+
 // AppendExisting appends a delta WITHOUT chat resolution when the (session,message) entry already exists.
-// Returns true if handled (appended OR dropped as closed/sealed); false only when the message is brand-new,
-// in which case the caller resolves the chat and calls AppendDelta. Keeps ResolveChat off the per-delta hot path.
-func (s *StreamStore) AppendExisting(sessionID, messageID, turnID string, index int, delta string, final bool) (handled, dropped bool) {
+// Returns handled=true if handled (appended OR dropped OR routed by the post-Stop state machine); handled=false
+// only when the message is brand-new AND the session is NOT stopped, in which case the caller resolves the chat
+// and calls AppendDelta. Keeps ResolveChat off the per-delta hot path.
+//
+// Check order (P3, commit 18): ss.Closed first (unconditional drop) → the post-Stop state machine while
+// ss.Stopped → turnClosed ONLY when NOT stopped. While Stopped, a late MessageDisplay is redesigned from a
+// one-shot direct send into a proper order-gated stream (see stoppedMachine); the returned PostStopAction
+// drives the caller's follow-up (arm / flush / drop).
+func (s *StreamStore) AppendExisting(sessionID, messageID, turnID string, index int, delta string, final bool) (handled, dropped bool, post PostStopAction) {
+	ss := s.lookup(sessionID)
+	if ss == nil {
+		return false, false, PostStopNone
+	}
+	ss.DataMu.Lock()
+	defer ss.DataMu.Unlock()
+	if ss.Closed {
+		return true, true, PostStopNone // ended — unconditional safe drop
+	}
+	if ss.Stopped {
+		return stoppedMachine(ss, messageID, turnID, index, delta, final)
+	}
+	if turnClosed(ss, turnID) {
+		return true, true, PostStopNone // finalized turn — safe drop (checked only when NOT stopped)
+	}
+	e, ok := ss.Msgs[messageID]
+	if !ok {
+		return false, false, PostStopNone // new message → caller resolves chat + AppendDelta
+	}
+	if e.Sealed {
+		return true, true, PostStopNone // message already finalized
+	}
+	e.Deltas[index] = delta
+	if final {
+		e.FinalIdx = index
+	}
+	e.Dirty = true
+	// A continuation delta on an existing bubble IS assistant text since the last tool (rev 14 BLOCKER3): set
+	// NewTextSinceTool so the pre-tool wait-skip triggers for continuation text, not just a fresh bubble. Only
+	// on the appended path — never on the closed/sealed drop paths above.
+	ss.NewTextSinceTool = true
+	return true, false, PostStopNone
+}
+
+// stoppedMachine routes a MessageDisplay delta that arrives while the session is Stopped (commit 18). Runs
+// under the caller's ss.DataMu hold (DataMu-only: NO ResolveChat, NO I/O):
+//   - known & Sealed              → drop (late/duplicate on an armed-then-sealed or pre-Stop sealed entry).
+//   - armed (in ss.Order) & unsealed → append; ArmedComplete if now complete, else ArmedProgress (P4/P5).
+//   - unknown / unarmed placeholder → PER-MESSAGE STICKY CLASSIFICATION (P1) on the first NON-EMPTY delta:
+//       STOP-COPY (a paragraph run of LastStopBody) → drop every delta, never arm (no storage);
+//       NEW → store the delta and request arming once the assembled text is non-empty (P2);
+//       empty/whitespace deltas defer (record index/FinalIdx continuity only, never classify, never Dirty).
+//
+// On the first observation of a late turn_id it records the turn tombstone (P6, recordClosedTurns semantics).
+func stoppedMachine(ss *SessionStream, messageID, turnID string, index int, delta string, final bool) (handled, dropped bool, post PostStopAction) {
+	e, known := ss.Msgs[messageID]
+	if known && e.Sealed {
+		maybeTombstone(ss, turnID)
+		return true, true, PostStopNone // known-sealed straggler → existing "dropped" log
+	}
+	if known && isInOrder(ss, messageID) {
+		// Armed entry (a NEW post-Stop stream already armed, or a pre-Stop unsealed bubble): append + flush on
+		// completion (P4/P5). The ticker renders non-final progress (order-gated).
+		e.Deltas[index] = delta
+		if final {
+			e.FinalIdx = index
+		}
+		e.Dirty = true
+		maybeTombstone(ss, turnID)
+		if _, complete := e.AssembledText(); complete {
+			return true, false, PostStopArmedComplete
+		}
+		return true, false, PostStopArmedProgress
+	}
+	// Unknown message_id, or a known-but-UNARMED placeholder (in ss.Msgs, ABSENT from ss.Order — P2).
+	if !known {
+		e = &StreamEntry{MessageID: messageID, TurnID: turnID, Deltas: make(map[int]string), FinalIdx: -1, StopClass: StopClassUnclassified}
+		ss.Msgs[messageID] = e
+	}
+	maybeTombstone(ss, turnID)
+	if e.StopClass == StopClassStopCopy {
+		return true, true, PostStopDrop // sticky: every delta of a STOP-COPY id is dropped, no storage
+	}
+	if e.StopClass == StopClassUnclassified {
+		if strings.TrimSpace(delta) == "" {
+			// Empty/whitespace delta: record index/FinalIdx continuity ONLY (never classify, never Dirty). An
+			// all-empty message stays a permanent no-op.
+			e.Deltas[index] = delta
+			if final {
+				e.FinalIdx = index
+			}
+			return true, false, PostStopDefer
+		}
+		// First NON-EMPTY delta → classify exactly once (P1).
+		if paragraphRunContained(delta, ss.LastStopBody) {
+			e.StopClass = StopClassStopCopy // verbatim Stop-body run → drop this and every later delta (no storage)
+			return true, true, PostStopDrop
+		}
+		e.StopClass = StopClassNew
+	}
+	// StopClassNew (just classified or continuing an unarmed NEW entry): store the delta; request arming once
+	// the assembled text is non-empty (P2). Do NOT set Dirty — an UNARMED entry is never rendered (order-gated),
+	// so it never wakes the ticker; ArmStopped sets Dirty at arm time.
+	e.Deltas[index] = delta
+	if final {
+		e.FinalIdx = index
+	}
+	if text, _ := e.AssembledText(); strings.TrimSpace(text) != "" {
+		return true, false, PostStopNeedsArm
+	}
+	return true, false, PostStopDefer
+}
+
+// maybeTombstone records the turn tombstone on the FIRST observation of a late turn_id in the stopped handler
+// (P6). recordClosedTurns picks up the just-handled entry's TurnID (dedup + cap semantics), so a delta of this
+// turn arriving after a later Rotate (which keeps ClosedTurns) is dropped by turnClosed.
+func maybeTombstone(ss *SessionStream, turnID string) {
+	if turnID != "" && !turnClosed(ss, turnID) {
+		recordClosedTurns(ss)
+	}
+}
+
+// isInOrder reports whether messageID is armed (present in ss.Order). Caller holds ss.DataMu.
+func isInOrder(ss *SessionStream, messageID string) bool {
+	for _, id := range ss.Order {
+		if id == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+// ArmStopped installs the FULL metadata on a post-Stop NEW entry and appends it to ss.Order exactly once (P2
+// arming), all under ONE DataMu hold so no render snapshot ever sees the entry in ss.Order without its
+// metadata. Returns armed=false if the entry vanished (Rotate/Close raced); complete reports whether the
+// assembled text is already final (a single-delta message → the caller flushes immediately, P5).
+func (s *StreamStore) ArmStopped(sessionID, messageID string, m StreamMeta) (armed, complete bool) {
 	ss := s.lookup(sessionID)
 	if ss == nil {
 		return false, false
 	}
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
-	if ss.Closed || ss.Stopped || turnClosed(ss, turnID) {
-		return true, true
-	} // dropped: ended/stopped/closed turn
 	e, ok := ss.Msgs[messageID]
 	if !ok {
-		return false, false
-	} // new message → caller resolves chat + AppendDelta
-	if e.Sealed {
-		return true, true
-	} // dropped: message already finalized
-	e.Deltas[index] = delta
-	if final {
-		e.FinalIdx = index
+		return false, false // entry removed between classify and arm
+	}
+	// Mirror the normal new-message path's metadata set (register.go new-message block) BEFORE Dirty/Order.
+	e.PromptID = m.PromptID
+	e.ChatID = m.ChatID
+	e.TopicID = m.TopicID
+	e.TmuxTarget = m.TmuxTarget
+	e.Project = m.Project
+	e.CWD = m.CWD
+	e.AgentName = m.AgentName
+	e.Backend = m.Backend
+	if !isInOrder(ss, messageID) {
+		ss.Order = append(ss.Order, messageID)
 	}
 	e.Dirty = true
-	return true, false
+	_, complete = e.AssembledText()
+	return true, complete
+}
+
+// DropStopped removes a post-Stop entry that could not be armed (ResolveChat failed) — deletes the map entry
+// and defensively sweeps ss.Order (P2), so no unarmed, metadata-less entry lingers.
+func (s *StreamStore) DropStopped(sessionID, messageID string) {
+	ss := s.lookup(sessionID)
+	if ss == nil {
+		return
+	}
+	ss.DataMu.Lock()
+	defer ss.DataMu.Unlock()
+	delete(ss.Msgs, messageID)
+	newOrder := ss.Order[:0]
+	for _, id := range ss.Order {
+		if id != messageID {
+			newOrder = append(newOrder, id)
+		}
+	}
+	ss.Order = newOrder
+}
+
+// splitParagraphs normalizes CRLF/lone-CR to LF, then splits on blank-line boundaries into TrimSpace'd
+// paragraphs (empty input → nil). Used by the post-Stop STOP-COPY matcher (P1).
+func splitParagraphs(s string) []string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var paras []string
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			if p := strings.TrimSpace(strings.Join(cur, "\n")); p != "" {
+				paras = append(paras, p)
+			}
+			cur = nil
+		}
+	}
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.TrimSpace(ln) == "" {
+			flush()
+		} else {
+			cur = append(cur, ln)
+		}
+	}
+	flush()
+	return paras
+}
+
+// paragraphRunContained reports whether inner is a CONTIGUOUS paragraph run of outer (P1 matcher). Both are
+// normalized + split by splitParagraphs; empty inner or outer → false.
+func paragraphRunContained(inner, outer string) bool {
+	ip := splitParagraphs(inner)
+	op := splitParagraphs(outer)
+	if len(ip) == 0 || len(op) == 0 || len(ip) > len(op) {
+		return false
+	}
+	for start := 0; start+len(ip) <= len(op); start++ {
+		match := true
+		for k := range ip {
+			if ip[k] != op[start+k] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // Rotate clears the current turn's entries for a NEW user turn but KEEPS the ClosedTurns tombstone,
 // so a late delta from the previous (closed) turn is still dropped. Used by UserPromptSubmit.
+// DataMu-ONLY (S3a): Rotate runs INSIDE a Message-FIFO op (INV6 lifecycle-as-op) so it is already
+// totally ordered with every render op — it must NOT take FlushMu (no Message-FIFO op holds FlushMu).
 func (s *StreamStore) Rotate(sessionID string) {
 	ss := s.lookup(sessionID)
 	if ss == nil {
 		return
 	}
-	ss.FlushMu.Lock()
-	defer ss.FlushMu.Unlock()
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
 	ss.Msgs = make(map[string]*StreamEntry)
 	ss.Order = nil
 	ss.Stopped = false
 	ss.StopRequested = false
-	ss.NewTextSinceTool = false // new user turn — drop any stale "new text since last tool" signal
+	ss.LastStopBody = ""          // new user turn — drop the previous turn's authoritative Stop body
+	ss.NewTextSinceTool = false   // new user turn — drop any stale "new text since last tool" signal
+	ss.SendBelowSinceTool = false // f25: new user turn — drop any stale placement (send-below) signal
 }
 
 // lookup returns the existing SessionStream without creating one.
@@ -302,6 +584,95 @@ func (s *StreamStore) TryClose(sessionID string) bool {
 	return true
 }
 
+// FinalizeResult reports what FinalizeLastWithText did with the authoritative Stop text.
+type FinalizeResult int
+
+const (
+	FinalizeSkipped        FinalizeResult = iota // empty text, or the sealed last entry already contains the Stop text
+	FinalizeExisting                             // the last entry was overwritten with the authoritative text and sealed
+	FinalizeNoEntry                              // no stream entry yet (Stop raced ahead of the last MessageDisplay)
+	FinalizeSealedMismatch                       // last entry is sealed but does NOT contain the Stop authoritative text
+)
+
+// streamGracePoll is the poll interval AwaitEntryOrStop uses while grace-waiting for a late MessageDisplay.
+const streamGracePoll = 25 * time.Millisecond
+
+// FinalizeLastWithText installs the Stop-hook's authoritative last_assistant_message as the LAST stream
+// entry's content, so the Stop flush renders the COMPLETE text instead of force-sealing a partial
+// MessageDisplay stream. Under one DataMu hold:
+//   - empty/whitespace text     -> FinalizeSkipped (no change).
+//   - no entry (Stop beat the last MD) -> FinalizeNoEntry with NO side effect; the caller uses
+//     AwaitEntryOrStop to grace-wait for a near-concurrent MD before deciding (do NOT mark Stopped here —
+//     an instant stop would drop a slightly-late MD that the old streamFlush drain grace used to catch).
+//   - last entry already Sealed AND its assembled text equals the Stop text -> FinalizeSkipped (MD already
+//     completed it correctly; do not overwrite). Sealed but assembled text DIFFERS (an earlier message whose
+//     post-tool text raced Stop and was dropped) -> FinalizeSealedMismatch (the caller direct-sends the Stop text).
+//   - otherwise -> overwrite the last entry's Deltas with {0: text}, FinalIdx=0, Sealed=true (the seal
+//     makes AppendDelta/AppendExisting drop any late/out-of-order MD, incl. an index=0 overwrite), and
+//     return FinalizeExisting.
+func (s *StreamStore) FinalizeLastWithText(sessionID, text string) FinalizeResult {
+	if strings.TrimSpace(text) == "" {
+		return FinalizeSkipped
+	}
+	ss := s.Session(sessionID)
+	ss.DataMu.Lock()
+	defer ss.DataMu.Unlock()
+	// Record the authoritative Stop body (trimmed) for content-dedup of a late post-Stop MessageDisplay,
+	// for ALL non-empty outcomes (Existing/Skipped/SealedMismatch/NoEntry). text is non-empty here (the
+	// empty-text early return above already returned FinalizeSkipped).
+	ss.LastStopBody = strings.TrimSpace(text)
+	if len(ss.Order) == 0 {
+		return FinalizeNoEntry
+	}
+	e := ss.Msgs[ss.Order[len(ss.Order)-1]]
+	if e == nil {
+		return FinalizeSkipped
+	}
+	if e.Sealed {
+		// The last entry is already sealed. If it already carries the Stop authoritative text, the MD
+		// completed it correctly -> skip. If it carries a DIFFERENT (earlier) message (e.g. a pre-tool text
+		// bubble, and the post-tool text raced Stop and was dropped), the Stop text was never delivered ->
+		// FinalizeSealedMismatch so the caller direct-sends it.
+		assembled, _ := e.AssembledText()
+		if strings.TrimSpace(assembled) == strings.TrimSpace(text) {
+			return FinalizeSkipped
+		}
+		return FinalizeSealedMismatch
+	}
+	e.Deltas = map[int]string{0: text}
+	e.FinalIdx = 0
+	e.Sealed = true
+	e.Dirty = true
+	return FinalizeExisting
+}
+
+// AwaitEntryOrStop waits up to timeout for a stream entry to appear (a MessageDisplay arriving just after
+// Stop won the race). It returns true as soon as an entry exists — the caller should install the
+// authoritative text and flush (relabel). If the timeout elapses with still no entry, it ATOMICALLY (under
+// the SAME DataMu hold as the final len(Order) check) marks the session Stopped so a later MD is dropped,
+// and returns false — the caller direct-sends the payload. This restores the grace the old streamFlush
+// drain gave a slightly-late MD, so the common near-concurrent case relabels instead of being dropped.
+func (s *StreamStore) AwaitEntryOrStop(sessionID string, timeout time.Duration) bool {
+	ss := s.Session(sessionID)
+	deadline := time.Now().Add(timeout)
+	for {
+		ss.DataMu.Lock()
+		if len(ss.Order) > 0 {
+			ss.DataMu.Unlock()
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			// Final len(Order) check (empty, above) + Stopped commit under ONE lock hold — no split acquisition.
+			ss.Stopped = true
+			recordClosedTurns(ss)
+			ss.DataMu.Unlock()
+			return false
+		}
+		ss.DataMu.Unlock()
+		time.Sleep(streamGracePoll)
+	}
+}
+
 // DueSessions returns sessions with a dirty entry that is complete OR past the throttle.
 func (s *StreamStore) DueSessions(throttle time.Duration) []string {
 	s.mu.Lock()
@@ -324,28 +695,12 @@ func (s *StreamStore) DueSessions(throttle time.Duration) []string {
 	return out
 }
 
-// Reset closes and drops the session. Acquires FlushMu so it waits for any in-flight flush, then sets
-// Closed=true (so a flush that already grabbed the old pointer aborts) before deleting from the map.
-func (s *StreamStore) Reset(sessionID string) {
-	ss := s.lookup(sessionID)
-	if ss != nil {
-		ss.FlushMu.Lock()
-		ss.DataMu.Lock()
-		ss.Closed = true
-		ss.DataMu.Unlock()
-		ss.FlushMu.Unlock()
-	}
-	s.mu.Lock()
-	delete(s.sessions, sessionID)
-	s.mu.Unlock()
-}
-
 // EndSession turns the session into a TTL tombstone (Closed=true, entries cleared) instead of deleting it,
 // so a late async delta after SessionEnd cannot resurrect a fresh stream and post a stray 💬.
+// DataMu-ONLY (S3a): EndSession runs INSIDE a Message-FIFO op (INV6 lifecycle-as-op), totally ordered with
+// every render op, so it must NOT take FlushMu (no Message-FIFO op holds FlushMu).
 func (s *StreamStore) EndSession(sessionID string) {
 	ss := s.Session(sessionID) // create a bare tombstone if none exists, so a straggler delta is still dropped
-	ss.FlushMu.Lock()
-	defer ss.FlushMu.Unlock()
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
 	recordClosedTurns(ss)
@@ -353,6 +708,7 @@ func (s *StreamStore) EndSession(sessionID string) {
 	ss.Order = nil
 	ss.Closed = true
 	ss.Stopped = true
+	ss.SendBelowSinceTool = false // f25: session ended — drop any stale placement (send-below) signal
 	ss.EndedAt = time.Now()
 }
 
@@ -369,59 +725,6 @@ func (s *StreamStore) SweepEnded(ttl time.Duration) {
 			delete(s.sessions, sid)
 		}
 	}
-}
-
-// HasCompleteUnsealedForPrompt reports whether some bubble tagged with promptID is fully assembled (final
-// delta received) but NOT yet flushed/sealed — the B1 condition for the PreToolUse bounded wait. Sealed
-// bubbles are excluded so a prior sealed segment of a multi-segment turn does not falsely satisfy the wait
-// for a later tool whose preceding text is still in flight (advisor MAJOR 2b/2c).
-func (s *StreamStore) HasCompleteUnsealedForPrompt(sessionID, promptID string) bool {
-	if promptID == "" {
-		return false
-	}
-	ss := s.lookup(sessionID)
-	if ss == nil {
-		return false
-	}
-	ss.DataMu.Lock()
-	defer ss.DataMu.Unlock()
-	for _, e := range ss.Msgs {
-		if e.PromptID != promptID || e.Sealed {
-			continue
-		}
-		if _, c := e.AssembledText(); c {
-			return true
-		}
-	}
-	return false
-}
-
-// HasInflightForPrompt reports whether some bubble tagged with promptID has received at least one delta but
-// is NOT yet complete — i.e. pre-tool text for this prompt is still streaming. "Complete" uses the SAME
-// contiguity semantics as AssembledText: a final delta (final:true) whose index leaves an earlier gap (deltas
-// not contiguous from index 0) is NOT complete and therefore still counts as in-flight. Sealed bubbles are
-// excluded (already flushed). This is the B2 in-flight gate for the PreToolUse bounded wait: while pre-tool
-// text is in flight, keep waiting for its final (B1) up to the full budget instead of firing the tool
-// notification early at the 500ms floor.
-func (s *StreamStore) HasInflightForPrompt(sessionID, promptID string) bool {
-	if promptID == "" {
-		return false
-	}
-	ss := s.lookup(sessionID)
-	if ss == nil {
-		return false
-	}
-	ss.DataMu.Lock()
-	defer ss.DataMu.Unlock()
-	for _, e := range ss.Msgs {
-		if e.PromptID != promptID || e.Sealed || len(e.Deltas) == 0 {
-			continue
-		}
-		if _, c := e.AssembledText(); !c {
-			return true
-		}
-	}
-	return false
 }
 
 // SetPostToolArrived records a PostToolUse/PostToolUseFailure payload keyed by tool_use_id. Called off-FIFO
@@ -479,15 +782,15 @@ func (s *StreamStore) SweepPostToolArrived(ttl time.Duration) {
 	}
 }
 
-// SetLastToolNotify records the last B2/B3-resolved tool notification for the late-MD observability marker.
-func (s *StreamStore) SetLastToolNotify(sessionID, promptID, branch string) {
+// SetLastToolNotify records the last tool notification send for the late-MD observability marker.
+func (s *StreamStore) SetLastToolNotify(sessionID, promptID string) {
 	if sessionID == "" {
 		return
 	}
 	ss := s.Session(sessionID)
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
-	ss.LastToolNotify = ToolNotifyMark{PromptID: promptID, At: time.Now(), Branch: branch}
+	ss.LastToolNotify = ToolNotifyMark{PromptID: promptID, At: time.Now()}
 }
 
 // GetLastToolNotify returns the last recorded tool-notify mark (ok=false if none recorded yet).

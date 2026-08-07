@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Seraphli/tg-cli/cmd/handlers"
 	"github.com/Seraphli/tg-cli/cmd/helpers"
@@ -16,6 +17,10 @@ import (
 	"github.com/Seraphli/tg-cli/internal/logger"
 	tele "gopkg.in/telebot.v3"
 )
+
+// testUpdateSeq generates monotonic synthetic ids for /test/update (seeded high to avoid
+// colliding with real Telegram msg_ids in tests).
+var testUpdateSeq int64 = 900000000
 
 func rowUniques(row tele.Row) []string {
 	var out []string
@@ -107,6 +112,34 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				status = "unknown_submenu"
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": status, "msg_id": msgID, "unique": "settings", "data": data})
+		case "tool":
+			// AskUserQuestion multiSelect toggle via the SAME callback re-edit path (Fix 15). data="q:opt".
+			// Returns the resulting button labels so tests can assert the ✅ prefix on the toggled option.
+			snap, ok := bs.PendingWait.FindByMsgIDSnapshot(msgID)
+			if !ok || snap.ToolName != "AskUserQuestion" {
+				json.NewEncoder(w).Encode(map[string]interface{}{"status": "expired", "msg_id": msgID})
+				return
+			}
+			qo := strings.SplitN(data, ":", 2)
+			if len(qo) < 2 {
+				json.NewEncoder(w).Encode(map[string]interface{}{"status": "invalid_data", "msg_id": msgID})
+				return
+			}
+			qIdx, _ := strconv.Atoi(qo[0])
+			optIdx, _ := strconv.Atoi(qo[1])
+			editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
+			labels, editErr := handlers.ToggleAskAndReedit(bs, editMsg, snap, qIdx, optIdx)
+			if labels == nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{"status": "expired", "msg_id": msgID})
+				return
+			}
+			resp := map[string]interface{}{"status": "ok", "msg_id": msgID, "unique": "tool", "labels": labels}
+			if editErr != nil {
+				// The store toggle succeeded but the re-edit failed — this is the Fix 15 regression signal.
+				resp["status"] = "edit_error"
+				resp["error"] = editErr.Error()
+			}
+			json.NewEncoder(w).Encode(resp)
 		default:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"status": "ok",
@@ -141,6 +174,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			"collapsed":    entry.Collapsed,
 			"current_page": entry.CurrentPage,
 			"raw_mode":     entry.RawMode,
+			"rich":         entry.Rich,
 		})
 	})
 
@@ -286,5 +320,55 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"msg_id": sent.ID, "chat_id": chatID, "buttons": buttons})
 	})
 
-	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message, /test/settings_message")
+	mux.HandleFunc("/test/update", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body failed", http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			ChatID       int64  `json:"chat_id"`
+			ChatType     string `json:"chat_type"`
+			TopicID      int    `json:"topic_id"`
+			SenderID     int64  `json:"sender_id"`
+			Text         string `json:"text"`
+			ReplyToMsgID int    `json:"reply_to_msg_id"`
+			Document     *struct {
+				FileID   string `json:"file_id"`
+				FileName string `json:"file_name"`
+			} `json:"document"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		chatType := req.ChatType
+		if chatType == "" {
+			chatType = "private" // explicit default; the ReplyTo /p route does not depend on it
+		}
+		synthID := int(atomic.AddInt64(&testUpdateSeq, 1))
+		msg := &tele.Message{
+			ID:       synthID,
+			Chat:     &tele.Chat{ID: req.ChatID, Type: tele.ChatType(chatType)},
+			Sender:   &tele.User{ID: req.SenderID},
+			ThreadID: req.TopicID,
+			Text:     req.Text,
+		}
+		if req.ReplyToMsgID != 0 {
+			msg.ReplyTo = &tele.Message{ID: req.ReplyToMsgID, Chat: msg.Chat}
+		}
+		if req.Document != nil {
+			msg.Document = &tele.Document{File: tele.File{FileID: req.Document.FileID}, FileName: req.Document.FileName}
+		}
+		logger.Info(fmt.Sprintf("Test update: synth_id=%d chat=%d type=%s sender=%d text=%q reply_to=%d has_doc=%t",
+			synthID, req.ChatID, chatType, req.SenderID, req.Text, req.ReplyToMsgID, req.Document != nil))
+		// Dispatch through the REAL poller entry so bot.Use markIncoming middleware +
+		// command/media routing run exactly as in production. Dispatch is async
+		// (Synchronous unset), so fire-and-return {ok:true}.
+		bs.Bot.ProcessUpdate(tele.Update{ID: synthID, Message: msg})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	})
+
+	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message, /test/settings_message, /test/update")
 }

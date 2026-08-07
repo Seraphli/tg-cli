@@ -13,6 +13,7 @@ import (
 // TranscriptLogEntry represents a parsed message from a CC or Codex transcript JSONL.
 type TranscriptLogEntry struct {
 	Type       string `json:"type"`
+	OriginKind string `json:"origin_kind"`
 	Timestamp  string `json:"timestamp"`
 	Text       string `json:"text"`
 	Tool       string `json:"tool"`
@@ -34,6 +35,9 @@ func ParseCCTranscript(f *os.File, noTools bool, filteredTools map[string]bool, 
 			Model     string          `json:"model"`
 			Timestamp string          `json:"timestamp"`
 			Message   json.RawMessage `json:"message"`
+			Origin    struct {
+				Kind string `json:"kind"`
+			} `json:"origin"`
 		}
 		if json.Unmarshal([]byte(line), &raw) != nil {
 			continue
@@ -52,7 +56,7 @@ func ParseCCTranscript(f *os.File, noTools bool, filteredTools map[string]bool, 
 			// Try string content
 			var contentStr string
 			if json.Unmarshal(msg.Content, &contentStr) == nil {
-				entries = append(entries, TranscriptLogEntry{Type: "user", Timestamp: raw.Timestamp, Text: contentStr})
+				entries = append(entries, TranscriptLogEntry{Type: "user", OriginKind: raw.Origin.Kind, Timestamp: raw.Timestamp, Text: contentStr})
 				continue
 			}
 			// Try array content
@@ -78,7 +82,7 @@ func ParseCCTranscript(f *os.File, noTools bool, filteredTools map[string]bool, 
 					}
 				}
 				if len(parts) > 0 {
-					entries = append(entries, TranscriptLogEntry{Type: "user", Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
+					entries = append(entries, TranscriptLogEntry{Type: "user", OriginKind: raw.Origin.Kind, Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
 				}
 				continue
 			}
@@ -89,7 +93,7 @@ func ParseCCTranscript(f *os.File, noTools bool, filteredTools map[string]bool, 
 				}
 			}
 			if len(parts) > 0 {
-				entries = append(entries, TranscriptLogEntry{Type: "user", Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
+				entries = append(entries, TranscriptLogEntry{Type: "user", OriginKind: raw.Origin.Kind, Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
 			}
 		} else if raw.Type == "assistant" {
 			var msg struct {
@@ -286,6 +290,7 @@ func ReadLastNRounds(transcriptPath string, n int, backend string) ([]Transcript
 	var rounds []TranscriptRound
 	var current TranscriptRound
 	lastRole := ""
+	ccBackend := backend != "codex"
 	for _, e := range entries {
 		if e.Text == "" {
 			continue
@@ -294,8 +299,12 @@ func ReadLastNRounds(transcriptPath string, n int, backend string) ([]Transcript
 			continue
 		}
 		role := e.Type
+		// A CC user entry opens a new round only if it is a genuine human turn (origin.kind=="human"); a
+		// non-human CC user entry (nudge, interrupt) is still appended to the current round, never dropped.
+		// codex (no origin field) is unchanged: any user entry opens a round.
+		userOpensRound := role == "user" && (!ccBackend || e.OriginKind == "human")
 		switch {
-		case role == "user" && lastRole != "user":
+		case role == "user" && userOpensRound && lastRole != "user":
 			if len(current.UserTexts) > 0 && len(current.AssistantTexts) > 0 {
 				rounds = append(rounds, current)
 				current = TranscriptRound{}
@@ -303,7 +312,7 @@ func ReadLastNRounds(transcriptPath string, n int, backend string) ([]Transcript
 				current = TranscriptRound{}
 			}
 			current.UserTexts = append(current.UserTexts, e.Text)
-		case role == "user" && lastRole == "user":
+		case role == "user":
 			current.UserTexts = append(current.UserTexts, e.Text)
 		case role == "assistant" && lastRole != "assistant":
 			current.AssistantTexts = append(current.AssistantTexts, e.Text)
@@ -440,9 +449,12 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 		var rnds []ctxRound
 		var current ctxRound
 		lastRole := ""
+		ccBackend := backend != "codex"
 		for _, e := range filtered {
 			role := e.Type
-			if role == "user" && lastRole == "assistant" {
+			// A user entry opens a new round only if it is a genuine human turn. On the CC path that
+			// means origin.kind=="human"; on codex (no origin field) any user entry opens a round, as before.
+			if role == "user" && lastRole == "assistant" && (!ccBackend || e.OriginKind == "human") {
 				if len(current.entries) > 0 {
 					rnds = append(rnds, current)
 					current = ctxRound{}

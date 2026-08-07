@@ -142,9 +142,33 @@ func ScanCustomCommands() map[string]stores.CustomCmd {
 	return result
 }
 
-// resolveReplyTargetFromText resolves a tmux target from reply-to message text.
-func resolveReplyTargetFromText(bs *types.BotState, text string) (injector.TmuxTarget, error) {
-	targetPtr, err := helpers.ExtractTmuxTargetFromText(text)
+// extractReplyTarget resolves the tmux target from a replied-to notification message. It first parses
+// the 📟 line from the message text (plain/legacy notifications); when .Text is empty — rich Bot API
+// 10.1 notifications carry their content in a rich_message field telebot does not model, leaving .Text
+// blank — it falls back to the msg_id -> target record in the Pages store (written by recordReplyTarget
+// when the notification was sent). Returns an error when neither yields a target.
+func extractReplyTarget(bs *types.BotState, replyTo *tele.Message) (*injector.TmuxTarget, error) {
+	if replyTo == nil {
+		return nil, fmt.Errorf("no reply message")
+	}
+	if targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text); err == nil && targetPtr != nil {
+		return targetPtr, nil
+	}
+	if entry, ok := bs.Pages.Get(replyTo.ID); ok && entry.TmuxTarget != "" {
+		target, err := injector.ParseTarget(entry.TmuxTarget)
+		if err != nil {
+			return nil, err
+		}
+		logger.Debug(fmt.Sprintf("extractReplyTarget: resolved via Pages msg_id=%d target=%s", replyTo.ID, entry.TmuxTarget))
+		return &target, nil
+	}
+	return nil, fmt.Errorf("no tmux target in reply")
+}
+
+// resolveReplyTargetFromReply resolves + liveness-checks a tmux target from a reply-to notification
+// (its 📟 line, or the Pages msg_id fallback for rich notifications whose .Text is empty).
+func resolveReplyTargetFromReply(bs *types.BotState, replyTo *tele.Message) (injector.TmuxTarget, error) {
+	targetPtr, err := extractReplyTarget(bs, replyTo)
 	if err != nil || targetPtr == nil {
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
@@ -207,6 +231,20 @@ func Register(bs *types.BotState) {
 			return next(c)
 		}
 	})
+	// Incoming-message float-marker middleware: bump FloatMarker on entry so the busy manager knows
+	// a real message arrived (triggers re-float when it lands below a pre-existing status). Must be
+	// registered BEFORE the first bot.Handle so telebot includes it in every handler's group. The
+	// handler runs with a markingContext so its c.Reply/c.Send additionally marks the route only on
+	// send SUCCESS — replacing the old unconditional deferred Mark that spuriously re-floated.
+	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
+		return func(c tele.Context) error {
+			if helpers.FloatMarker == nil || c.Update().Message == nil || c.Chat() == nil {
+				return next(c)
+			}
+			mc := &markingContext{Context: c, marker: helpers.FloatMarker, now: time.Now}
+			return markIncoming(helpers.FloatMarker, c.Chat().ID, c.Message().ThreadID, time.Now, func() error { return next(mc) })
+		}
+	})
 	bot.Handle(tele.OnMigration, func(c tele.Context) error {
 		from, to := c.Migration()
 		logger.Info(fmt.Sprintf("Chat migration detected: %d → %d", from, to))
@@ -238,7 +276,7 @@ func Register(bs *types.BotState) {
 		bot.Handle("/"+tg, func(c tele.Context) error {
 			// Try reply path first when ReplyTo exists and contains target info
 			if c.Message().ReplyTo != nil {
-				target, err := resolveReplyTargetFromText(bs, c.Message().ReplyTo.Text)
+				target, err := resolveReplyTargetFromReply(bs, c.Message().ReplyTo)
 				if err == nil {
 					text := "/" + cc
 					if payload := strings.TrimSpace(c.Message().Payload); payload != "" {
@@ -276,9 +314,10 @@ func Register(bs *types.BotState) {
 								})
 								if won {
 									capturedMarkup := frozenMarkup
+									capturedRich := pwSnap.Rich
 									bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
 										editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-										_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+										_, err := helpers.RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 										if err != nil {
 											logger.Error(fmt.Sprintf("CC command (reply): AskQ EDIT failed msg_id=%d err=%v", eID, err))
 										} else {
@@ -347,9 +386,10 @@ func Register(bs *types.BotState) {
 							})
 							if won {
 								capturedMarkup := frozenMarkup
+								capturedRich := pwSnap.Rich
 								bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
 									editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-									_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+									_, err := helpers.RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 									if err != nil {
 										logger.Error(fmt.Sprintf("CC command (group): AskQ EDIT failed msg_id=%d err=%v", eID, err))
 									} else {
@@ -380,7 +420,7 @@ func Register(bs *types.BotState) {
 		var target injector.TmuxTarget
 		var tmuxStr string
 		if c.Message().ReplyTo != nil {
-			t, err := resolveReplyTargetFromText(bs, c.Message().ReplyTo.Text)
+			t, err := resolveReplyTargetFromReply(bs, c.Message().ReplyTo)
 			if err != nil {
 				if err.Error() == "no target found" {
 					return c.Reply("❌ No tmux session info found in the original message.")
@@ -512,7 +552,7 @@ func Register(bs *types.BotState) {
 
 		// Mode 2: reply to notification — bind session from replied message
 		if c.Message().ReplyTo != nil {
-			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -572,7 +612,7 @@ func Register(bs *types.BotState) {
 			idx++
 		}
 		sel.Inline(rows...)
-		sent, err := bot.Reply(c.Message(), fmt.Sprintf("Select a session to bind to this chat:\n%s", strings.Join(lines, "\n")), sel)
+		sent, err := markedBotReply(bot, helpers.FloatMarker, time.Now, c.Message(), fmt.Sprintf("Select a session to bind to this chat:\n%s", strings.Join(lines, "\n")), sel)
 		if err == nil {
 			bs.BindMenuItems.Store(sent.ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
 		}
@@ -587,7 +627,7 @@ func Register(bs *types.BotState) {
 		}
 		// Mode 1: reply to notification — unbind session from replied message
 		if c.Message().ReplyTo != nil {
-			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -665,7 +705,7 @@ func Register(bs *types.BotState) {
 			idx++
 		}
 		sel.Inline(rows...)
-		sent, err := bot.Reply(c.Message(), "Select a route to unbind:\n"+strings.Join(lines, "\n"), sel)
+		sent, err := markedBotReply(bot, helpers.FloatMarker, time.Now, c.Message(), "Select a route to unbind:\n"+strings.Join(lines, "\n"), sel)
 		if err == nil {
 			bs.UnbindMenuItems.Store(sent.ID, keys)
 		}
@@ -685,7 +725,7 @@ func Register(bs *types.BotState) {
 		// Resolve session: from replied message or single active session
 		var sessionID string
 		if c.Message().ReplyTo != nil {
-			targetPtr, err := helpers.ExtractTmuxTargetFromText(c.Message().ReplyTo.Text)
+			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -710,6 +750,7 @@ func Register(bs *types.BotState) {
 		if !ok {
 			return c.Reply(fmt.Sprintf("❌ Failed to set name: %s", errMsg))
 		}
+		bs.InjectQueue.ClearDeadTargets(injector.TargetExists)
 		logger.Info(fmt.Sprintf("Session name set: session=%s name=%s by user=%s", sessionID, name, userID))
 		return c.Reply(fmt.Sprintf("✅ Session named: %s", name))
 	})
@@ -834,7 +875,7 @@ func Register(bs *types.BotState) {
 		btnSubmit := menu.Data("📤 Submit", "merge_submit")
 		btnCancel := menu.Data("❌ Cancel", "merge_cancel")
 		menu.Inline(menu.Row(btnSubmit, btnCancel))
-		sent, err := bot.Reply(c.Message(), BuildMergeNotifyText("📝 Collecting (0 messages)", nil), menu, tele.ModeHTML)
+		sent, err := markedBotReply(bot, helpers.FloatMarker, time.Now, c.Message(), BuildMergeNotifyText("📝 Collecting (0 messages)", nil), menu, tele.ModeHTML)
 		if err != nil {
 			return err
 		}

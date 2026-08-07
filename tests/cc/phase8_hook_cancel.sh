@@ -16,7 +16,7 @@ LOG_BEFORE_CANCEL=$(wc -l < "$LOG_FILE")
 
 # Send command that triggers a PermissionRequest (same pattern as permission)
 pane_log "[hook_cancel] BEFORE permission prompt"
-inject_prompt "First write a brief paragraph explaining what you are about to do, then run this exact bash command: echo hook_cancel_test_ok > /tmp/tg-cli-hook-cancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
+inject_prompt "First write a brief paragraph explaining what you are about to do, then use the Bash tool to run this exact command: echo hook_cancel_test_ok > /tmp/tg-cli-hook-cancel-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[hook_cancel] AFTER sending permission prompt"
 
 # Wait for PermissionRequest notification in bot log (hook blocking on the streaming connection)

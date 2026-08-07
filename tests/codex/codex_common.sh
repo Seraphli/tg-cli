@@ -13,6 +13,38 @@ codex_api_idle() {
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null || echo "False"
 }
 
+# build_codex_launch echoes the exact command string to type into the Codex pane via send-keys.
+# When CODEX_MODEL + CODEX_BASE_URL + CODEX_API_KEY are ALL set, it defines a "custom" model provider at
+# RUNTIME via -c overrides (no config.toml is written) so Codex uses the custom model/endpoint; otherwise
+# it emits the default launch. The API key is NEVER placed on the command line — Codex reads it from the
+# inherited environment via env_key. Every token is printf %q-quoted so the inner TOML quotes survive the
+# send-keys -> pane-shell -> codex boundary intact (mirrors cc_common.sh's printf %q approach).
+build_codex_launch() {
+  local q
+  if [ -n "${CODEX_MODEL:-}" ] && [ -n "${CODEX_BASE_URL:-}" ] && [ -n "${CODEX_API_KEY:-}" ]; then
+    # JSON-encode the dynamic base_url: a JSON string is a valid TOML basic string, so the URL is preserved
+    # byte-exact regardless of metacharacters.
+    local base_url_toml
+    base_url_toml=$(printf '%s' "$CODEX_BASE_URL" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')
+    local -a argv=(
+      codex --model "$CODEX_MODEL"
+      -c 'model_provider="custom"'
+      -c 'model_providers.custom.name="Custom E2E"'
+      -c "model_providers.custom.base_url=$base_url_toml"
+      -c 'model_providers.custom.env_key="CODEX_API_KEY"'
+      -c 'model_providers.custom.wire_api="responses"'
+      --yolo --enable hooks
+    )
+    printf -v q '%q ' "${argv[@]}"
+  else
+    if [ -n "${CODEX_MODEL:-}${CODEX_BASE_URL:-}${CODEX_API_KEY:-}" ]; then
+      echo "[start_codex] custom-model NOT activated (need ALL of CODEX_MODEL/CODEX_BASE_URL/CODEX_API_KEY); using default codex model" >&2
+    fi
+    printf -v q '%q ' codex --yolo --enable hooks
+  fi
+  printf 'CODEX_HOME=%s %s' "$(printf %q "$CODEX_HOME")" "$q"
+}
+
 start_codex() {
   local session_name="${1:-$E2E_SESSION}"
   local install_trap="${2:-true}"
@@ -24,8 +56,7 @@ start_codex() {
   $TMUX_TEST new-session -d -s "$E2E_SESSION"
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
-  $TMUX_TEST send-keys -t "$E2E_SESSION" \
-    "CODEX_HOME=$CODEX_HOME codex --yolo --enable hooks"
+  $TMUX_TEST send-keys -t "$E2E_SESSION" "$(build_codex_launch)"
   sleep 1
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   echo "Waiting for Codex to start..."
@@ -39,7 +70,8 @@ start_codex() {
   local trust_handled=false
   local hooks_handled=false
   local update_handled=false
-  while [ $elapsed -lt 60 ]; do
+  local idle_stable=0
+  while [ $elapsed -lt 90 ]; do
     PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p -S - 2>/dev/null || true)
     set +eo pipefail
     echo "$PANE_CONTENT" | grep -qi "Hooks need review"
@@ -101,22 +133,38 @@ start_codex() {
       elapsed=$((elapsed + 2))
       continue
     fi
-    if [ "$api_idle" = "True" ]; then
-      echo "Codex idle detected via /session/idle (title: $title)"
+    # Codex is "ready" only after all startup dialogs (update -> trust -> hooks) have rendered AND been
+    # handled or confirmed absent. The idle API reports True whenever the pane title is the default
+    # (non-spinner) string — which is ALSO true while a dialog is displayed and during the brief gap
+    # between the trust dialog dismissing and the hooks dialog appearing. So a single idle==True check
+    # can preempt a not-yet-rendered dialog (the warmup inject then hits the dialog screen -> HTTP 500).
+    # Guard: treat codex as ready only when idle==True AND no dialog is currently visible, held for
+    # several consecutive checks so any pending dialog has time to render and be handled first.
+    local dialog_visible=false
+    if [ "${_ps_trust[1]}" -eq 0 ] || [ "${_ps_hooks[1]}" -eq 0 ] || { [ "${_ps_update_now[1]}" -eq 0 ] && [ "${_ps_update_skip[1]}" -eq 0 ]; }; then
+      dialog_visible=true
+    fi
+    if [ "$api_idle" = "True" ] && [ "$dialog_visible" = false ]; then
+      idle_stable=$((idle_stable + 1))
+    else
+      idle_stable=0
+    fi
+    if [ $idle_stable -ge 4 ]; then
+      echo "Codex idle detected via /session/idle (title: $title) [stable=$idle_stable trust=$trust_handled hooks=$hooks_handled]"
       sleep 5
       break
     fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
-  if [ $elapsed -ge 60 ]; then
-    echo "WARN: Codex idle detection timed out after 60s"
+  if [ $elapsed -ge 90 ]; then
+    echo "WARN: Codex idle detection timed out after 90s"
   fi
   pane_log "[start_codex] after idle detection"
-  echo "Codex warmup: injecting 'say hello' to register session..."
+  echo "Codex warmup: injecting warmup prompt to register session..."
   local log_before_warmup
   log_before_warmup=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-  inject_prompt "say hello"
+  inject_prompt "Reply with exactly one word: hello"
   elapsed=0
   while [ $elapsed -lt 90 ]; do
     if tail -n +"$((log_before_warmup + 1))" "$LOG_FILE" | grep "Session tracked" > /dev/null 2>&1; then

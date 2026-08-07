@@ -24,7 +24,7 @@ wait_for_idle
 LOG_BEFORE_TOOL=$(wc -l < "$LOG_FILE")
 
 pane_log "[codex/tool_notify] BEFORE tool notify prompt"
-inject_prompt "Run this exact bash command and report the output: echo codex_tool_notify_test_ok"
+inject_prompt "Use the Bash tool to run this exact command and report the output: echo codex_tool_notify_test_ok"
 pane_log "[codex/tool_notify] AFTER sending tool notify prompt"
 
 # Wait for ToolUse notification in bot log

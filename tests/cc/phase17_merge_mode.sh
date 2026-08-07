@@ -116,33 +116,48 @@ fi
 wait_for_idle
 pane_log "[merge_mode] AFTER CC idle"
 
-# Verify streaming message contains both unique tokens (grep bot log for Stream send/edit content)
+# Verify the merged reply was delivered carrying both unique tokens. The turn completes via EITHER
+# (a) Stream relabel ✅ (incremental streaming path) OR (b) f19: a Stop direct-send — a short reply whose
+# deltas burst coincident with Stop is delivered in a single "Notification sent ... Stop ... body=" line
+# carrying BOTH merge tokens, with NO Stream relabel for that turn. hy3-free hit path (b) in the full run
+# (3926718 archive 3281 "body=MERGE_TOKEN_ALPHA_7x9k<br>MERGE_TOKEN_BETA_3m2p" + 3289 "Stop terminal:
+# outcome=direct_send"); the old wait accepted only Stream relabel and FAILed despite correct delivery.
+# Accept either path; both still verify both tokens below.
 ELAPSED=0
 STOP_FOUND=false
+DELIVERY_PATH=""
 while [ $ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+  MERGE_WINDOW=$(tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE")
+  if echo "$MERGE_WINDOW" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
     STOP_FOUND=true
+    DELIVERY_PATH="Stream relabel ✅"
+    break
+  fi
+  if echo "$MERGE_WINDOW" | awk '/Notification sent.*Stop/ && /MERGE_TOKEN_ALPHA_7x9k/ && /MERGE_TOKEN_BETA_3m2p/{f=1} END{exit !f}'; then
+    STOP_FOUND=true
+    DELIVERY_PATH="Stop direct-send (both tokens in Stop body)"
     break
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Stream relabel ✅ (turn complete)... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for Stream relabel ✅ or Stop direct-send with both tokens... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$STOP_FOUND" = true ]; then
+  echo "  Merged reply delivered via: $DELIVERY_PATH"
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_MERGE + 1))" "$LOG_FILE")
   if echo "$NEW_LOGS" | grep "MERGE_TOKEN_ALPHA_7x9k" > /dev/null 2>&1; then
-    pass "CC output contains MERGE_TOKEN_ALPHA_7x9k (in Stream send/edit log)"
+    pass "CC output contains MERGE_TOKEN_ALPHA_7x9k (in Stream send/edit or Stop body log)"
   else
     fail "CC output missing MERGE_TOKEN_ALPHA_7x9k"
   fi
   if echo "$NEW_LOGS" | grep "MERGE_TOKEN_BETA_3m2p" > /dev/null 2>&1; then
-    pass "CC output contains MERGE_TOKEN_BETA_3m2p (in Stream send/edit log)"
+    pass "CC output contains MERGE_TOKEN_BETA_3m2p (in Stream send/edit or Stop body log)"
   else
     fail "CC output missing MERGE_TOKEN_BETA_3m2p"
   fi
 else
-  fail "Stream relabel ✅ not received after merge within ${TIMEOUT}s"
+  fail "Neither Stream relabel ✅ nor a Stop direct-send with both merge tokens received within ${TIMEOUT}s"
 fi
 
 # Test edge cases: submit without active merge

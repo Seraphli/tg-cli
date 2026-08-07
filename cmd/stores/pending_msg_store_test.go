@@ -169,44 +169,43 @@ func TestTryDispatchAsync_FullQueue(t *testing.T) {
 	s := NewSessionEventStore()
 	const sessionID = "test-session"
 	// Channel cap is 128 (see session_queue.go getOrCreate).
-	const cap = 128
+	const capacity = 128
 
-	// Block the worker by sending a long-running job first via getOrCreate to ensure
-	// the worker goroutine is created, then fill the remaining slots.
-	// We start by doing one real dispatch to ensure the worker exists and is busy,
-	// then fill the queue via TryDispatchAsync without letting the worker drain.
-	blocked := make(chan struct{})
+	// The worker goroutine drains the queue concurrently, so "queue full" is only deterministic while
+	// the worker is parked and NOT dequeuing. Occupy it with a blocking job that signals `started` once
+	// its handler is executing (proving the blocker has left the channel and the worker is inside the
+	// handler, not ranging over the queue), then holds until `release`. This is the sync point that
+	// removes the scheduling race: after `<-started`, the channel is empty and stays exactly as this
+	// goroutine fills it.
+	started := make(chan struct{})
 	release := make(chan struct{})
-
-	// Send one blocking job via DispatchAsync so the worker goroutine is occupied.
 	s.DispatchAsync(sessionID, "blocker", func() error {
-		<-blocked // waits until we signal
+		close(started)
+		<-release
 		return nil
 	})
+	<-started
 
-	// Fill remaining cap-1 slots.
-	for i := 0; i < cap-1; i++ {
-		ok := s.TryDispatchAsync(sessionID, "filler", func() error { return nil })
-		if !ok {
+	// Channel is empty and the worker is parked: fill it to EXACTLY capacity — every enqueue is accepted.
+	for i := 0; i < capacity; i++ {
+		if !s.TryDispatchAsync(sessionID, "filler", func() error { return nil }) {
 			t.Fatalf("TryDispatchAsync returned false before queue full (slot %d)", i)
 		}
 	}
 
-	// Queue is now full: next TryDispatchAsync must fail.
-	full := s.TryDispatchAsync(sessionID, "overflow", func() error { return nil })
-	if full {
+	// One more must be rejected — the channel is full and the worker is not draining.
+	if s.TryDispatchAsync(sessionID, "overflow", func() error { return nil }) {
 		t.Fatal("expected TryDispatchAsync to return false when queue is full")
 	}
 
-	// Release the blocker so the worker drains and the test exits cleanly.
-	close(blocked)
+	// Release the blocker, then drain deterministically: a synchronous Dispatch enqueues behind all the
+	// fillers and returns only after the worker has processed every job ahead of it — so on return the
+	// channel is provably empty (no sleep-and-hope).
 	close(release)
+	s.Dispatch(sessionID, "drain-sync", func() error { return nil })
 
-	// After draining, TryDispatchAsync must accept new jobs.
-	// Give the worker a moment to process.
-	time.Sleep(20 * time.Millisecond)
-	ok := s.TryDispatchAsync(sessionID, "after-drain", func() error { return nil })
-	if !ok {
+	// The queue is fully drained — new nonblocking dispatches are accepted again.
+	if !s.TryDispatchAsync(sessionID, "after-drain", func() error { return nil }) {
 		t.Fatal("expected TryDispatchAsync to return true after queue drained")
 	}
 }

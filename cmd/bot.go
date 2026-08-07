@@ -22,6 +22,7 @@ import (
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/hooks"
 	"github.com/Seraphli/tg-cli/cmd/stores"
+	"github.com/Seraphli/tg-cli/internal/archive"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
@@ -54,19 +55,36 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 			if err != nil {
 				continue
 			}
+			// f29 round-13 Item 9: fetch every pane's title/command/pid in ONE `list-panes -a` per tmux
+			// socket BEFORE the per-session loop, instead of 3-4 tmux execs per session inside each
+			// goroutine. When the tmux binary's page cache was poisoned (2026-08-01) those per-session execs
+			// all hung in D state, each pinning an OS thread, and the bot died of fatal thread exhaustion.
+			// Batching caps the tmux fan-out at one exec per socket per tick regardless of session count.
+			sessions := bs.SessionState.All()
+			targets := make([]injector.TmuxTarget, 0, len(sessions))
+			for _, info := range sessions {
+				if t, perr := injector.ParseTarget(info.TmuxTarget); perr == nil {
+					targets = append(targets, t)
+				}
+			}
+			paneMap := injector.ListPanesBatch(targets)
+			// f29 round-13 Item 9 extension: resolve every "node" pane's real backend from ONE batched
+			// `ps -e` per tick instead of one `ps --ppid` per node pane (`ps --ppid` still walks all of
+			// /proc, so it grew linearly with codex session count — the last per-session exec in the tick).
+			// Skips ps entirely when no pane is running "node".
+			paneChildren := helpers.ResolvePaneChildren(paneMap)
 			var sentChats sync.Map
-			for _, info := range bs.SessionState.All() {
+			for _, info := range sessions {
 				go func(tickCtx context.Context, info stores.SessionInfo) {
-					title := helpers.GetPaneTitle(info.TmuxTarget)
-					paneRunning := helpers.IsSessionRunning(info.TmuxTarget)
+					title, paneRunning := helpers.PaneState(info.TmuxTarget, paneMap, paneChildren)
 					if !paneRunning {
 						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
 						if bs.InjectQueue.HasItems(info.TmuxTarget) {
-							sid, _ := bs.SessionState.FindByTarget(info.TmuxTarget)
-							bs.SessionEvents.DispatchAsync(sid, "flush:ticker", func() error {
-								flushInjectQueue(bs, info.TmuxTarget)
-								return nil
-							})
+							// R10-item2: run flushInjectQueue in a PLAIN goroutine (NOT DispatchAsync onto the Hook
+							// FIFO). flushInjectQueue -> deliverInjectQueue -> SafeInjectText does a synchronous
+							// inject:safe Dispatch onto the SAME per-session Hook FIFO; running it ON that FIFO
+							// self-deadlocks. Off the FIFO the ArmRoute exactly-once claim still prevents double-inject.
+							go flushInjectQueue(bs, info.TmuxTarget, "")
 						}
 						return
 					}
@@ -128,6 +146,21 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 	})
 }
 
+// initMessageArchive opens the SQLite message archive when enabled. It returns nil (touching no disk)
+// when the toggle is off, and nil (with a logged warning) when the archive fails to open — an optional
+// feature must never block bot startup.
+func initMessageArchive(cfg config.AppConfig, dbPath string) *archive.Archive {
+	if !cfg.ArchiveEnabled() {
+		return nil
+	}
+	a, err := archive.New(dbPath)
+	if err != nil {
+		logger.Warn("message archive disabled: " + err.Error())
+		return nil
+	}
+	return a
+}
+
 func runBot(cmd *cobra.Command, args []string) {
 	startTime := time.Now()
 	if tmuxServerFlag != "" {
@@ -168,10 +201,15 @@ func runBot(cmd *cobra.Command, args []string) {
 	if port == 0 {
 		port = 12500
 	}
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.ResponseHeaderTimeout = 30 * time.Second // dead-conn self-heal <=30s; NOT applied to upload bodies
+	pollWatch := &pollWatchdog{}
+	pollWatch.onResult(time.Now(), true, "") // seed lastSuccess so watchdog does not fire before first poll
+	rt := &pollStampRoundTripper{base: base, watch: pollWatch, now: time.Now}
 	pref := tele.Settings{
 		Token:  creds.BotToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
-		Client: &http.Client{Timeout: 10 * time.Minute},
+		Client: &http.Client{Timeout: 10 * time.Minute, Transport: rt},
 	}
 	bot, err := tele.NewBot(pref)
 	if err != nil {
@@ -179,6 +217,19 @@ func runBot(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 	configDir := config.GetConfigDir()
+	// Wire the SQLite message archive (Feature 1). LoadAppConfig returns defaults when the file is absent,
+	// so an error here is a real read/parse failure → warn + disable, never panic (an optional feature must
+	// not take down the bot). initMessageArchive returns nil when disabled or on an open error.
+	if appCfg, appErr := config.LoadAppConfig(); appErr != nil {
+		logger.Warn("LoadAppConfig failed; message archive disabled: " + appErr.Error())
+	} else {
+		helpers.Archive = initMessageArchive(appCfg, config.MessageDBPath())
+	}
+	defer func() {
+		if cerr := helpers.Archive.Close(); cerr != nil {
+			logger.Warn("message archive close: " + cerr.Error())
+		}
+	}()
 	// Create BotState with all stores
 	bs := &BotState{
 		Bot:             bot,
@@ -191,6 +242,7 @@ func runBot(cmd *cobra.Command, args []string) {
 		MergeBuffers:    stores.NewMergeBufferStore(configDir),
 		InjectQueue:     stores.NewInjectQueueStore(configDir),
 		InjectConfirm:   stores.NewInjectConfirmStore(),
+		InjectRoute:     stores.NewInjectRouteStore(),
 		CronJobs:        stores.NewCronJobStore(configDir),
 		ReactionTracker: stores.NewReactionTrackerStore(),
 		HookRunning:     stores.NewHookRunningStateStore(),
@@ -199,12 +251,17 @@ func runBot(cmd *cobra.Command, args []string) {
 		ToolUseMsgs:     stores.NewToolUseMsgStore(),
 		CommandStats:    stores.NewCommandStatsStore(configDir),
 		SessionEvents:   stores.NewSessionEventStore(),
+		MessageQueue:    stores.NewSessionEventStore(),
+		MsgIDMap:        stores.NewMsgIDMap(),
 		AtChannels:      stores.NewAtChannelStore(configDir),
 		CompactTools:    stores.NewCompactToolStore(),
 		Streams:         stores.NewStreamStore(),
 		PendingWait:     stores.NewPendingWaitStore(),
 		PendingMsgStore: stores.NewPendingMsgStore(),
+		BusyStatus:      stores.NewBusyStatusStore(configDir),
 	}
+	helpers.FloodBackoff = helpers.NewFloodBackoffStore()
+	helpers.FloatMarker = helpers.NewFloatMarkerStore()
 	bs.SessionState.GetPaneCWD = helpers.GetPaneCWD
 	if err := bs.CommandStats.LoadFromDisk(); err != nil {
 		logger.Error(fmt.Sprintf("Failed to load command stats: %v", err))
@@ -251,15 +308,15 @@ func runBot(cmd *cobra.Command, args []string) {
 	handlers.Register(bs)
 	// Scan pending directory to rebuild in-memory state after restart
 	hookCB := hooks.Callbacks{
-		ResolveChat:                  resolveChat,
-		ProcessTranscriptUpdates:     processTranscriptUpdates,
-		SendEventNotification:        sendEventNotification,
-		TypingLog:                    typingLog,
-		FlushInjectQueue:             flushInjectQueue,
-		CheckSessionVersion:          checkSessionVersion,
-		StreamFlush:                  streamFlush,
-		StreamFlushAwaitNewText:      streamFlushAwaitNewText,
-		StreamFlushAwaitToolBoundary: streamFlushAwaitToolBoundary,
+		ResolveChat:              resolveChat,
+		ProcessTranscriptUpdates: processTranscriptUpdates,
+		SendEventNotification:    sendEventNotification,
+		TypingLog:                typingLog,
+		RouteInjectQueue:         routeInjectQueue,
+		CheckSessionVersion:      checkSessionVersion,
+		StreamFlush:              streamFlush,
+		StreamFlushAwaitNewText:  streamFlushAwaitNewText,
+		FlushStreamOp:            flushStreamOp,
 	}
 	hooks.ScanPendingDir(bs, hookCB, func(bsArg *BotState) { handlers.ScanLaunchDir(bsArg) })
 	// Restore persisted sessions and clean up stale routes
@@ -269,8 +326,28 @@ func runBot(cmd *cobra.Command, args []string) {
 	bs.CronJobs.Load()
 	mailbox.load()
 	bs.InjectQueue.Load()
+	bs.InjectQueue.ClearDeadTargets(injector.TargetExists)
 	bs.AtChannels.Load()
 	bs.MergeBuffers.Load()
+	bs.BusyStatus.Load()
+	// Startup sweep: delete or attempt-delete every persisted busy-status entry so stale status
+	// messages from a previous process run are cleaned up on restart.
+	for _, entry := range bs.BusyStatus.GetAll() {
+		if entry.MsgID == 0 {
+			// Crash-stale placeholder: no in-flight send and no live action claim; deleting lets the
+			// next 1s tick Reserve+create fresh (else the route is permanently locked out).
+			bs.BusyStatus.Delete(entry.ChatID, entry.TopicID)
+			logger.Info(fmt.Sprintf("busy startup sweep: deleted stale placeholder chat=%d topic=%d", entry.ChatID, entry.TopicID))
+			continue
+		}
+		busyMsg := &tele.Message{ID: entry.MsgID, Chat: &tele.Chat{ID: entry.ChatID}, ThreadID: entry.TopicID}
+		if err := bot.Delete(busyMsg); err == nil || isErrNotFoundToDelete(err) {
+			bs.BusyStatus.Delete(entry.ChatID, entry.TopicID)
+			logger.Info(fmt.Sprintf("busy startup sweep: deleted status msg chat=%d topic=%d msg_id=%d", entry.ChatID, entry.TopicID, entry.MsgID))
+		} else {
+			logger.Warn(fmt.Sprintf("busy startup sweep: delete failed (will retry) chat=%d topic=%d msg_id=%d err=%v", entry.ChatID, entry.TopicID, entry.MsgID, err))
+		}
+	}
 	// Compute the running binary's md5 once (used by /health and the startup log).
 	binaryMD5 := "unknown"
 	if exePath, err := os.Executable(); err == nil {
@@ -342,12 +419,31 @@ func runBot(cmd *cobra.Command, args []string) {
 			}
 		}
 	}()
+	// Watchdog: warn when getUpdates has not succeeded for >60s (indicates a stalled long-poll connection).
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				if pollWatch.stale(now, 60*time.Second) {
+					ls, la, le := pollWatch.snapshot()
+					logger.Warn(fmt.Sprintf("getUpdates stall detected: lastSuccess=%s lastAttempt=%s lastErr=%q",
+						ls.Format(time.RFC3339), la.Format(time.RFC3339), le))
+				}
+			}
+		}
+	}()
 	defer stop()
 	typingCtx, typingCancel := context.WithCancel(context.Background())
 	defer typingCancel()
 	go startTypingLoop(typingCtx, bs)
 	go startCronLoop(typingCtx, bs)
 	go startStreamLoop(typingCtx, bs)
+	go startBusyIndicatorLoop(typingCtx, bs)
 	go func() {
 		<-ctx.Done()
 		logger.Info("Received shutdown signal, stopping...")

@@ -13,22 +13,12 @@ start_claude() {
   $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 -c "$CC_WORKDIR"
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
-  # Build the env prefix + configurable model (mirrors the CA E2E harness, commit 8440b2a): forward any
-  # of these provider/model env vars that are set, so the suite can run against an arbitrary
-  # Anthropic-compatible model. Values are shell-quoted (printf %q) so tokens/URLs with special chars
-  # cannot break or inject into the launch command.
-  local env_prefix="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
-  local _v
-  for _v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
-            ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
-            ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
-    if [ -n "${!_v:-}" ]; then
-      env_prefix="${env_prefix} ${_v}=$(printf '%q' "${!_v}")"
-    fi
-  done
-  local model="${ANTHROPIC_MODEL:-sonnet}"
+  # Launch CC via the shared canonical builder cc_launch_cmd (defined in e2e_common.sh): it forwards the same
+  # nine provider/model env vars (printf %q quoted so tokens/URLs with special chars cannot break or inject
+  # into the command) and pins the --tools allowlist that structurally removes the Agent tool. perm_flag
+  # selects this session's permission mode.
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
-    "$env_prefix claude --model $model $perm_flag --setting-sources user --no-chrome"
+    "$(cc_launch_cmd "$perm_flag")"
   sleep 1
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   echo "Waiting for Claude to start..."

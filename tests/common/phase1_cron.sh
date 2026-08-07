@@ -196,3 +196,71 @@ fi
 curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
   -H "Content-Type: application/json" \
   -d "{\"id\":\"$FRESH_JOB_ID\"}" > /dev/null
+
+# Test: Rich escaping for cron — HTML-special chars in command output must be escaped
+# Criterion v11-cron: EscapeRich prevents <patt> and & from causing TG 400 errors.
+# Use an inject job whose notification text contains raw HTML-special chars so we can
+# verify the "Cron notification sent: ... body=" log shows the escaped forms.
+echo ""
+echo "  --- Cron rich-escaping test ---"
+LOG_BEFORE_ESC=$(wc -l < "$LOG_FILE")
+# Add a short-interval inject job targeting a non-existent agent — this triggers
+# sendCronNotification with the agent-not-online message which embeds EscapeRich(agentLabel).
+# We use an agent name containing HTML-special chars to verify they are escaped.
+ESC_AGENT="esc-test-<patt>-&-agent"
+ESC_ADD_RESP=$(curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/add" \
+  -H "Content-Type: application/json" \
+  -d "{\"mode\":\"inject\",\"schedule\":\"1s\",\"prompt\":\"esc-marker-prompt\",\"agent_name\":\"$ESC_AGENT\"}")
+ESC_JOB_ID=$(echo "$ESC_ADD_RESP" | jq -r '.id // ""')
+echo "  DEBUG: ESC_ADD_RESP: $ESC_ADD_RESP"
+
+# Wait for cron loop to fire
+echo "  Waiting 35s for escaping-test cron loop to trigger..."
+sleep 35
+
+# Verify the cron executed
+if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep "Cron job executing.*${ESC_JOB_ID:0:8}" > /dev/null 2>&1; then
+  pass "Cron rich-escape: job executed"
+else
+  fail "Cron rich-escape: job did not execute after 35s"
+fi
+
+# Verify "Cron notification sent:" log region shows escaped HTML entities.
+# The body is logged verbatim and may span multiple physical lines, so grep the
+# entire region after LOG_BEFORE_ESC rather than a single matched line.
+ESC_REGION=$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")
+echo "  DEBUG: ESC_REGION lines: $(echo "$ESC_REGION" | wc -l)"
+
+if echo "$ESC_REGION" | grep -q "&lt;patt&gt;"; then
+  pass "Cron rich-escape: < and > escaped to &lt;/&gt; in notification body"
+else
+  fail "Cron rich-escape: &lt;patt&gt; not found in notification body region"
+fi
+
+if echo "$ESC_REGION" | grep -q "&amp;"; then
+  pass "Cron rich-escape: & escaped to &amp; in notification body"
+else
+  fail "Cron rich-escape: &amp; not found in notification body region"
+fi
+
+# Verify no RICH_FALLBACK (400 error) occurred — escaped content was accepted by TG
+if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep "RICH_FALLBACK" > /dev/null 2>&1; then
+  fail "Cron rich-escape: RICH_FALLBACK triggered — TG 400 error on rich send"
+else
+  pass "Cron rich-escape: no RICH_FALLBACK (rich send accepted by TG)"
+fi
+
+# Anchor on the [ERROR]/[WARN] level so a real TG 400 in the message is caught, but the bot PID
+# in the [timestamp][PID=...] prefix (which can contain the digits "400") does NOT false-match.
+if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -E "\[(ERROR|WARN)\].*(400|Bad Request)" > /dev/null 2>&1; then
+  fail "Cron rich-escape: 400/Bad Request error found in logs"
+else
+  pass "Cron rich-escape: no 400/Bad Request errors"
+fi
+
+# Cleanup escape test job
+curl -s -X POST "http://127.0.0.1:$TEST_PORT/cron/remove" \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"$ESC_JOB_ID\"}" > /dev/null
+
+pane_log "[cron] AFTER rich-escaping test"

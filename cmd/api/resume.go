@@ -76,7 +76,7 @@ func registerResume(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		if !helpers.CheckSessionAlive(injector.FormatTarget(parsed), func(t string) {
-			helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
+			helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
 		}) {
 			http.Error(w, "session not alive", 410)
 			return

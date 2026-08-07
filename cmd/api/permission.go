@@ -23,7 +23,7 @@ func registerPermission(mux *http.ServeMux, bs *types.BotState) {
 			bs.PendingMsgStore,
 			func(target string) bool {
 				return helpers.CheckSessionAlive(target, func(t string) {
-					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
+					helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
 				})
 			},
 			func(text string) (*injector.TmuxTarget, error) {

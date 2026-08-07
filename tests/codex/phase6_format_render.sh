@@ -87,11 +87,11 @@ sed 's/<[^>]*>//g' "$TG_HTML_FILE" > "$TG_PLAIN_FILE"
 
 # === Comparison tests ===
 
-# Test 1: TG has indented nested bullets ("  •" for nested items)
-if grep -q "  •" "$TG_PLAIN_FILE" 2>/dev/null; then
-  pass "TG notification has indented nested bullets"
+# Test 1: TG rich HTML has <ul> and <li> tags for unordered list items
+if grep -q "<ul>" "$TG_HTML_FILE" 2>/dev/null && grep -q "<li>" "$TG_HTML_FILE" 2>/dev/null; then
+  pass "TG notification has rich list tags (<ul> and <li>)"
 else
-  fail "TG notification missing indented nested bullets"
+  fail "TG notification missing rich list tags (<ul>/<li>) in HTML"
 fi
 
 # Test 2: CLI pane shows nested list content (ground truth)
@@ -129,26 +129,32 @@ else
   fail "TG notification missing code formatting"
 fi
 
-# Test 6: Both CLI and TG contain ordered list content
+# Test 6: Both CLI and TG contain ordered list content; TG rich HTML has <ol> tag
 set +eo pipefail
 echo "$PANE_RAW" | grep -q "Step one" 2>/dev/null
 _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
-if [ "${_ps[1]}" -eq 0 ] && grep -q "Step one" "$TG_PLAIN_FILE" 2>/dev/null; then
-  pass "Both CLI and TG contain ordered list content"
+if [ "${_ps[1]}" -eq 0 ] && grep -q "Step one" "$TG_PLAIN_FILE" 2>/dev/null && grep -q "<ol>" "$TG_HTML_FILE" 2>/dev/null; then
+  pass "Both CLI and TG contain ordered list content, TG HTML has <ol> tag"
 else
-  fail "Ordered list content mismatch between CLI and TG"
+  fail "Ordered list content mismatch between CLI and TG, or TG HTML missing <ol>"
 fi
 
-# Test 7: No text gluing — TG should not have "item•" or "one•" (text immediately before bullet)
-if grep -q "[a-zA-Z]•" "$TG_PLAIN_FILE" 2>/dev/null || grep -q "[a-zA-Z][0-9]\." "$TG_PLAIN_FILE" 2>/dev/null; then
+# Test 7: No text gluing — TG should not have "item•" or "one•" (text immediately before bullet).
+# FIX 5 (r9): the extracted plain text includes the notification launch-command header (e.g.
+# "... codex --model mimo-v2.5-free ..."); the model name's "v2." matches the letter-digit-dot gluing
+# pattern and false-positives. Exclude the header line (grep -v -- "--model", covering both the codex
+# and claude header shapes) into .glue, then run BOTH gluing patterns against .glue (never $TG_PLAIN_FILE).
+# Ports the cc-sibling phase12:165-167 guard to codex phase6; layer A only, assertion semantics unchanged.
+grep -v -- "--model" "$TG_PLAIN_FILE" > "$TG_PLAIN_FILE.glue" 2>/dev/null || true
+if grep -q "[a-zA-Z]•" "$TG_PLAIN_FILE.glue" 2>/dev/null || grep -q "[a-zA-Z][0-9]\." "$TG_PLAIN_FILE.glue" 2>/dev/null; then
   fail "TG has text gluing (text immediately before bullet marker)"
 else
   pass "TG has no text gluing issues"
 fi
 
 # Cleanup temp files
-rm -f "$TG_HTML_FILE" "$TG_PLAIN_FILE"
+rm -f "$TG_HTML_FILE" "$TG_PLAIN_FILE" "$TG_PLAIN_FILE.glue"
 
 wait_for_idle
 pane_log "[format_render] AFTER CLI idle"

@@ -62,7 +62,14 @@ run_phase() {
   bash "$script" || rc=$?
   if [ $rc -ne 0 ]; then
     pane_log "[$(basename "$script")] CRASH capture"
-    fail "Phase $(basename "$script") crashed with exit code $rc"
+    # Record the crash but DO NOT abort the suite — continue to remaining phases (final report exits 1 if any FAIL).
+    record_fail "Phase $(basename "$script") crashed with exit code $rc"
+    local crashed_stale
+    crashed_stale=$($TMUX_TEST list-sessions -F "#{session_name}" 2>/dev/null | grep -v "^${BOT_SESSION}$" || true)
+    for s in $crashed_stale; do
+      pane_log "[crash-cleanup] stale session $s"
+      $TMUX_TEST kill-session -t "=$s" 2>/dev/null || true
+    done
   else
     # Post-phase sanity checks
     local stale_sessions
@@ -73,7 +80,7 @@ run_phase() {
         pane_log "[post-phase] stale session $s"
         $TMUX_TEST kill-session -t "=$s" 2>/dev/null || true
       done
-      fail "Phase $(basename "$script") left stale tmux sessions: $stale_sessions"
+      record_fail "Phase $(basename "$script") left stale tmux sessions: $stale_sessions"
     fi
     local queue_status
     queue_status=$(curl -s "http://127.0.0.1:$TEST_PORT/inject/queue-status" 2>/dev/null || echo '{"queues":{}}')
@@ -81,14 +88,15 @@ run_phase() {
     pending_count=$(echo "$queue_status" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(d.get('queues',{}).values()))" 2>/dev/null || echo "0")
     if [ "$pending_count" -gt 0 ]; then
       echo "  WARN: inject queue not empty after $(basename "$script"): $queue_status"
-      fail "Phase $(basename "$script") left $pending_count items in inject queue"
+      record_fail "Phase $(basename "$script") left $pending_count items in inject queue"
     fi
     # Post-phase bot-log validations (V1 raw-payload, V2 content, V3 ordering); CC-scoped, no-op otherwise.
     # Fallback only: phases that ran validate_phase_inline (live pane) touch a flag so we skip here (no double count).
     if [ ! -f "$TEST_CONFIG_DIR/.phase-validated" ]; then
-      validate_phase_log "$(basename "$script")" "$log_before_phase"
+      ( validate_phase_log "$(basename "$script")" "$log_before_phase" ) || true
     fi
   fi
+  return 0
 }
 
 # Build phase list based on --backend
@@ -154,7 +162,7 @@ elif [ -n "$PHASE_START" ]; then
   trap cleanup_sessions EXIT
   ALL_PHASES=( $(build_phase_list) )
   for phase in "${ALL_PHASES[@]}"; do
-    num=$(basename "$phase" | grep -oP 'phase\K[0-9]+')
+    num=$(basename "$phase" | grep -oP 'phase\K[0-9]+' || true)
     [ -z "$num" ] && continue
     [ "$num" -lt "$PHASE_START" ] && continue
     [ -n "$PHASE_END" ] && [ "$num" -gt "$PHASE_END" ] && continue

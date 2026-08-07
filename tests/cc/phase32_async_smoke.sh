@@ -16,7 +16,7 @@ LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 start_claude "e2e-async-smoke"
 
 pane_log "[async-smoke] before inject"
-inject_prompt "Run exactly this one shell command and nothing else, then stop: echo async_smoke_marker_ok"
+inject_prompt "Use the Bash tool to run exactly this one command and nothing else, then stop: echo async_smoke_marker_ok"
 pane_log "[async-smoke] after inject"
 
 wait_for_idle

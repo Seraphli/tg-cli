@@ -48,8 +48,10 @@ func CleanDeadSession(
 	sessionState *stores.SessionStateStore,
 	pages *stores.PageCacheStore,
 	sessionCounts *stores.SessionCountStore,
+	injectQueue *stores.InjectQueueStore,
 	tmuxTarget string,
 ) {
+	injectQueue.ClearTarget(tmuxTarget)
 	if sid, found := sessionState.FindByTarget(tmuxTarget); found {
 		sessionState.Remove(sid)
 		pages.CleanupSession(sid)
@@ -90,9 +92,10 @@ func CleanupPendingState(
 		if won && frozenMarkup != nil {
 			if pendingMsgStore != nil {
 				capturedMarkup := frozenMarkup
+				capturedRich := snap.Rich
 				pendingMsgStore.EditOrDefer(uuid, func(eID int, eChatID int64, editMsgText string, topicID int) {
 					editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-					_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+					_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 					if err != nil {
 						logger.Error(fmt.Sprintf("CleanupPendingState: EDIT failed msg_id=%d err=%v", eID, err))
 					} else {
@@ -101,7 +104,7 @@ func CleanupPendingState(
 				})
 			} else {
 				editMsg := &tele.Message{ID: snap.MsgID, Chat: &tele.Chat{ID: snap.ChatID}}
-				RetryFreezeEdit(bot, editMsg, msgText, frozenMarkup)
+				RetryFreezeEditAuto(bot, editMsg, snap.Rich, msgText, frozenMarkup)
 			}
 		}
 	}
@@ -114,29 +117,29 @@ func IsSessionRunning(tmuxTarget string) bool {
 	if title == "" {
 		return false
 	}
-	switch DetectBackend(tmuxTarget) {
+	return TitleIsBusy(DetectBackend(tmuxTarget), title)
+}
+
+// TitleIsBusy is the single busy classifier for every pane-title decision — the live path
+// (IsSessionRunning), the batched path (PaneState), and the /session/idle start_codex readiness gate all
+// route through here. It trims first: tmux #{pane_title} can carry surrounding whitespace and BOTH rules
+// are PREFIX rules, so leading whitespace would silently defeat them. cc is busy unless the title starts
+// with the "✳" idle marker; codex is busy when the title starts with a braille spinner frame
+// (U+2800–U+28FF, e.g. "⠙ project") and idle when it shows just the (possibly truncated) directory name —
+// the braille-prefix test is robust to title truncation, unlike comparing against basename(cwd).
+func TitleIsBusy(backend, title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	switch backend {
 	case "cc":
 		return !strings.HasPrefix(title, "✳")
 	case "codex":
-		return IsCodexBusyTitle(title)
-	default:
-		return false
+		r, _ := utf8.DecodeRuneInString(title)
+		return r >= 0x2800 && r <= 0x28FF
 	}
-}
-
-// IsCodexBusyTitle reports whether a codex pane title indicates the CLI is busy.
-// Codex prefixes its pane title with a braille spinner frame (U+2800–U+28FF,
-// e.g. "⠙ project") while working, and shows just the (possibly truncated)
-// directory name when idle. Detecting the braille-block prefix is robust to
-// title truncation, unlike comparing against basename(cwd).
-func IsCodexBusyTitle(title string) bool {
-	r, _ := utf8.DecodeRuneInString(title)
-	return r >= 0x2800 && r <= 0x28FF
-}
-
-// RecordPending records a message for later ✍ reaction when UserPromptSubmit fires.
-func RecordPending(reactionTracker *stores.ReactionTrackerStore, tmuxTarget string, chatID int64, msgID int) {
-	reactionTracker.RecordPending(tmuxTarget, chatID, msgID)
+	return false
 }
 
 // CancelPermBySnapshot cancels a PermissionRequest using a snapshot (target-based path).
@@ -160,10 +163,11 @@ func CancelPermBySnapshot(bot *tele.Bot, pendingWait *stores.PendingWaitStore, p
 	sugLabel, _ := ParseSuggestionLabel(snap.PermSuggestions)
 	frozenMarkup := BuildFrozenPermMarkup("❌ Cancelled", sugLabel)
 	capturedMarkup := frozenMarkup
+	capturedRich := snap.Rich
 	// EditOrDefer EDIT — editFunc uses PendingMsgStore-provided msgID/chatID
 	pendingMsgStore.EditOrDefer(snap.UUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+		_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 		if err != nil {
 			logger.Error(fmt.Sprintf("CancelPermBySnapshot: EDIT failed uuid=%s err=%v", snap.UUID, err))
 		} else {
@@ -195,10 +199,11 @@ func CancelAskBySnapshot(bot *tele.Bot, pendingWait *stores.PendingWaitStore, pe
 	}
 	frozenMarkup := BuildFrozenMarkup(snap.Questions, "❌ Cancelled")
 	capturedMarkup := frozenMarkup
+	capturedRich := snap.Rich
 	// EditOrDefer EDIT — editFunc uses PendingMsgStore-provided msgID/chatID
 	pendingMsgStore.EditOrDefer(snap.UUID, func(msgID int, chatID int64, editMsgText string, topicID int) {
 		editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: chatID}}
-		_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+		_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 		if err != nil {
 			logger.Error(fmt.Sprintf("CancelAskBySnapshot: EDIT failed uuid=%s err=%v", snap.UUID, err))
 		} else {
@@ -232,9 +237,10 @@ func DoCancelPerm(
 	won, _, _ := pendingWait.ResolveIfUnresolved(uuid, stores.WaitEvent{Type: "cancel"})
 	if won && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
+		capturedRich := snap.Rich
 		pendingMsgStore.EditOrDefer(uuid, func(eID int, eChatID int64, editMsgText string, topicID int) {
 			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 			if err != nil {
 				logger.Error(fmt.Sprintf("DoCancelPerm: EDIT failed msg_id=%d err=%v", eID, err))
 			} else {
@@ -321,9 +327,10 @@ func DoDecidePerm(
 	})
 	if won && pendingMsgStore != nil {
 		capturedMarkup := frozenMarkup
+		capturedRich := snap.Rich
 		pendingMsgStore.EditOrDefer(uuid, func(eID int, eChatID int64, editMsgText string, topicID int) {
 			editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-			_, err := RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+			_, err := RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 			if err != nil {
 				logger.Error(fmt.Sprintf("DoDecidePerm: EDIT failed msg_id=%d decision=%s err=%v", eID, decision, err))
 			} else {
@@ -334,7 +341,7 @@ func DoDecidePerm(
 	logger.Info(fmt.Sprintf("Permission resolved: msg_id=%d decision=%s uuid=%s", msgID, decision, uuid))
 	targetPtr, err2 := extractTarget(snap.MsgText)
 	if err2 == nil && targetPtr != nil {
-		reactionTracker.RecordPending(injector.FormatTarget(*targetPtr), snap.ChatID, msgID)
+		reactionTracker.RecordPending(bot, injector.FormatTarget(*targetPtr), snap.ChatID, msgID)
 	}
 	return &d, nil
 }

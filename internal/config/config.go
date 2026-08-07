@@ -17,12 +17,12 @@ type NameRoute struct {
 }
 
 type Credentials struct {
-	BotToken     string               `json:"botToken"`
-	PairingAllow PairingAllow         `json:"pairingAllow"`
-	Port         int                  `json:"port"`
-	NameRouteMap map[string]NameRoute `json:"nameRouteMap,omitempty"`
-	APIToken      string `json:"apiToken,omitempty"`
-	MailboxChatID int64  `json:"mailboxChatId,omitempty"`
+	BotToken      string               `json:"botToken"`
+	PairingAllow  PairingAllow         `json:"pairingAllow"`
+	Port          int                  `json:"port"`
+	NameRouteMap  map[string]NameRoute `json:"nameRouteMap,omitempty"`
+	APIToken      string               `json:"apiToken,omitempty"`
+	MailboxChatID int64                `json:"mailboxChatId,omitempty"`
 }
 
 type PairingAllow struct {
@@ -118,31 +118,52 @@ func SaveCredentials(creds Credentials) error {
 }
 
 type AppConfig struct {
-	WhisperPath        string   `json:"whisperPath"`
-	ModelPath          string   `json:"modelPath"`
-	Language           string   `json:"language"`
-	FFmpegPath         string   `json:"ffmpegPath"`
-	WhisperPrompt      string   `json:"whisperPrompt"`
-	VoicePrefix        string   `json:"voicePrefix"`
-	ToolNotifyList     []string `json:"toolNotifyList,omitempty"`
-	ToolNotifyEnabled  *bool    `json:"toolNotifyEnabled,omitempty"`
-	ClaudeCommand      string   `json:"claudeCommand"`
-	DefaultSessionName string   `json:"defaultSessionName"`
-	DefaultWorkDir     string   `json:"defaultWorkDir"`
-	VoiceEngine        string   `json:"voiceEngine"`
-	SherpaOnnxPath     string   `json:"sherpaOnnxPath"`
-	SenseVoiceModelPath string `json:"senseVoiceModelPath"`
-	VoiceRetainCount    int    `json:"voiceRetainCount,omitempty"`
-	CWDSource           string `json:"cwdSource,omitempty"`
-	PaginationMaxRunes  int    `json:"paginationMaxRunes,omitempty"`
-	ToolLineMaxRunes    int    `json:"toolLineMaxRunes,omitempty"`
-	NotifyFormat        string `json:"notifyFormat,omitempty"` // "html" (default) or "raw"
-	TableMode           string `json:"tableMode,omitempty"`    // "image" (default) or "code"
-	DisplayName         string `json:"displayName,omitempty"`
-	UsageSource         string `json:"usageSource,omitempty"`  // "tmux" (default) or "api"
-	ToolNotifyCompact   bool   `json:"toolNotifyCompact,omitempty"`
-	CompactToolMaxLen   int    `json:"compactToolMaxLen,omitempty"` // compact tool-line character (rune) budget; default 60
-	StreamThrottleMs    int    `json:"streamThrottleMs,omitempty"` // min ms between TG edits of a streaming message; default 1000
+	WhisperPath         string   `json:"whisperPath"`
+	ModelPath           string   `json:"modelPath"`
+	Language            string   `json:"language"`
+	FFmpegPath          string   `json:"ffmpegPath"`
+	WhisperPrompt       string   `json:"whisperPrompt"`
+	VoicePrefix         string   `json:"voicePrefix"`
+	ToolNotifyList      []string `json:"toolNotifyList,omitempty"`
+	ToolNotifyEnabled   *bool    `json:"toolNotifyEnabled,omitempty"`
+	ClaudeCommand       string   `json:"claudeCommand"`
+	DefaultSessionName  string   `json:"defaultSessionName"`
+	DefaultWorkDir      string   `json:"defaultWorkDir"`
+	VoiceEngine         string   `json:"voiceEngine"`
+	SherpaOnnxPath      string   `json:"sherpaOnnxPath"`
+	SenseVoiceModelPath string   `json:"senseVoiceModelPath"`
+	VoiceRetainCount    int      `json:"voiceRetainCount,omitempty"`
+	CWDSource           string   `json:"cwdSource,omitempty"`
+	PaginationMaxRunes  int      `json:"paginationMaxRunes,omitempty"`
+	ToolLineMaxRunes    int      `json:"toolLineMaxRunes,omitempty"`
+	NotifyFormat        string   `json:"notifyFormat,omitempty"` // "html" (default) or "raw"
+	DisplayName         string   `json:"displayName,omitempty"`
+	UsageSource         string   `json:"usageSource,omitempty"` // "tmux" (default) or "api"
+	ToolNotifyCompact   bool     `json:"toolNotifyCompact,omitempty"`
+	CompactToolMaxLen   int      `json:"compactToolMaxLen,omitempty"` // compact tool-line character (rune) budget; default 50
+	StreamThrottleMs    int      `json:"streamThrottleMs,omitempty"`  // min ms between TG edits of a streaming message; default 1000
+	RichMaxRunes        int      `json:"richMaxRunes,omitempty"`      // max rune count for a rich message body; default 30000 (headroom under 32768)
+	// MessageArchiveEnabled toggles the SQLite message archive. Pointer so an absent key defaults to
+	// ENABLED (mirrors ToolNotifyEnabled).
+	MessageArchiveEnabled *bool `json:"messageArchiveEnabled,omitempty"`
+	// BusyIndicator toggles the per-chat busy status message. Pointer so an absent key defaults to
+	// ENABLED (mirrors MessageArchiveEnabled).
+	BusyIndicator *bool `json:"busyIndicator,omitempty"`
+}
+
+// ArchiveEnabled reports whether the SQLite message archive is on. Absent (nil) or true both mean on.
+func (c AppConfig) ArchiveEnabled() bool {
+	return c.MessageArchiveEnabled == nil || *c.MessageArchiveEnabled
+}
+
+// BusyIndicatorEnabled reports whether the busy status indicator is on. Absent (nil) defaults to on.
+func (c AppConfig) BusyIndicatorEnabled() bool {
+	return c.BusyIndicator == nil || *c.BusyIndicator
+}
+
+// MessageDBPath is the path of the SQLite message archive database.
+func MessageDBPath() string {
+	return filepath.Join(GetConfigDir(), "messages.db")
 }
 
 // appConfigCache stores the last loaded config for dynamic reload support.
@@ -159,7 +180,7 @@ func loadAppConfigFromDisk() (AppConfig, error) {
 	}
 	path := GetConfigPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️", ClaudeCommand: "claude", DefaultSessionName: "tg-cli", DefaultWorkDir: filepath.Join(GetConfigDir(), "workspace"), VoiceEngine: "whisper"}, nil
+		return AppConfig{FFmpegPath: "ffmpeg", VoicePrefix: "🗣️", ClaudeCommand: "claude", DefaultSessionName: "tg-cli", DefaultWorkDir: filepath.Join(GetConfigDir(), "workspace"), VoiceEngine: "whisper", RichMaxRunes: 30000}, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -192,6 +213,9 @@ func loadAppConfigFromDisk() (AppConfig, error) {
 	}
 	if cfg.CWDSource == "" {
 		cfg.CWDSource = "tmux"
+	}
+	if cfg.RichMaxRunes == 0 {
+		cfg.RichMaxRunes = 30000 // headroom under the 32768 API limit for header and tag markup
 	}
 	return cfg, nil
 }

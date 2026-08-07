@@ -188,22 +188,15 @@ func runMailboxReceive(cmd *cobra.Command, args []string) {
 		<-sigCh
 		cancel()
 	}()
+	// Long-poll with upgrade-aware reconnect: a drop during a service upgrade auto-reconnects; a drop
+	// with no upgrade in progress is abnormal and exits with an error so the agent can investigate.
 	apiURL := buildAPIURL(mailboxHost, port, fmt.Sprintf("/mailbox/receive?name=%s", name))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if mailboxToken != "" {
-		req.Header.Set("Authorization", "Bearer "+mailboxToken)
-	}
-	client := &http.Client{Timeout: 0} // no timeout — long-poll
-	resp, err := client.Do(req)
+	resp, err := getWithUpgradeReconnect(ctx, apiURL, mailboxToken)
 	if err != nil {
 		if ctx.Err() != nil {
 			return // cancelled by user
 		}
-		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Connection lost: server unreachable (not an upgrade)")
 		os.Exit(1)
 	}
 	defer resp.Body.Close()

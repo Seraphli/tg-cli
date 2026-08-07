@@ -48,13 +48,15 @@ var CCBuiltinCommands = map[string]string{
 
 // PageEntry holds the paginated content and metadata for a sent message.
 type PageEntry struct {
-	Chunks            []string
+	Chunks            []string // rich BODY chunks (re-wrapped via BuildNotificationText on page turn)
+	LegacyChunks      []string // legacy BODY chunks paired 1:1 with Chunks; empty = fall back to rich
 	Event             string
 	Project           string
 	CWD               string
 	TmuxTarget        string
 	PermRows          []tele.Row // non-nil for permission messages
 	RawMode           bool       // true = plain text, no HTML parse mode
+	Rich              bool       // true = message was sent as rich (Bot API 10.1), false = legacy HTML
 	ChatID            int64
 	CLICommand        string
 	AgentName         string
@@ -62,9 +64,16 @@ type PageEntry struct {
 	ContextUsedPct    int // -1 means no data
 	ContextUsedTokens int
 	ContextWindowSize int
-	Header      string // non-empty = collapsible message; stores the header prefix (@ forward, pane capture, etc.)
-	Collapsed   bool   // current collapse state
-	CurrentPage int    // last viewed page (1-based); used to restore on expand
+	// Cron/SessionSend header fields for page-2 rebuild (Event=="Cron"/"SessionSend").
+	CronJobID      string
+	CronName       string
+	CronNoHeader   bool
+	SendFrom       string
+	SendNoHeader   bool
+	DeliveryStatus string // SessionSend soft-delivery annotation: "" | "unconfirmed" | "submit_failed"
+	Header         string // non-empty = collapsible message; stores the header prefix (@ forward, pane capture, etc.)
+	Collapsed      bool   // current collapse state
+	CurrentPage    int    // last viewed page (1-based); used to restore on expand
 }
 
 // PageCacheStore stores paginated message entries indexed by Telegram message ID.

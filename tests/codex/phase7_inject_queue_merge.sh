@@ -38,7 +38,7 @@ if [ -n "$SESSION_ID" ]; then
 fi
 
 # Step 1: Inject a bash sleep command to keep CLI busy
-inject_prompt "Run this exact bash command without any commentary: sleep 20"
+inject_prompt "Use the Bash tool to run this exact command: sleep 20. Do not print any text."
 
 # Wait for CLI to become busy (use /session/idle API — Codex has no ✳ pane title prefix)
 echo "  Waiting for CLI to start processing..."
@@ -69,9 +69,9 @@ if [ "$CC_BUSY" != true ]; then
 fi
 
 # Step 2: Send 2 messages while CLI is busy
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_A" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "Reply with exactly: $MARKER_A. Do not run any tools or commands." 2>&1 || true
 sleep 1
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$MARKER_B" 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "Reply with exactly: $MARKER_B. Do not run any tools or commands." 2>&1 || true
 
 # Step 3: Verify both messages were queued
 sleep 2

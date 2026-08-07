@@ -32,7 +32,7 @@ fi
 
 # 1a: Send WITH header (default) — should have TG notification
 LOG_BEFORE_H=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "header_test_with" > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "Reply with exactly: header_test_with. Do not run any tools or commands." > /dev/null 2>&1 || true
 sleep 2
 set +eo pipefail
 tail -n +"$((LOG_BEFORE_H + 1))" "$LOG_FILE" | grep -q "Session send notification:"
@@ -44,9 +44,11 @@ else
   fail "session send: TG notification missing (with header)"
 fi
 
+wait_for_idle
+
 # 1b: Send WITHOUT header (--no-header) — TG notification should still be sent
 LOG_BEFORE_NH=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "header_test_noheader" --no-header > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "Reply with exactly: header_test_noheader. Do not run any tools or commands." --no-header > /dev/null 2>&1 || true
 sleep 2
 set +eo pipefail
 tail -n +"$((LOG_BEFORE_NH + 1))" "$LOG_FILE" | grep -q "Session send via API:.*header_test_noheader"

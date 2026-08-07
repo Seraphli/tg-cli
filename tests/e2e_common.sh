@@ -23,7 +23,18 @@ export BOT_SESSION
 E2E_SESSION="${E2E_SESSION:-tg-cli-e2e-${E2E_RUN_ID}}"
 export E2E_SESSION
 export TMUX_TEST="tmux -u -L $TMUX_SERVER_NAME -f /dev/null"
-TEST_CONFIG_DIR="${TEST_CONFIG_DIR:-$HOME/.tg-cli-test-${E2E_RUN_ID}}"
+
+# Canonical toolNotifyList: ALL knownTools (cmd/helpers/version.go) + AskUserQuestion + "Other".
+# Single source of truth so every config write uses the same full list (a text -> tool -> text turn
+# never trips the V3 ordering check because every tool is a valid separator). Sourcing scripts
+# (e.g. cc/phase26) call this to restore the full list instead of duplicating the literal.
+tool_notify_list_json() {
+  echo '["Edit","Write","Bash","Read","Glob","Grep","Agent","WebFetch","WebSearch","MCP","Skill","TaskCreate","TaskUpdate","TaskGet","TaskList","TaskStop","TaskOutput","NotebookEdit","EnterPlanMode","ExitPlanMode","EnterWorktree","ExitWorktree","AskUserQuestion","Other"]'
+}
+# Per-run dirs nest under one parent (~/.tg-cli-test/<run-id>) instead of cluttering $HOME with
+# ~/.tg-cli-test-<run-id>. The parent doubles as _E2E_SHARED_CONFIG (holds the shared credentials.json);
+# the shared creds file and the per-run subdirs coexist, and cleanup only removes the specific run subdir.
+TEST_CONFIG_DIR="${TEST_CONFIG_DIR:-$HOME/.tg-cli-test/${E2E_RUN_ID}}"
 export TEST_CONFIG_DIR
 _E2E_SHARED_CONFIG="$HOME/.tg-cli-test"
 mkdir -p "$TEST_CONFIG_DIR"
@@ -45,12 +56,9 @@ export CREDENTIALS
 CC_WORKDIR="$TEST_CONFIG_DIR/cwd"
 mkdir -p "$CC_WORKDIR"
 export CC_WORKDIR
-# Codex is significantly slower than CC; use longer timeout
-if [ "${E2E_BACKEND:-}" = "codex" ]; then
-  TIMEOUT=180
-else
-  TIMEOUT=60
-fi
+# One common wait budget for all backends, sized for the slowest (codex). Formerly split by E2E_BACKEND;
+# flattened per boss ruling 2026-07-31 so a range run gives codex the same 180 the all-phases branch already did.
+TIMEOUT=180
 
 # Results tracking via shared file
 E2E_RESULTS_FILE="${E2E_RESULTS_FILE:-/tmp/tg-cli-e2e-results-$$.txt}"
@@ -58,6 +66,7 @@ export E2E_RESULTS_FILE
 
 pass() { echo "PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  PASS: $1"; }
 fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; exit 1; }
+record_fail() { echo "FAIL|$1" >> "$E2E_RESULTS_FILE"; echo "  FAIL: $1"; }
 pass_opt() { echo "OPT_PASS|$1" >> "$E2E_RESULTS_FILE"; echo "  OPT_PASS: $1"; }
 warn() { echo "WARN|$1" >> "$E2E_RESULTS_FILE"; echo "  WARN: $1"; }
 # Global error-exit logging
@@ -194,7 +203,52 @@ wait_for_bot_ready() {
   return 1
 }
 
+# check_session_idle — diagnose a session's busy/idle/unknown state via the idle API.
+# Echoes one of: idle | busy | unknown. $1 = tmux target (pane_id@socket_path; empty = aggregate query).
+# Parses the tg-cli /session/idle top-level .idle field (True->idle, False->busy, curl-fail/other->
+# unknown) — the same shape the wait_for_idle poll and codex_api_idle (codex_common.sh) use. --max-time
+# caps a stalled (accepted-but-silent) connection so it can't block forever.
+check_session_idle() {
+  local target="$1"
+  local url="http://127.0.0.1:$TEST_PORT/session/idle"
+  if [ -n "$target" ]; then
+    local enc
+    enc=$(printf '%s' "$target" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+    url="${url}?target=${enc}"
+  fi
+  local resp
+  resp=$(curl -sf --max-time 5 "$url" 2>/dev/null) || { echo "unknown"; return; }
+  local val
+  val=$(printf '%s' "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',''))" 2>/dev/null) || { echo "unknown"; return; }
+  case "$val" in
+    True)  echo "idle" ;;
+    False) echo "busy" ;;
+    *)     echo "unknown" ;;
+  esac
+}
+
+# wait_for_idle — wait for a session to go idle, with a CA-style busy-extend so genuinely-slow models
+# (e.g. grok-4.5) don't trip a hard timeout while the LLM is still computing. Polls /session/idle every
+# 1s for a `timeout` window; on window-timeout it diagnoses via check_session_idle:
+#   busy    -> extend by another window, up to max_retries=3 additional rounds (budget ~timeout*4)
+#   idle    -> condition met (return 0). For wait_for_idle the wait condition IS idle, so an idle
+#              diagnosis is SUCCESS, not a functional failure (differs from CA wait_for_event on purpose,
+#              where idle-at-timeout means "pattern never emitted"). No double-poll: the inner loop
+#              already hits the idle API, so check_session_idle runs once after the window (Occam).
+#   unknown -> API unavailable: fail (original timeout behavior).
+# TIMEOUT constants (60 CC / 180 codex) are UNCHANGED; the busy-extend handles slowness automatically.
+# All curls use --max-time 5 so a stalled connection can't make the budget a lie — approximate budget =
+# timeout*windows plus bounded overhead (the 5s settle sleep, and up to --max-time per stalled poll).
 wait_for_idle() {
+  # Leading settle: an inject confirms (HTTP 200) ~1s before the TUI busy state
+  # propagates, so a first idle-poll fired immediately can read STALE idle and
+  # return early — the next inject then lands mid-turn, is queued, and the 5s
+  # MD-final routing window co-expires with the settle sleep so the UPS grep runs
+  # before submit (full7 phase19 image-only killer: 200 @10:38:10, UPS @10:38:11,
+  # first poll saw idle -> early return). Sleeping 5s before the first poll lets
+  # busy propagate, so we wait for the real turn end. Covers every callsite incl.
+  # the codex phase14 twin (phase14:21/50/81 call this same helper).
+  sleep 5
   local timeout=${1:-$TIMEOUT}
   local target=${2:-}
   local url="http://127.0.0.1:$TEST_PORT/session/idle"
@@ -203,25 +257,50 @@ wait_for_idle() {
     encoded_target=$(printf '%s' "$target" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
     url="${url}?target=${encoded_target}"
   fi
-  local elapsed=0
-  while [ $elapsed -lt $timeout ]; do
-    local idle
-    idle=$(curl -sf "$url" 2>/dev/null \
-      | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null) || true
-    if [ "$idle" = "True" ]; then
+  local max_retries=3
+  local retry=0
+  while true; do
+    local elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+      local idle
+      idle=$(curl -sf --max-time 5 "$url" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('idle',False))" 2>/dev/null) || true
+      if [ "$idle" = "True" ]; then
+        sleep 5
+        return 0
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    # Inner window timed out — diagnose busy vs idle vs unknown.
+    local diagnosis
+    diagnosis=$(check_session_idle "$target")
+    if [ "$diagnosis" = "busy" ] && [ $retry -lt $max_retries ]; then
+      retry=$((retry + 1))
+      echo "  BUSY: LLM still processing, extending wait (round ${retry}/${max_retries}, +${timeout}s)..."
+      continue
+    fi
+    if [ "$diagnosis" = "idle" ]; then
+      # Session went idle right at the window boundary — condition met.
       sleep 5
       return 0
     fi
-    sleep 1
-    elapsed=$((elapsed + 1))
+    break   # unknown, or busy retries exhausted
   done
+  local total=$(( timeout * (retry + 1) ))
   local debug_resp debug_target
-  debug_resp=$(curl -sf "$url" 2>/dev/null || echo '{"error":"curl failed"}')
+  debug_resp=$(curl -sf --max-time 5 "$url" 2>/dev/null || echo '{"error":"curl failed"}')
   debug_target="${target:-${E2E_PANE:-}}"
-  pane_log "wait_for_idle TIMEOUT after ${timeout}s (idle_resp: $debug_resp)" "$debug_target"
-  fail "wait_for_idle timed out after ${timeout}s on target=${debug_target:-<none>} (idle_resp: $debug_resp)"
+  pane_log "wait_for_idle TIMEOUT after ~${total}s (${retry}/${max_retries} busy-extends, idle_resp: $debug_resp)" "$debug_target"
+  fail "wait_for_idle timed out after ~${total}s (${retry}/${max_retries} busy-extends) on target=${debug_target:-<none>} (idle_resp: $debug_resp)"
 }
 
+# wait_for_pane_content — poll the pane for a text pattern. NOTE: its `return 1` on timeout IS fatal to
+# callers under `set -euo pipefail` when called unguarded (e.g. phase10_escape.sh:88, no `|| true`), so
+# it is NOT "non-fatal". It is intentionally left WITHOUT the busy-extend anyway: its callers invoke it
+# AFTER wait_for_idle (model slowness already absorbed) and it waits for pane-content PROPAGATION (a
+# sub-second TUI render), not LLM computation — so it does not hit its timeout in practice, and the
+# busy-extend (an LLM-slowness tool) is the wrong instrument here.
 wait_for_pane_content() {
   local pattern="$1"
   local timeout=${2:-$TIMEOUT}
@@ -378,13 +457,26 @@ validate_phase_log() {
   # a merged tool leaves two text bubbles adjacent with no tool between. So flag two distinct CC
   # message_id= "Stream send:" lines ONLY when they share the SAME turn_id with no separator between.
   # A turn_id change is a new user turn = a legitimate boundary (cross-turn text replies are normal).
-  # Pagination chunks share message_id= -> counted once. Separator = a tool/interactive TG SEND.
-  local v3
-  v3=$(printf '%s\n' "$slice" | awk '
+  # Pagination chunks share message_id= -> counted once. Separator = a tool/interactive TG SEND, or an AskUserQuestion answer (responded) landing mid-turn.
+  # f20 exemption (boss ruling): when the intervening tool's notification was DELIBERATELY disabled by
+  # config, the missing separator is EXPECTED. A test phase that drops a tool from toolNotifyList (e.g.
+  # phase13's ptu-flush sub-test) makes the bot log "ToolUse: notification disabled for tool=<T>" and emit
+  # NO ToolUse separator, so a text->tool->text turn legitimately shows two adjacent same-turn sends. Scope
+  # the evidence per turn: track the current turn_id from any turn-tagged line (MessageDisplay delta and
+  # Stream send both carry turn_id=); a "notification disabled" line marks that turn. The disabled line can
+  # precede the pair's first send (PreToolUse processed while the first delta was in flight), so keying on
+  # the turn (not on position between the two sends) is required. A flagged pair whose turn is marked is
+  # EXEMPTED with a visible NOTE (no silent pass). Production keeps every tool in toolNotifyList, so the
+  # disabled line never appears and V3 stays fully sensitive.
+  local v3raw v3notes v3viol
+  v3raw=$(printf '%s\n' "$slice" | awk '
     !/^\[[0-9]{4}-/ { next }   # only real log lines (skip multi-line full_text content)
+    { if (match($0, /turn_id=[^ ]+/)) curtid = substr($0, RSTART, RLENGTH) }   # current turn from any turn-tagged line
+    /ToolUse: notification disabled for tool=/ { if (curtid != "") td[curtid] = 1; next }   # f20: mark this turn tool-notify-disabled
     /compact tool sent|compact tool overflow sent/ { last = "SEP"; next }
     /Notification sent .*: ToolUse / { last = "SEP"; next }
     /AskUserQuestion sent: msg_id=/ { last = "SEP"; next }
+    /AskUserQuestion responded: msg_id=/ { last = "SEP"; next }   # cross-turn AskQ: an answered AskQ landing between two same-turn bubbles is a valid separator
     /Permission request sent:/ { last = "SEP"; next }
     /Stream send: / {
       mid = ""; tid = ""
@@ -392,15 +484,26 @@ validate_phase_log() {
       if (match($0, /turn_id=[^ ]+/)) tid = substr($0, RSTART, RLENGTH)
       if (mid == lastmid) next   # same logical message (pagination) — not a new Message event
       if (tid != lasttid) { last = "M"; lastmid = mid; lasttid = tid; next }   # new turn = boundary, not a violation
-      if (last == "M") { print "consecutive Message sends in same " tid " with no separator: " lastmid " -> " mid; bad = 1 }
+      if (last == "M") {
+        if (td[tid])   # f20: tool notification disabled by config in this turn -> adjacency is expected
+          print "NOTE: V3 exemption - same-turn consecutive sends accepted, ToolUse notification disabled by config in this turn (" tid "): " lastmid " -> " mid
+        else
+          print "consecutive Message sends in same " tid " with no separator: " lastmid " -> " mid
+      }
       last = "M"; lastmid = mid
       next
     }' || true)
-  if [ -n "$v3" ]; then
+  v3notes=$(printf '%s\n' "$v3raw" | grep "^NOTE:" || true)
+  v3viol=$(printf '%s\n' "$v3raw" | grep "^consecutive " || true)
+  if [ -n "$v3notes" ]; then
+    echo "  [validate_phase_log:$label] V3 exemption(s) applied (ToolUse notification disabled by config):"
+    printf '%s\n' "$v3notes" | head -5
+  fi
+  if [ -n "$v3viol" ]; then
     echo "  [validate_phase_log:$label] V3 FAIL — message ordering:"
-    printf '%s\n' "$v3" | head -5
+    printf '%s\n' "$v3viol" | head -5
     pane_log "[$label] V3 FAIL pane" "$pane_target"
-    fail "[$label] V3 message ordering: $(printf '%s' "$v3" | head -1)"
+    fail "[$label] V3 message ordering: $(printf '%s' "$v3viol" | head -1)"
   fi
 
   pass "[$label] log validations V1/V2/V3"
@@ -490,21 +593,36 @@ EOF
   # env passthrough + configurable model, so a custom-model run also applies to session-new CC. Values are
   # shell-quoted (printf %q). config.json is written via python3 (env-passed) so shell-escaped values with
   # special chars can't break the JSON.
-  local cc_env_prefix="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
+  local cc_cmd
+  cc_cmd="$(cc_launch_cmd --dangerously-skip-permissions)"
+  # toolNotifyList = ALL knownTools (cmd/helpers/version.go) + AskUserQuestion + "Other", covering EVERY hook
+  # tool category, so every tool use emits a ToolUse notification and every tool that REMAINS available is a
+  # valid V3 separator (a text -> tool -> text turn never trips the ordering check). The CC --tools allowlist
+  # applied inside cc_launch_cmd is a SEPARATE, narrower mechanism: it restricts which tools the session may
+  # call at all (Agent is excluded), independent of this notification classification.
+  CC_CMD="$cc_cmd" TOOL_LIST="$(tool_notify_list_json)" python3 -c "import json,os; json.dump({'toolNotifyList':json.loads(os.environ['TOOL_LIST']),'claudeCommand':os.environ['CC_CMD'],'paginationMaxRunes':500}, open('$TEST_CONFIG_DIR/config.json','w'))"
+  echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
+}
+
+# cc_launch_cmd emits (to stdout, exactly ONE line, nothing else — callers use command substitution) the
+# canonical Claude Code launch command used by every CC session the suite starts. perm_flag ($1) is REQUIRED:
+# a missing arg fails early under set -u. It forwards the same nine provider/model env vars as the harness
+# (printf %q quoted so tokens/URLs with special chars cannot break or inject into the command), preserves the
+# ${ANTHROPIC_MODEL:-sonnet} fallback, and pins --tools to an allowlist that STRUCTURALLY removes the Agent
+# tool, so a model cannot spawn a background subagent regardless of the prompt. The allowlist literal lives
+# ONLY here.
+cc_launch_cmd() {
+  local perm_flag="$1"
+  local prefix="BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
   local _v
   for _v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
             ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
             ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
     if [ -n "${!_v:-}" ]; then
-      cc_env_prefix="${cc_env_prefix} ${_v}=$(printf '%q' "${!_v}")"
+      prefix="${prefix} ${_v}=$(printf '%q' "${!_v}")"
     fi
   done
-  local cc_cmd="$cc_env_prefix claude --model ${ANTHROPIC_MODEL:-sonnet} --dangerously-skip-permissions --setting-sources user --no-chrome"
-  # toolNotifyList = ALL knownTools (cmd/helpers/version.go) + AskUserQuestion + "Other", so EVERY tool use
-  # (including unlisted tools like SendMessage, classified as "Other") emits a ToolUse notification. This
-  # makes every tool a valid V3 separator, so a text -> tool -> text turn never trips the ordering check.
-  CC_CMD="$cc_cmd" python3 -c "import json,os; json.dump({'toolNotifyList':['Edit','Write','Bash','Read','Glob','Grep','Agent','WebFetch','WebSearch','MCP','Skill','TaskCreate','TaskUpdate','TaskGet','TaskList','TaskStop','TaskOutput','NotebookEdit','EnterPlanMode','ExitPlanMode','EnterWorktree','ExitWorktree','AskUserQuestion','Other'],'claudeCommand':os.environ['CC_CMD'],'paginationMaxRunes':500}, open('$TEST_CONFIG_DIR/config.json','w'))"
-  echo "Hooks installed (isolated config: $TEST_CLAUDE_CONFIG_DIR)."
+  printf '%s\n' "$prefix claude --model ${ANTHROPIC_MODEL:-sonnet} $perm_flag --setting-sources user --no-chrome --tools \"Bash,Read,AskUserQuestion,TaskList\""
 }
 
 cleanup_sessions() {
@@ -533,16 +651,48 @@ build_test_binary() {
   go build -o tg-cli 2>&1 || { echo "Build failed (cwd=$(pwd))"; exit 1; }
   echo "Built binary: $(pwd)/tg-cli"
   ls -l tg-cli 2>/dev/null || echo "  WARN: tg-cli binary not found after build"
+  # TC14 (v14): the chromedp table-image dependency must be fully removed. A clean build plus a
+  # chromedp-free go.mod/go.sum proves the native rich <table> path replaced the PNG renderer.
+  if grep -iq chromedp go.mod go.sum 2>/dev/null; then
+    echo "Build check FAILED: chromedp still present in go.mod/go.sum after migration"
+    exit 1
+  fi
+  echo "Build check: chromedp-free build confirmed (TC14)"
 }
 
 ensure_infrastructure() {
-  if [ "${E2E_ORCHESTRATED:-}" = "1" ]; then
-    return
+  # The heavy bootstrap runs only in a standalone run; an orchestrated run (E2E_ORCHESTRATED=1) already
+  # had it done once by e2e.sh. The config baseline below runs UNCONDITIONALLY at the COMMON TAIL.
+  if [ "${E2E_ORCHESTRATED:-}" != "1" ]; then
+    ensure_credentials
+    build_test_binary
+    start_bot
+    export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+    setup_hooks
+    trap cleanup_sessions EXIT
   fi
-  ensure_credentials
-  build_test_binary
-  start_bot
-  export LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-  setup_hooks
-  trap cleanup_sessions EXIT
+  # FIX 2 (r9): bot-notification config baseline. toolNotifyList / toolNotifyCompact / busyIndicator live
+  # in the TEST config.json and are read by the bot daemon per hook event (register.go ShouldNotifyTool);
+  # a phase that crashes mid-way (e.g. phase26 TC6 before its config-restore) would otherwise leak its
+  # mutated whitelist into every LATER phase (the F1->F2/F4 cascade). Re-baselining these 3 fields at the
+  # top of every phase removes that at its source. config.json is created only by setup_hooks, so this MUST
+  # run at the tail (after bootstrap in a standalone run; immediately in an orchestrated run, where e2e.sh
+  # already created config.json). Written ATOMICALLY (temp file + os.replace, the phase13:378-386 template)
+  # because the bot daemon reads config.json continuously; load-merge preserves claudeCommand /
+  # paginationMaxRunes. A phase that intentionally mutates these fields (phase13/26/31) does so AFTER this
+  # baseline, so it is unaffected.
+  TOOL_LIST="$(tool_notify_list_json)" python3 -c "
+import json, os, tempfile
+path = os.path.join('$TEST_CONFIG_DIR', 'config.json')
+with open(path) as f:
+    cfg = json.load(f)
+cfg['toolNotifyCompact'] = False
+cfg['toolNotifyList'] = json.loads(os.environ['TOOL_LIST'])
+cfg.pop('busyIndicator', None)
+d = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=d, prefix='.config.', suffix='.tmp')
+with os.fdopen(fd, 'w') as f:
+    json.dump(cfg, f)
+os.replace(tmp, path)
+"
 }

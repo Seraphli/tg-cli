@@ -104,7 +104,8 @@ func executePrintJob(job *stores.CronJob, bs *BotState) {
 	output, err := c.CombinedOutput()
 	if err != nil {
 		logger.Error(fmt.Sprintf("Cron print job failed: id=%s err=%v output=%s", job.ID[:8], err, string(output)))
-		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Error:</b> %s", cronNotifyHeader(job), err.Error()), "")
+		// Per-call status prefix + RAW body (Markdown, NOT pre-rendered).
+		sendCronNotification(bs, job, fmt.Sprintf("❌ **Error:**\n%s", err.Error()), "")
 		return
 	}
 	var result string
@@ -122,7 +123,8 @@ func executePrintJob(job *stores.CronJob, bs *BotState) {
 		logger.Info(fmt.Sprintf("Cron heartbeat OK: id=%s", job.ID[:8]))
 		return
 	}
-	sendCronNotification(bs, fmt.Sprintf("%s\n\n%s", cronNotifyHeader(job), result), "")
+	// RAW result body (Markdown, NOT pre-rendered); no status prefix for a plain successful print.
+	sendCronNotification(bs, job, result, "")
 }
 
 func parsePrintJobOutput(output []byte) (sessionID, result string) {
@@ -161,7 +163,8 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 	}
 	if info == nil {
 		logger.Info(fmt.Sprintf("Cron inject job: agent '%s' not online, sending TG notification", agentLabel))
-		sendCronNotification(bs, fmt.Sprintf("%s\n\n⚠️ Agent <b>%s</b> is not online.\nPrompt: %s", cronNotifyHeader(job), agentLabel, job.Prompt), job.TmuxTarget)
+		// Per-call status prefix + RAW body (Markdown). agentLabel/Prompt pass through the renderer.
+		sendCronNotification(bs, job, fmt.Sprintf("⚠️ Agent **%s** is not online.\n\nPrompt:\n%s", agentLabel, job.Prompt), job.TmuxTarget)
 		return
 	}
 	injectText := job.Prompt
@@ -190,53 +193,97 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 	}
 	if err := helpers.SafeInjectText(p, info.TmuxTarget, injectText); err != nil {
 		logger.Error(fmt.Sprintf("Cron inject job: inject failed: %v", err))
-		sendCronNotification(bs, fmt.Sprintf("%s\n\n❌ <b>Inject failed</b>\nAgent: %s\nError: %s", cronNotifyHeader(job), agentLabel, err.Error()), info.TmuxTarget)
+		// Per-call status prefix + RAW body (Markdown).
+		sendCronNotification(bs, job, fmt.Sprintf("❌ **Inject failed**\nAgent: %s\n\nError:\n%s", agentLabel, err.Error()), info.TmuxTarget)
 		return
 	}
 	logger.Info(fmt.Sprintf("Cron inject job: injected to '%s' target=%s text=%s", agentLabel, info.TmuxTarget, job.Prompt))
-	sendCronNotification(bs, fmt.Sprintf("%s\n\n✅ Injected → %s\n\n%s", cronNotifyHeader(job), agentLabel, job.Prompt), info.TmuxTarget)
+	// Per-call status prefix + RAW body (Markdown).
+	sendCronNotification(bs, job, fmt.Sprintf("✅ Injected → %s\n\n%s", agentLabel, job.Prompt), info.TmuxTarget)
 }
 
-func cronNotifyHeader(job *stores.CronJob) string {
-	icon := "🔔"
-	label := "Cron"
-	if job.NoHeader {
-		icon = "📨"
-		label = "Cron (silent)"
-	}
-	header := fmt.Sprintf("%s <b>%s</b> <code>%s</code>", icon, label, job.ID[:8])
-	if job.Name != "" {
-		header += fmt.Sprintf(" (<b>%s</b>)", job.Name)
-	}
-	if job.CWD != "" {
-		header += fmt.Sprintf("\n📂 %s", job.CWD)
-	}
-	return header
-}
-
-func sendCronNotification(bs *BotState, text string, tmuxTarget string) {
-	chat, _, topicID := resolveChat(bs, tmuxTarget)
+// sendCronNotification builds a rich Cron notification from the RAW Markdown body and the structured
+// Cron metadata on job, paginating via SplitRichLegacyBodyPages (paired rich/legacy BODY chunks). Each
+// page is wrapped in the neutral BuildNotificationText header: the rich payload gets the <hr/> boundary
+// (InsertRichHr) while the legacy payload does not. On a split error, a single minimal, independently
+// bounded plain-text fallback is sent (a short fixed message + the job id prefix; the oversized
+// CronName/body is NOT reused) — no pagination, no loop.
+func sendCronNotification(bs *BotState, job *stores.CronJob, rawBody, tmuxTarget string) {
+	chat, chatIDStr, topicID := resolveChat(bs, tmuxTarget)
 	if chat == nil {
 		return
 	}
-	var sendOpts []interface{}
-	sendOpts = append(sendOpts, tele.ModeHTML)
-	if topicID > 0 {
-		sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: topicID})
+	cfg, _ := config.LoadAppConfig()
+	richMax := cfg.RichMaxRunes
+	if richMax <= 0 {
+		richMax = 30000
 	}
-	chunks := helpers.SplitBody(text, 3900)
-	if len(chunks) <= 1 {
-		helpers.RetrySend(bs.Bot, chat, text, sendOpts...)
-		return
+	baseND := notify.NotificationData{
+		Event:          "Cron",
+		CronJobID:      job.ID,
+		CronName:       job.Name,
+		CronNoHeader:   job.NoHeader,
+		CWD:            job.CWD,
+		TmuxTarget:     tmuxTarget,
+		AgentName:      job.AgentName,
+		ContextUsedPct: -1,
 	}
-	firstText := chunks[0] + fmt.Sprintf("\n\n📄 1/%d", len(chunks))
-	kb := helpers.BuildPageKeyboard(1, len(chunks))
-	opts := append([]interface{}{kb}, sendOpts...)
-	sent, err := helpers.RetrySend(bs.Bot, chat, firstText, opts...)
+	chunks, legacyChunks, err := helpers.SplitRichLegacyBodyPages(rawBody, baseND, richMax)
 	if err != nil {
+		// Minimal, independently bounded fallback: fixed message + job id[:8]; do NOT reuse the oversized
+		// CronName/body. No pagination, never loop.
+		fallback := fmt.Sprintf("🔔 Cron %s: notification too large to render", job.ID[:8])
+		if _, ferr := helpers.RetrySendRich(bs.Bot, chat, fallback, helpers.RichSendOpts{
+			TopicID:    topicID,
+			LegacyHTML: fallback,
+		}); ferr == nil {
+			logger.Info(fmt.Sprintf("Cron notification fallback sent: chat=%s id=%s err=%v", chatIDStr, job.ID[:8], err))
+		}
 		return
 	}
-	bs.Pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, ChatID: chat.ID})
+	pageND := func(page int) notify.NotificationData {
+		nd := baseND
+		if len(chunks) > 1 {
+			nd.Page = page
+			nd.TotalPages = len(chunks)
+		}
+		return nd
+	}
+	// Page 1.
+	nd1 := pageND(1)
+	nd1.Body = chunks[0]
+	richText := helpers.InsertRichHr(notify.BuildNotificationText(nd1))
+	nd1Legacy := pageND(1)
+	nd1Legacy.Body = legacyChunks[0]
+	legacyText := notify.BuildNotificationText(nd1Legacy)
+	opts := helpers.RichSendOpts{
+		TopicID:    topicID,
+		LegacyHTML: legacyText,
+	}
+	if len(chunks) > 1 {
+		opts.Markup = helpers.BuildPageKeyboard(1, len(chunks))
+	}
+	sent, serr := helpers.RetrySendRich(bs.Bot, chat, richText, opts)
+	if serr != nil {
+		return
+	}
+	if len(chunks) > 1 {
+		bs.Pages.Store(sent.ID, "", &stores.PageEntry{
+			Chunks:         chunks,
+			LegacyChunks:   legacyChunks,
+			Event:          "Cron",
+			CWD:            job.CWD,
+			TmuxTarget:     tmuxTarget,
+			AgentName:      job.AgentName,
+			ContextUsedPct: -1,
+			CronJobID:      job.ID,
+			CronName:       job.Name,
+			CronNoHeader:   job.NoHeader,
+			ChatID:         chat.ID,
+			Rich:           true,
+		})
+	}
+	logger.Info(fmt.Sprintf("Cron notification sent: chat=%s pages=%d body=%s", chatIDStr, len(chunks), richText))
 }
 
 func matchesCronExpression(expr string, t time.Time) bool {

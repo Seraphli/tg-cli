@@ -27,6 +27,42 @@ type NotificationData struct {
 	ContextWindowSize int
 	ContextUsedTokens int
 	Finalized         bool
+	// Cron fields (Event=="Cron"): the cron job identity for the notification header.
+	CronJobID    string
+	CronName     string
+	CronNoHeader bool
+	// SessionSend fields (Event=="SessionSend"): the sender identity for the notification header.
+	SendFrom     string
+	SendNoHeader bool
+	// DeliveryStatus (Event=="SessionSend"): "" | "unconfirmed" | "submit_failed". Annotates the
+	// header when the CLI inject reached the pane but delivery/submit was not confirmed.
+	DeliveryStatus string
+}
+
+// DeliveryStatusTag returns the short header suffix appended to a SessionSend notification when the
+// CLI inject reached the pane but delivery was not confirmed. Empty for a normal ("") status.
+func DeliveryStatusTag(status string) string {
+	switch status {
+	case "unconfirmed":
+		return " ⚠️ delivery unconfirmed"
+	case "submit_failed":
+		return " ⚠️ submit failed (likely not executed)"
+	default:
+		return ""
+	}
+}
+
+// DeliveryStatusWarning returns the full operator-facing warning text for a soft session-send
+// delivery status (printed to the CLI stderr). Empty for a normal ("") status.
+func DeliveryStatusWarning(status string) string {
+	switch status {
+	case "unconfirmed":
+		return "delivery unconfirmed: keys sent, confirmation did not arrive - do NOT re-send"
+	case "submit_failed":
+		return "text pasted but submit FAILED - likely NOT executed; check the pane and submit manually - do NOT re-send"
+	default:
+		return ""
+	}
 }
 
 type PermissionData struct {
@@ -586,7 +622,7 @@ func stripShellComments(cmd string) (string, bool) {
 	return strings.Join(result, "\n"), omitted
 }
 
-const compactMaxLen = 60
+const compactMaxLen = 45
 
 // compactLen returns the rune count of s, used for all budget length checks.
 func compactLen(s string) int { return utf8.RuneCountInString(s) }
@@ -1206,13 +1242,27 @@ type HeaderInfo struct {
 	ContextUsedPct    int // -1 means no data
 	ContextUsedTokens int
 	ContextWindowSize int
+	SendFrom          string // f29: SessionSend sender identity → the 👤 details line
+	SendKind          string // f29 G: SessionSend type ("normal"/"no-header") → the 🏷 details line; "" omits it
 }
 
 // buildHeader generates the common header lines for notifications.
 func buildHeader(firstLine string, h HeaderInfo) []string {
-	lines := []string{
-		firstLine,
-		"📂 " + markdown.EscapeHTML(projectDisplay(h.Project, h.CWD)),
+	lines := []string{firstLine}
+	// f29: the 📂 folder line is now conditional (was unconditional) — an event with no project/CWD
+	// (SessionSend, a CWD-less Cron) no longer renders an empty "📂 " line.
+	if pd := projectDisplay(h.Project, h.CWD); pd != "" {
+		lines = append(lines, "📂 "+markdown.EscapeHTML(pd))
+	}
+	// f29: the sender identity renders as a 👤 line inside the metadata/details block (boss: sender in the
+	// collapsible block, not appended to the visible status line).
+	if h.SendFrom != "" {
+		lines = append(lines, "👤 "+markdown.EscapeHTML(h.SendFrom))
+	}
+	// f29 G: the SessionSend type (normal / no-header) renders as a 🏷 line, after the 👤 sender and before
+	// the 📟 pane line. Only SessionSend populates SendKind, so no other event emits this line.
+	if h.SendKind != "" {
+		lines = append(lines, "🏷 "+markdown.EscapeHTML(h.SendKind))
 	}
 	if h.TmuxTarget != "" {
 		lines = append(lines, "📟 "+markdown.EscapeHTML(FormatPaneID(h.TmuxTarget)))
@@ -1250,7 +1300,7 @@ func projectDisplay(project, cwd string) string {
 }
 
 func BuildNotificationText(data NotificationData) string {
-	var emoji, status string
+	var emoji, status, sendKind string
 	switch {
 	case data.Event == "SessionStart":
 		emoji = "🟢"
@@ -1273,13 +1323,57 @@ func BuildNotificationText(data NotificationData) string {
 	case data.Event == "CompactTool":
 		emoji = "🔧"
 		status = "Tool Activity"
+	case data.Event == "Cron":
+		// DIALECT-NEUTRAL header: emoji + status only. The rich-only <hr/> at the header/body
+		// boundary is added separately by helpers.InsertRichHr; NOT here.
+		if data.CronNoHeader {
+			emoji = "📨"
+			status = "Cron (silent)"
+		} else {
+			emoji = "🔔"
+			status = "Cron"
+		}
+		jobID := data.CronJobID
+		if len(jobID) > 8 {
+			jobID = jobID[:8]
+		}
+		if jobID != "" {
+			status += " " + jobID
+		}
+		if data.CronName != "" {
+			status += " (" + markdown.EscapeHTML(data.CronName) + ")"
+		}
+	case data.Event == "SessionSend":
+		// DIALECT-NEUTRAL header: emoji + status only. Rich-only <hr/> via helpers.InsertRichHr.
+		// f29 G: ONE unified pen glyph on the visible line (NO "(silent)" suffix); the normal/no-header
+		// type moved into a 🏷 details line (HeaderInfo.SendKind). U+FE0F (VS16) makes TG render the pen
+		// (U+1F58A, text-default) as a color emoji.
+		emoji = "🖊️"
+		status = "CLI Send"
+		if data.SendNoHeader {
+			sendKind = "no-header"
+		} else {
+			sendKind = "normal"
+		}
+		// f29: the sender moved into the 👤 details line (HeaderInfo.SendFrom); the visible status line
+		// no longer carries a " from <agent>" suffix.
+		status += DeliveryStatusTag(data.DeliveryStatus)
 	case data.Event == "Message":
 		if data.Finalized {
+			// f29 F: the turn-FINAL streamed message (Finalized = the relabeled last chunk, position-based
+			// per cmd/stream.go) is labeled "Task Completed" to match the Stop-direct-send; earlier bubbles
+			// (Finalized=false) stay "💬 Message".
 			emoji = "✅"
+			status = "Task Completed"
 		} else {
 			emoji = "💬"
+			status = "Message"
 		}
-		status = "Message"
+	case data.Event == "Stop":
+		// f29 F: the Stop-direct-send turn-final message. Same output as the old default, made explicit so
+		// the position-based label (turn-final → Task Completed) is documented alongside the Message case.
+		emoji = "✅"
+		status = "Task Completed"
 	default:
 		emoji = "✅"
 		status = "Task Completed"
@@ -1297,6 +1391,7 @@ func BuildNotificationText(data NotificationData) string {
 		Project: data.Project, CWD: data.CWD, TmuxTarget: data.TmuxTarget,
 		CLICommand: data.CLICommand, ContextUsedPct: data.ContextUsedPct,
 		ContextUsedTokens: data.ContextUsedTokens, ContextWindowSize: data.ContextWindowSize,
+		SendFrom: data.SendFrom, SendKind: sendKind,
 	})
 	if data.Body != "" {
 		lines = append(lines, "", data.Body)
@@ -1339,12 +1434,14 @@ func BuildPermissionText(data PermissionData) string {
 	return strings.Join(lines, "\n")
 }
 
-// BuildToolNotifyText formats a tool call notification message for Telegram.
-// Each tool type gets a human-readable format with relevant emojis.
-func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string) string {
+// buildToolNotifyBody formats the argument body of a tool call (the human-readable args, e.g. the Bash
+// command or the Edit old/new blocks) with relevant emojis. Returns (body, parsed): parsed is false
+// when tool_input is unparseable (body is then the raw input). Shared by BuildToolNotifyText (which
+// wraps it in a 🔧-summary <details>) and BuildCompactToolDetails (Fix 14).
+func buildToolNotifyBody(toolName string, toolInput json.RawMessage, cwd string) (string, bool) {
 	var fields map[string]interface{}
 	if err := json.Unmarshal(toolInput, &fields); err != nil {
-		return string(toolInput)
+		return string(toolInput), false
 	}
 	var b strings.Builder
 	esc := func(v interface{}) string {
@@ -1501,8 +1598,34 @@ func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string)
 			}
 		}
 	}
-	result := b.String()
-	return result
+	return b.String(), true
+}
+
+// BuildToolNotifyText formats a full tool call notification: the args body wrapped in a collapsed
+// <details> block with a "🔧 <tool>" summary. A no-arg tool (empty body) returns a name-only skeleton
+// so the notification is still sent (Fix 13a); an unparseable tool_input returns the raw text.
+func BuildToolNotifyText(toolName string, toolInput json.RawMessage, cwd string) string {
+	body, parsed := buildToolNotifyBody(toolName, toolInput, cwd)
+	if !parsed {
+		return body
+	}
+	if body == "" {
+		return "🔧 " + markdown.EscapeRich(toolName)
+	}
+	// Wrap args in a collapsed <details> block; tapping expands to show tool args.
+	return fmt.Sprintf("<details><summary>🔧 %s</summary>\n%s\n</details>", markdown.EscapeRich(toolName), body)
+}
+
+// BuildCompactToolDetails wraps the compact one-line summary (<=maxLen runes) in a collapsed <details>
+// block whose body is the full tool-call args, so the compact rich notification can be expanded to see
+// the actual command (Fix 14). A no-arg / unparseable tool has no expandable body → just the summary line.
+func BuildCompactToolDetails(toolName string, toolInput json.RawMessage, cwd string, maxLen int) string {
+	summary := BuildCompactToolLine(toolName, toolInput, cwd, maxLen)
+	body, parsed := buildToolNotifyBody(toolName, toolInput, cwd)
+	if !parsed || body == "" {
+		return summary
+	}
+	return "<details><summary>" + summary + "</summary>\n" + body + "\n</details>"
 }
 
 // BuildCompactToolLine returns a single-line compact description of a tool call.
@@ -1570,7 +1693,11 @@ func BuildCompactToolLine(toolName string, toolInput json.RawMessage, cwd string
 	}
 	var info string
 	switch toolName {
-	case "Read", "Edit", "Write":
+	case "Read":
+		// Fix 17: compact Read shows only the filename (basename) — the full path is in the collapsed
+		// details body. TailPath(...,1) returns the last path segment.
+		info = truncate(TailPath(str("file_path"), 1), maxLen)
+	case "Edit", "Write":
 		info = truncate(TailPath(str("file_path"), 3), maxLen)
 	case "Bash":
 		info = CompactBashCommand(str("command"), maxLen)

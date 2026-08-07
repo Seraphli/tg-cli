@@ -77,7 +77,7 @@ done
 
 LOG_BEFORE_RESTART=$(wc -l < "$LOG_FILE")
 $TMUX_TEST send-keys -t "$E2E_SESSION" \
-  "BROWSER=none CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR claude --model sonnet --dangerously-skip-permissions --setting-sources user"
+  "$(cc_launch_cmd --dangerously-skip-permissions)"
 sleep 1
 $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
 

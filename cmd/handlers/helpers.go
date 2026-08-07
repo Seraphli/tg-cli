@@ -17,6 +17,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/markdown"
 	"github.com/Seraphli/tg-cli/internal/notify"
 	tele "gopkg.in/telebot.v3"
 )
@@ -53,13 +54,14 @@ func extractTarget(target string) string {
 // checkSessionAlive checks if a tmux session still exists; cleans up dead sessions.
 func checkSessionAlive(bs *types.BotState, tmuxTarget string) bool {
 	return helpers.CheckSessionAlive(tmuxTarget, func(t string) {
-		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
+		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
 	})
 }
 
-// recordPending records a message for later ✍ reaction when UserPromptSubmit fires.
+// recordPending sets the ✍ receipt-acknowledgement reaction on a received message; it is cleared
+// once CC starts processing the prompt (ClearReactions).
 func recordPending(bs *types.BotState, tmuxTarget string, chatID int64, msgID int) {
-	helpers.RecordPending(bs.ReactionTracker, tmuxTarget, chatID, msgID)
+	bs.ReactionTracker.RecordPending(bs.Bot, tmuxTarget, chatID, msgID)
 }
 
 // handleStalePending checks if a pending entry is stale (wait store entry missing).
@@ -141,37 +143,48 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 // with pagination when multi-page), sends it, stores the PageEntry, and returns the sent message.
 // Shared by handleCaptureCommand (the /p TG path) and the /test/capture_message endpoint
 // so tests exercise the exact production message-building code.
-// Pagination threshold reads config.PaginationMaxRunes, matching helpers.SendPagedForward.
+//
+// Capture is sent as a RICH message (Bot API 10.1, RetrySendRich) WITHOUT a <pre> code block: the raw
+// terminal content is HTML-escaped and streamed as rich text, so the body may be up to RichMaxRunes
+// (~30000, headroom under the 32768 API limit) rather than the 4096-char plain cap. Escaping BEFORE
+// SplitBody is also load-bearing: raw terminal output contains tag-like sequences (e.g. <b>, <td>)
+// that made SplitBody loop forever on large captures (the /p hang); escaping strips the raw '<'/'>'
+// so SplitBody sees no tags. The stored chunks are already escaped; collapsibleBody renders capture
+// (Rich) entries as-is (no <pre>).
 func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
 	content = helpers.ShortenSeparators(content)
 	header := CaptureHeader
 	cfg, _ := config.LoadAppConfig()
-	paginationMax := 4000
-	if cfg.PaginationMaxRunes > 0 {
-		paginationMax = cfg.PaginationMaxRunes
+	richMax := 30000
+	if cfg.RichMaxRunes > 0 {
+		richMax = cfg.RichMaxRunes
 	}
-	maxBody := paginationMax - len([]rune(header)) - 100
+	maxBody := richMax - len([]rune(header)) - 100
 	if maxBody < 500 {
 		maxBody = 500
 	}
-	chunks := helpers.SplitBody(content, maxBody)
+	chunks := helpers.SplitBody(markdown.EscapeHTML(content), maxBody)
 	if len(chunks) == 1 {
 		kb := &tele.ReplyMarkup{}
 		kb.Inline(CaptureExtraRow(true, true))
-		sent, err := helpers.RetrySend(bot, chat, header+chunks[0], kb)
+		text := header + chunks[0]
+		sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
 		if err != nil {
 			return nil, err
 		}
-		pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, RawMode: true, CurrentPage: 1})
+		pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, Rich: true, CurrentPage: 1})
+		logger.Info(fmt.Sprintf("Capture reply sent: chat=%s msg_id=%d chunks=%d", chat.Recipient(), sent.ID, len(chunks)))
 		return sent, nil
 	}
 	lastPage := len(chunks)
 	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{CaptureExtraRow(true, true)})
-	sent, err := helpers.RetrySend(bot, chat, header+chunks[lastPage-1], kb)
+	text := header + chunks[lastPage-1]
+	sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
 	if err != nil {
 		return nil, err
 	}
-	pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, RawMode: true, CurrentPage: lastPage})
+	pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, Rich: true, CurrentPage: lastPage})
+	logger.Info(fmt.Sprintf("Capture reply sent: chat=%s msg_id=%d chunks=%d", chat.Recipient(), sent.ID, len(chunks)))
 	return sent, nil
 }
 

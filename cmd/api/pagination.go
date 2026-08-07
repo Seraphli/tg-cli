@@ -37,11 +37,14 @@ func registerPagination(mux *http.ServeMux, bs *types.BotState) {
 			return
 		}
 		chat := &tele.Chat{ID: entry.ChatID}
-		var text string
+		var text, legacyText string
 		if entry.PermRows != nil {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
+			legacyText = text
 		} else {
-			text = notify.BuildNotificationText(notify.NotificationData{
+			// S12b: Chunks/LegacyChunks are BODY chunks — re-wrap in the header via BuildNotificationText.
+			// The rich payload gets the <hr/> boundary for Cron/SessionSend; the legacy payload never does.
+			nd := notify.NotificationData{
 				Event:             entry.Event,
 				Project:           entry.Project,
 				CWD:               entry.CWD,
@@ -55,12 +58,38 @@ func registerPagination(mux *http.ServeMux, bs *types.BotState) {
 				ContextUsedPct:    entry.ContextUsedPct,
 				ContextUsedTokens: entry.ContextUsedTokens,
 				ContextWindowSize: entry.ContextWindowSize,
-			})
+				CronJobID:         entry.CronJobID,
+				CronName:          entry.CronName,
+				CronNoHeader:      entry.CronNoHeader,
+				SendFrom:          entry.SendFrom,
+				SendNoHeader:      entry.SendNoHeader,
+				DeliveryStatus:    entry.DeliveryStatus,
+			}
+			text = notify.BuildNotificationText(nd)
+			if entry.Event == "Cron" || entry.Event == "SessionSend" {
+				text = helpers.InsertRichHr(text)
+			}
+			// Legacy chunk paired 1:1 with Chunks; fall back to the rich text when absent (backward compat).
+			if len(entry.Chunks) == len(entry.LegacyChunks) && pageNum-1 < len(entry.LegacyChunks) {
+				ndLegacy := nd
+				ndLegacy.Body = entry.LegacyChunks[pageNum-1]
+				legacyText = notify.BuildNotificationText(ndLegacy)
+			} else {
+				legacyText = text
+			}
 		}
 		kb := helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
 		editMsg := &tele.Message{ID: msgID, Chat: chat}
 		if entry.RawMode {
 			_, err = helpers.RetryEdit(bot, editMsg, text, kb)
+		} else if entry.Rich {
+			// G1 mixed-era: a rich-sent message re-renders rich. Permission/capture/forward
+			// content is code/raw → skip entity detection; standard notifications are prose (C3).
+			_, err = helpers.RetryEditRich(bot, editMsg, text, helpers.RichSendOpts{
+				Markup:              kb,
+				SkipEntityDetection: entry.PermRows != nil || entry.Header != "",
+				LegacyHTML:          legacyText,
+			})
 		} else {
 			_, err = helpers.RetryEdit(bot, editMsg, text, kb, tele.ModeHTML)
 		}

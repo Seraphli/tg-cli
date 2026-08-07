@@ -270,6 +270,7 @@ func ExecuteLaunch(bs *types.BotState, bot *tele.Bot, chatID int64, state *Launc
 				sid, found := bs.SessionState.FindByTarget(pane)
 				if found {
 					bs.SessionState.SetName(sid, agentName)
+					bs.InjectQueue.ClearDeadTargets(injector.TargetExists)
 					logger.Info(fmt.Sprintf("executeLaunch: agent name auto-set: session=%s name=%s", sid, agentName))
 					return
 				}

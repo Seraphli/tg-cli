@@ -17,7 +17,7 @@ LOG_BEFORE=$(wc -l < "$LOG_FILE")
 
 # Test 1: Image with caption
 pane_log "[image_inject] BEFORE image+caption inject"
-inject_prompt "describe this test image" "$TEST_IMG"
+inject_prompt "Describe this image in one short sentence. Do not run any tools or commands." "$TEST_IMG"
 wait_for_idle $TIMEOUT
 pane_log "[image_inject] AFTER image+caption inject"
 
@@ -73,9 +73,9 @@ fi
 
 # Test 3: Multi-line text injection (no image)
 LOG_BEFORE3=$(wc -l < "$LOG_FILE")
-MULTI_TEXT="line1 test
-line2 test
-line3 test"
+MULTI_TEXT="Reply with exactly: multiline_ok. Do not run any tools or commands.
+This is line two of a multi-line input test.
+This is line three."
 pane_log "[multiline] BEFORE multi-line inject"
 inject_prompt "$MULTI_TEXT"
 wait_for_idle $TIMEOUT

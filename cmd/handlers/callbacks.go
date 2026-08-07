@@ -63,6 +63,21 @@ func CollapseEntry(entry *stores.PageEntry) string {
 	return strings.SplitN(entry.Header, "\n", 2)[0]
 }
 
+// collapsibleBody returns the display text for one chunk of a collapsible capture/@forward entry.
+// A pane-capture rich entry (CaptureHeader) is rendered WITHOUT a <pre> block — its chunks are already
+// HTML-escaped at send time, so they display as rich text. An @forward rich entry wraps its raw chunk
+// in an escaped <pre> block. A legacy (RawMode) entry shows the chunk as plain text. The header is
+// stored already-safe for the entry's format.
+func collapsibleBody(entry *stores.PageEntry, chunk string) string {
+	if entry.Rich {
+		if entry.Header == CaptureHeader {
+			return entry.Header + chunk
+		}
+		return entry.Header + helpers.WrapRichPre(chunk)
+	}
+	return entry.Header + chunk
+}
+
 // ExpandEntry expands a collapsible PageEntry to its last-viewed page (CurrentPage, bounds-checked);
 // returns the text to display and the page number used.
 func ExpandEntry(entry *stores.PageEntry) (string, int) {
@@ -71,14 +86,43 @@ func ExpandEntry(entry *stores.PageEntry) (string, int) {
 	if page < 1 || page > len(entry.Chunks) {
 		page = 1
 	}
-	return entry.Header + entry.Chunks[page-1], page
+	return collapsibleBody(entry, entry.Chunks[page-1]), page
 }
 
 // NavigateEntry records page navigation on a collapsible PageEntry (sets CurrentPage)
 // and returns the text to display for that page. Caller must validate pageNum range first.
 func NavigateEntry(entry *stores.PageEntry, pageNum int) string {
 	entry.CurrentPage = pageNum
-	return entry.Header + entry.Chunks[pageNum-1]
+	return collapsibleBody(entry, entry.Chunks[pageNum-1])
+}
+
+// askMarkupLabels flattens an inline keyboard's button labels (row-major). Used to inspect the ✅
+// prefix on selected AskUserQuestion options from tests.
+func askMarkupLabels(m *tele.ReplyMarkup) []string {
+	var labels []string
+	for _, row := range m.InlineKeyboard {
+		for _, b := range row {
+			labels = append(labels, b.Text)
+		}
+	}
+	return labels
+}
+
+// ToggleAskAndReedit toggles a multiSelect AskUserQuestion option in the store, rebuilds the inline
+// markup (with a ✅ on selected options), and re-edits the message via the format-aware freeze helper.
+// Fix 15: a rich AskUserQuestion has an empty .Text, so a plain RetryEdit with empty text fails to
+// update the buttons — RetryFreezeEditAuto uses the stored MsgText/Rich instead. Returns the resulting
+// button labels (nil only when the store toggle itself failed, i.e. the entry expired) and the re-edit
+// error (nil on success). Shared by the "tool" callback and the /test/callback endpoint so tests
+// exercise the exact production re-edit path.
+func ToggleAskAndReedit(bs *types.BotState, editMsg tele.Editable, snap stores.EntrySnapshot, qIdx, optIdx int) ([]string, error) {
+	questions, err := bs.PendingWait.ToggleQuestionOption(snap.UUID, qIdx, optIdx)
+	if err != nil {
+		return nil, err
+	}
+	newMarkup := helpers.RebuildAskMarkup(questions)
+	_, editErr := helpers.RetryFreezeEditAuto(bs.Bot, editMsg, snap.Rich, snap.MsgText, newMarkup)
+	return askMarkupLabels(newMarkup), editErr
 }
 
 // RegisterCallbackHandlers registers all Telegram inline button callback handlers.
@@ -107,19 +151,59 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			text = entry.Chunks[pageNum-1] + fmt.Sprintf("\n\n📄 %d/%d", pageNum, len(entry.Chunks))
 			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
 		} else {
-			text = notify.BuildNotificationText(notify.NotificationData{
-				Event:      entry.Event,
-				Project:    entry.Project,
-				CWD:        entry.CWD,
-				Body:       entry.Chunks[pageNum-1],
-				TmuxTarget: entry.TmuxTarget,
-				Page:       pageNum,
-				TotalPages: len(entry.Chunks),
-			})
+			// S12b: Chunks/LegacyChunks are BODY chunks — re-wrap via BuildNotificationText. The rich
+			// payload gets the <hr/> boundary for Cron/SessionSend; the legacy payload never does.
+			nd := notify.NotificationData{
+				Event:          entry.Event,
+				Project:        entry.Project,
+				CWD:            entry.CWD,
+				Body:           entry.Chunks[pageNum-1],
+				TmuxTarget:     entry.TmuxTarget,
+				Page:           pageNum,
+				TotalPages:     len(entry.Chunks),
+				CronJobID:      entry.CronJobID,
+				CronName:       entry.CronName,
+				CronNoHeader:   entry.CronNoHeader,
+				SendFrom:       entry.SendFrom,
+				SendNoHeader:   entry.SendNoHeader,
+				DeliveryStatus: entry.DeliveryStatus,
+			}
+			text = notify.BuildNotificationText(nd)
+			if entry.Event == "Cron" || entry.Event == "SessionSend" {
+				text = helpers.InsertRichHr(text)
+			}
 			kb = helpers.BuildPageKeyboardWithExtra(pageNum, len(entry.Chunks), entry.PermRows)
+		}
+		// Legacy chunk paired 1:1 with Chunks; fall back to the rich text when absent (backward compat).
+		legacyText := text
+		if entry.Header == "" && entry.PermRows == nil && len(entry.Chunks) == len(entry.LegacyChunks) && pageNum-1 < len(entry.LegacyChunks) {
+			ndLegacy := notify.NotificationData{
+				Event:          entry.Event,
+				Project:        entry.Project,
+				CWD:            entry.CWD,
+				Body:           entry.LegacyChunks[pageNum-1],
+				TmuxTarget:     entry.TmuxTarget,
+				Page:           pageNum,
+				TotalPages:     len(entry.Chunks),
+				CronJobID:      entry.CronJobID,
+				CronName:       entry.CronName,
+				CronNoHeader:   entry.CronNoHeader,
+				SendFrom:       entry.SendFrom,
+				SendNoHeader:   entry.SendNoHeader,
+				DeliveryStatus: entry.DeliveryStatus,
+			}
+			legacyText = notify.BuildNotificationText(ndLegacy)
 		}
 		if entry.RawMode {
 			_, err = helpers.RetryEdit(bot, c.Message(), text, kb)
+		} else if entry.Rich {
+			// G1 mixed-era: a rich-sent message is re-rendered rich. Permission/capture/forward
+			// content is code/raw → skip entity detection; standard notifications are prose (C3).
+			_, err = helpers.RetryEditRich(bot, c.Message(), text, helpers.RichSendOpts{
+				Markup:              kb,
+				SkipEntityDetection: entry.PermRows != nil || entry.Header != "",
+				LegacyHTML:          legacyText,
+			})
 		} else {
 			_, err = helpers.RetryEdit(bot, c.Message(), text, kb, tele.ModeHTML)
 		}
@@ -154,12 +238,20 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				kb.Inline(extraRow)
 			}
 		}
-		var editOpts []interface{}
-		editOpts = append(editOpts, kb)
-		if !entry.RawMode {
-			editOpts = append(editOpts, tele.ModeHTML)
+		var err error
+		if entry.Rich {
+			// Rich collapsible (capture/@forward): edit via editMessageText rich_message; the raw
+			// pane/forward content is code-like → skip entity detection (C3).
+			_, err = helpers.RetryEditRich(bot, c.Message(), text, helpers.RichSendOpts{
+				Markup:              kb,
+				SkipEntityDetection: entry.Header != "",
+				LegacyHTML:          text,
+			})
+		} else if entry.RawMode {
+			_, err = helpers.RetryEdit(bot, c.Message(), text, kb)
+		} else {
+			_, err = helpers.RetryEdit(bot, c.Message(), text, kb, tele.ModeHTML)
 		}
-		_, err := helpers.RetryEdit(bot, c.Message(), text, editOpts...)
 		logger.Info(fmt.Sprintf("ce edit: collapsed=%v err=%v", entry.Collapsed, err))
 		if err != nil {
 			logger.Debug(fmt.Sprintf("ce edit error: %v", err))
@@ -250,14 +342,14 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 					return c.Respond(&tele.CallbackResponse{Text: "Invalid question"})
 				}
 				if snap.Questions[qIdx].MultiSelect {
-					// Toggle option — use store method for atomic update
-					questions, err := bs.PendingWait.ToggleQuestionOption(snap.UUID, qIdx, optIdx)
-					if err != nil {
+					// Toggle option + rich-aware re-edit (Fix 15). Shared with /test/callback via
+					// ToggleAskAndReedit so the ✅ checkmark path is E2E-tested.
+					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
+					// labels==nil only when the store toggle failed (entry expired); a transient re-edit error
+					// is non-fatal (matches the pre-refactor behavior of ignoring the edit error).
+					if labels, _ := ToggleAskAndReedit(bs, c.Message(), snap, qIdx, optIdx); labels == nil {
 						return c.Respond(&tele.CallbackResponse{Text: "Expired"})
 					}
-					logger.Info(fmt.Sprintf("AskUserQuestion multiSelect toggle: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
-					newMarkup := helpers.RebuildAskMarkup(questions)
-					helpers.RetryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
 					return c.Respond(&tele.CallbackResponse{Text: "Toggled"})
 				} else {
 					// Select option — use store method for atomic update
@@ -279,7 +371,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 					}
 					logger.Info(fmt.Sprintf("AskUserQuestion option selected: msg_id=%d q=%d opt=%d label=%s", c.Message().ID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
 					newMarkup := helpers.RebuildAskMarkup(questions)
-					helpers.RetryEdit(bot, c.Message(), c.Message().Text, newMarkup, tele.ModeHTML)
+					// Fix 15: the AskUserQuestion message may have been sent rich, in which case c.Message().Text
+					// is empty and a plain RetryEdit with empty text fails to update the button markup (the ✅
+					// never appears). Re-edit via the format-aware freeze helper using the stored MsgText/Rich.
+					helpers.RetryFreezeEditAuto(bot, c.Message(), snap.Rich, snap.MsgText, newMarkup)
 					return c.Respond(&tele.CallbackResponse{Text: "Selected"})
 				}
 			}

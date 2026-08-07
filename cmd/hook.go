@@ -76,6 +76,8 @@ func generateUUID() string {
 }
 
 // ndjsonFrame is the parsed structure of each line from the /pending/connect stream.
+// Rich is persisted here so that a reconnecting hook after a bot restart can restore
+// the message format (legacy vs rich) for correct mixed-era edits (G1).
 type ndjsonFrame struct {
 	Type    string          `json:"type"`
 	Output  json.RawMessage `json:"output"`
@@ -83,6 +85,7 @@ type ndjsonFrame struct {
 	ChatID  int64           `json:"chat_id"`
 	TopicID int             `json:"topic_id"`
 	MsgText string          `json:"msg_text"`
+	Rich    bool            `json:"rich,omitempty"`
 }
 
 // postWithUpgradeRetry posts to url with body, retrying on ECONNREFUSED if an upgrade is active.
@@ -193,6 +196,7 @@ func runHook(cmd *cobra.Command, args []string) {
 		var chatID int64
 		var topicID int
 		var msgText string
+		var richFormat bool // persisted Rich flag so reconnect after restart restores the send format
 
 		// Streaming connect loop with upgrade retry
 		const retryCap = 25 * time.Second
@@ -208,6 +212,9 @@ func runHook(cmd *cobra.Command, args []string) {
 			}
 			if msgText != "" {
 				connectURL += "&msg_text=" + url.QueryEscape(msgText)
+			}
+			if richFormat {
+				connectURL += "&rich=1"
 			}
 			req, reqErr := http.NewRequestWithContext(ctx, "POST", connectURL, bytes.NewReader(enrichedJSON))
 			if reqErr != nil {
@@ -246,7 +253,8 @@ func runHook(cmd *cobra.Command, args []string) {
 					msgID = frame.MsgID
 					chatID = frame.ChatID
 					topicID = frame.TopicID
-					hookLog("registered: uuid=%s msg_id=%d", uuid, msgID)
+					richFormat = frame.Rich
+					hookLog("registered: uuid=%s msg_id=%d rich=%v", uuid, msgID, richFormat)
 				case "update":
 					if frame.MsgID != 0 {
 						msgID = frame.MsgID
@@ -260,7 +268,10 @@ func runHook(cmd *cobra.Command, args []string) {
 					if frame.MsgText != "" {
 						msgText = frame.MsgText
 					}
-					hookLog("update: msg_id=%d chat_id=%d topic_id=%d", msgID, chatID, topicID)
+					if frame.Rich {
+						richFormat = true
+					}
+					hookLog("update: msg_id=%d chat_id=%d topic_id=%d rich=%v", msgID, chatID, topicID, richFormat)
 				case "answer":
 					hookLog("answered: %s", string(frame.Output))
 					resp.Body.Close()

@@ -30,7 +30,7 @@ wait_for_idle
 # Inject a simple prompt and wait for Stop notification
 LOG_BEFORE_HELLO=$(wc -l < "$LOG_FILE")
 pane_log "[codex/bot_hook] BEFORE 'say hello' prompt"
-inject_prompt "say hello"
+inject_prompt "Reply with exactly one word: hello"
 echo "Command sent, waiting for Stop hook to trigger..."
 
 ELAPSED=0

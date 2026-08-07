@@ -105,9 +105,29 @@ func SessionExists(target TmuxTarget) bool {
 	return cmd.Run() == nil
 }
 
+// TargetExists parses a tmux target string and checks if the pane is alive.
+// Returns false on parse errors or when the pane does not exist.
+func TargetExists(target string) bool {
+	t, err := ParseTarget(target)
+	return err == nil && SessionExists(t)
+}
+
 // InjectText injects text into a tmux pane using bracketed paste.
 // Uses a per-target mutex to prevent concurrent injections into the same pane.
 func InjectText(target TmuxTarget, text string, submit ...bool) error {
+	return injectTextInternal(target, text, len(submit) == 0 || submit[0], nil)
+}
+
+// InjectTextDiag behaves like InjectText(target, text, submit) but invokes diag(phase, pane)
+// immediately BEFORE the Enter (C-m) key press ("before-enter") and shortly AFTER it
+// ("after-enter"), capturing the pane each time. Both captures run under the same per-target
+// inject lock as the paste+submit, so the paste->Enter sequence stays atomic — the diagnostics
+// introduce no new timing window into the injection itself.
+func InjectTextDiag(target TmuxTarget, text string, submit bool, diag func(phase, pane string)) error {
+	return injectTextInternal(target, text, submit, diag)
+}
+
+func injectTextInternal(target TmuxTarget, text string, submit bool, diag func(phase, pane string)) error {
 	mu := getInjectLock(target)
 	mu.Lock()
 	defer mu.Unlock()
@@ -137,9 +157,25 @@ func InjectText(target TmuxTarget, text string, submit ...bool) error {
 	}
 	time.Sleep(1000 * time.Millisecond)
 	// Submit unless explicitly disabled
-	if len(submit) == 0 || submit[0] {
+	if submit {
+		// Diagnostic: snapshot the pane immediately BEFORE pressing Enter — shows whether the merged
+		// text is staged in the input box, or whether an AskUserQuestion popup sits on the pane.
+		if diag != nil {
+			if pane, capErr := CapturePane(target); capErr == nil {
+				diag("before-enter", pane)
+			}
+		}
 		if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
 			return fmt.Errorf("%w: %v", ErrSubmitAfterPaste, err)
+		}
+		// Diagnostic: snapshot the pane shortly AFTER Enter. A short bounded delay (still under the
+		// inject lock) lets CC re-render — input cleared on submit, or the popup swallowed the Enter —
+		// before we capture, so the 0ms pre-render state isn't what gets logged.
+		if diag != nil {
+			time.Sleep(400 * time.Millisecond)
+			if pane, capErr := CapturePane(target); capErr == nil {
+				diag("after-enter", pane)
+			}
 		}
 	}
 	return nil
@@ -167,6 +203,55 @@ func InjectTextAppend(target TmuxTarget, text string, submit ...bool) error {
 		}
 	}
 	return nil
+}
+
+// InjectTextConfirmSubmit clears+pastes text WITHOUT Enter, then polls confirm(pane) under the per-target
+// inject lock; on the first confirm==true it presses Enter (still under the lock) and returns
+// submitted=true. If confirm never returns true within composeTimeout it presses nothing (the callback
+// VETOes the submit) and returns submitted=false. Holding the per-target injectMu across the whole
+// clear→paste→confirm→Enter sequence keeps a concurrent InjectText/InjectTextAppend from swapping the
+// composer between our paste and our Enter (f29 C: codex slash-command inject confirmation).
+func InjectTextConfirmSubmit(target TmuxTarget, text string, confirm func(pane string) bool, composeTimeout, poll time.Duration) (bool, error) {
+	mu := getInjectLock(target)
+	mu.Lock()
+	defer mu.Unlock()
+	text = NormalizeText(text)
+	if text == "" {
+		return false, fmt.Errorf("empty text after normalization")
+	}
+	bufName := fmt.Sprintf("tg-cli-%s", target.PaneID)
+	// Exit copy-mode if active (mirrors injectTextInternal).
+	out, err := tmuxCmd(target, "display-message", "-p", "-t", target.PaneID, "#{pane_mode}").Output()
+	if err == nil && strings.TrimSpace(string(out)) == "copy-mode" {
+		tmuxCmd(target, "send-keys", "-t", target.PaneID, "q").Run()
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Clear current input, then paste WITHOUT Enter (same primitives/timings as injectTextInternal).
+	if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-u").Run(); err != nil {
+		return false, fmt.Errorf("clear input failed: %w", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := setBuffer(target, bufName, text); err != nil {
+		return false, fmt.Errorf("set-buffer failed: %w", err)
+	}
+	if err := tmuxCmd(target, "paste-buffer", "-t", target.PaneID, "-b", bufName, "-r", "-p").Run(); err != nil {
+		return false, fmt.Errorf("paste-buffer failed: %w", err)
+	}
+	time.Sleep(1000 * time.Millisecond)
+	// Compose-confirm poll (under the lock): on the first confirm==true, submit (Enter) and return.
+	deadline := time.Now().Add(composeTimeout)
+	for {
+		if pane, capErr := CapturePane(target); capErr == nil && confirm(pane) {
+			if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
+				return false, fmt.Errorf("%w: %v", ErrSubmitAfterPaste, err)
+			}
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil // composer never showed our text within composeTimeout → VETO the submit
+		}
+		time.Sleep(poll)
+	}
 }
 
 // ParseTarget parses a tmux target string like "%3@/tmp/tmux-1000/default".
@@ -219,6 +304,64 @@ func ListPanes(session string) ([]string, error) {
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	return lines, nil
+}
+
+// PaneInfo holds the per-pane fields fetched by one batched list-panes call.
+type PaneInfo struct {
+	Command string // #{pane_current_command}
+	PID     string // #{pane_pid}
+	Title   string // #{pane_title}
+}
+
+// parsePaneList parses the TAB-separated output of `list-panes -a` with the format
+// "#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}" into a map keyed by pane_id.
+// pane_title is LAST because titles may contain spaces and non-ASCII; SplitN(line,"\t",4) keeps the
+// whole remainder (including spaces) as the title. Splitting on whitespace would corrupt every
+// multi-word title, so this must stay a TAB split. Lines with fewer than 4 fields are skipped.
+func parsePaneList(out string) map[string]PaneInfo {
+	m := make(map[string]PaneInfo)
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		m[parts[0]] = PaneInfo{Command: parts[1], PID: parts[2], Title: parts[3]}
+	}
+	return m
+}
+
+// paneListCmd builds the single `list-panes -a` command for one tmux socket. It is a package-level var
+// so a test can replace it to assert ListPanesBatch issues exactly one exec per DISTINCT socket with the
+// exact flags and format string. Production always uses this default.
+var paneListCmd = func(socket string) *exec.Cmd {
+	return tmuxCmd(TmuxTarget{Socket: socket}, "list-panes", "-a", "-F",
+		"#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}")
+}
+
+// ListPanesBatch fetches every pane's command, pid and title in ONE `list-panes -a` call per DISTINCT
+// tmux socket among targets, returning a map keyed by FormatTarget(target). It replaces the old
+// per-pane fan-out (GetPaneTitle + GetPaneCommand + #{pane_pid}) that issued 3-4 tmux execs per
+// session per tick. A pane absent from every socket's output is simply not in the map (callers treat
+// that as "gone"). A socket whose list-panes call errors contributes no entries.
+func ListPanesBatch(targets []TmuxTarget) map[string]PaneInfo {
+	sockets := make(map[string]struct{})
+	for _, t := range targets {
+		sockets[t.Socket] = struct{}{}
+	}
+	result := make(map[string]PaneInfo)
+	for socket := range sockets {
+		out, err := paneListCmd(socket).Output()
+		if err != nil {
+			continue
+		}
+		for paneID, info := range parsePaneList(string(out)) {
+			result[FormatTarget(TmuxTarget{PaneID: paneID, Socket: socket})] = info
+		}
+	}
+	return result
 }
 
 // NamedSessionExists checks if a tmux session with the given name exists.

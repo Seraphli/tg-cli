@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -147,6 +148,8 @@ func normalizeTableBold(md string) string {
 type tgRenderer struct {
 	ordinal       map[ast.Node]int // tracks ordered list item counters
 	skipCodeNodes map[ast.Node]bool
+	rich          bool // when true, emit Bot API 10.1 rich HTML dialect
+	inCell        bool // when true, we are inside a <td>/<th> (cells inline-only, C4)
 }
 
 // AddOptions implements renderer.Renderer (no-op for options).
@@ -196,14 +199,55 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 		// Nothing to do
 
 	case *ast.Heading:
-		if entering {
-			fmt.Fprintf(w, "<b>")
+		if r.rich {
+			// Rich headings render at their original level (h1→h1 … h6→h6); no downgrade/cap
+			// (boss decision; Bot API RichBlockSectionHeading supports h1-h6).
+			tag := fmt.Sprintf("h%d", node.Level)
+			if entering {
+				fmt.Fprintf(w, "<%s>", tag)
+			} else {
+				// D2: <h*> is a rich block element (self-breaks) — no trailing "\n\n" (which rich
+				// HTML would collapse; a centralized RichifyNewlines would otherwise make it <br><br>).
+				fmt.Fprintf(w, "</%s>", tag)
+			}
 		} else {
-			fmt.Fprintf(w, "</b>\n\n")
+			if entering {
+				fmt.Fprintf(w, "<b>")
+			} else {
+				fmt.Fprintf(w, "</b>\n\n")
+			}
 		}
 
 	case *ast.Paragraph:
-		if !entering {
+		if r.inCell {
+			// C4: table-cell content is inline-only — no <p>, no newline separators.
+			break
+		}
+		if r.rich {
+			_, inListItem := n.Parent().(*ast.ListItem)
+			_, inBlockquote := n.Parent().(*ast.Blockquote)
+			if inListItem || inBlockquote {
+				// Inside <li>/<blockquote>: content is inline (no <p> wrap). Separate a following
+				// sibling content block with <br> so consecutive blocks do not merge to one line.
+				if !entering {
+					if next := n.NextSibling(); next != nil {
+						if _, isList := next.(*ast.List); !isList {
+							fmt.Fprintf(w, "<br>")
+						}
+					}
+				}
+			} else if n.PreviousSibling() != nil || n.NextSibling() != nil {
+				// Multiple top-level blocks → wrap this paragraph in a real <p> so consecutive
+				// paragraphs/blocks don't merge onto one line. A SOLE paragraph is left unwrapped so
+				// it stays inline (its internal soft breaks already emit <br>) — this keeps
+				// single-line renders (e.g. a mailbox "Subject:" value) on the same line as their label.
+				if entering {
+					fmt.Fprintf(w, "<p>")
+				} else {
+					fmt.Fprintf(w, "</p>")
+				}
+			}
+		} else if !entering {
 			if _, ok := n.Parent().(*ast.ListItem); ok {
 				// Inside list item — only add newline between sibling content blocks
 				if next := n.NextSibling(); next != nil {
@@ -221,10 +265,14 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 		}
 
 	case *ast.Blockquote:
-		if entering {
-			fmt.Fprintf(w, "<blockquote>")
+		if r.inCell {
+			// C4: blockquote inside a cell — suppress tags, just emit text content
 		} else {
-			fmt.Fprintf(w, "</blockquote>")
+			if entering {
+				fmt.Fprintf(w, "<blockquote>")
+			} else {
+				fmt.Fprintf(w, "</blockquote>")
+			}
 		}
 
 	case *ast.FencedCodeBlock:
@@ -235,7 +283,25 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", ExpandTabs(EscapeHTML(strings.TrimRight(buf.String(), "\n"))))
+			content := ExpandTabs(EscapeHTML(strings.TrimRight(buf.String(), "\n")))
+			if r.rich && r.inCell {
+				// C4: inside a table cell — flatten fenced code to inline <code>
+				fmt.Fprintf(w, "<code>%s</code>", content)
+			} else if r.rich {
+				lang := ""
+				if node.Info != nil {
+					lang = strings.TrimSpace(string(node.Info.Segment.Value(source)))
+				}
+				if lang != "" {
+					// D2: <pre> self-breaks; no trailing "\n\n" outside the block. Newlines INSIDE
+					// <pre> (the code) are preserved by RichifyNewlines.
+					fmt.Fprintf(w, "<pre><code class=\"language-%s\">%s</code></pre>", EscapeHTML(lang), content)
+				} else {
+					fmt.Fprintf(w, "<pre><code>%s</code></pre>", content)
+				}
+			} else {
+				fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", content)
+			}
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -247,7 +313,16 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 				line := lines.At(i)
 				buf.Write(line.Value(source))
 			}
-			fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", ExpandTabs(EscapeHTML(strings.TrimRight(buf.String(), "\n"))))
+			content := ExpandTabs(EscapeHTML(strings.TrimRight(buf.String(), "\n")))
+			if r.inCell {
+				// C4: flatten to inline <code>
+				fmt.Fprintf(w, "<code>%s</code>", content)
+			} else if r.rich {
+				// D2: <pre> self-breaks; no trailing "\n\n" in rich.
+				fmt.Fprintf(w, "<pre><code>%s</code></pre>", content)
+			} else {
+				fmt.Fprintf(w, "<pre><code>%s</code></pre>\n\n", content)
+			}
 		}
 		return ast.WalkSkipChildren, nil
 
@@ -309,55 +384,127 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 		return ast.WalkSkipChildren, nil
 
 	case *ast.List:
-		if entering {
-			// Add newline before nested list (after parent item text)
-			if _, ok := n.Parent().(*ast.ListItem); ok {
-				fmt.Fprintf(w, "\n")
+		if r.rich && r.inCell {
+			// C4: inside a table cell — flatten list items to inline text separated by " • "
+			// We skip the <ul>/<ol> wrapper and handle items inline in *ast.ListItem
+		} else if r.rich {
+			if entering {
+				if node.IsOrdered() {
+					fmt.Fprintf(w, "<ol>")
+				} else {
+					fmt.Fprintf(w, "<ul>")
+				}
+			} else {
+				// D2: <ul>/<ol> self-break; no trailing "\n\n" in rich.
+				if node.IsOrdered() {
+					fmt.Fprintf(w, "</ol>")
+				} else {
+					fmt.Fprintf(w, "</ul>")
+				}
 			}
 		} else {
-			// Only add spacing after top-level lists, not nested ones
-			if _, ok := n.Parent().(*ast.ListItem); !ok {
-				fmt.Fprintf(w, "\n")
+			if entering {
+				// Add newline before nested list (after parent item text)
+				if _, ok := n.Parent().(*ast.ListItem); ok {
+					fmt.Fprintf(w, "\n")
+				}
+			} else {
+				// Only add spacing after top-level lists, not nested ones
+				if _, ok := n.Parent().(*ast.ListItem); !ok {
+					fmt.Fprintf(w, "\n")
+				}
 			}
 		}
 
 	case *ast.ListItem:
-		if entering {
-			depth := listDepth(node)
-			indent := strings.Repeat("  ", depth)
-			parent, ok := node.Parent().(*ast.List)
-			if ok && parent.IsOrdered() {
-				r.ordinal[parent]++
-				fmt.Fprintf(w, "%s%d. ", indent, r.ordinal[parent])
-			} else {
-				fmt.Fprintf(w, "%s• ", indent)
-			}
-		} else {
-			// Don't add newline if last child is a nested list (already ends with newline)
-			if lastChild := node.LastChild(); lastChild != nil {
-				if _, isList := lastChild.(*ast.List); isList {
-					return ast.WalkContinue, nil
+		if r.rich && r.inCell {
+			// C4: flatten list items to inline text; add bullet separator between items
+			if entering {
+				// Add separator before non-first items
+				if node.PreviousSibling() != nil {
+					fmt.Fprintf(w, " • ")
 				}
 			}
-			fmt.Fprintf(w, "\n")
+		} else if r.rich {
+			if entering {
+				fmt.Fprintf(w, "<li>")
+			} else {
+				fmt.Fprintf(w, "</li>")
+			}
+		} else {
+			if entering {
+				depth := listDepth(node)
+				indent := strings.Repeat("  ", depth)
+				parent, ok := node.Parent().(*ast.List)
+				if ok && parent.IsOrdered() {
+					r.ordinal[parent]++
+					fmt.Fprintf(w, "%s%d. ", indent, r.ordinal[parent])
+				} else {
+					fmt.Fprintf(w, "%s• ", indent)
+				}
+			} else {
+				// Don't add newline if last child is a nested list (already ends with newline)
+				if lastChild := node.LastChild(); lastChild != nil {
+					if _, isList := lastChild.(*ast.List); isList {
+						return ast.WalkContinue, nil
+					}
+				}
+				fmt.Fprintf(w, "\n")
+			}
 		}
 
 	case *extast.Table:
-		if entering {
-			var buf bytes.Buffer
-			renderTableFallback(&buf, node, source)
-			if buf.Len() > 0 {
-				fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
+		if r.rich {
+			if entering {
+				// Bot API 10.1 <table bordered striped>: borders + zebra row striping (rich-html-style).
+				fmt.Fprintf(w, "<table bordered striped>")
+			} else {
+				// D2: <table> self-breaks; no trailing "\n\n" in rich.
+				fmt.Fprintf(w, "</table>")
 			}
+		} else {
+			if entering {
+				var buf bytes.Buffer
+				renderTableFallback(&buf, node, source)
+				if buf.Len() > 0 {
+					fmt.Fprintf(w, "<pre>%s</pre>\n\n", ExpandTabs(EscapeHTML(buf.String())))
+				}
+			}
+			return ast.WalkSkipChildren, nil
+		}
+
+	case *extast.TableHeader, *extast.TableRow:
+		if !r.rich {
+			// Handled by Table above (WalkSkipChildren) in legacy mode
+			break
+		}
+		if entering {
+			fmt.Fprintf(w, "<tr>")
+		} else {
+			fmt.Fprintf(w, "</tr>")
+		}
+
+	case *extast.TableCell:
+		if !r.rich {
+			// Handled by Table above in legacy mode
+			break
+		}
+		if entering {
+			// Render cell inline-only (C4): collect inline HTML from cell children
+			html := collectCellHTMLRich(node, source)
+			fmt.Fprintf(w, "<td>%s</td>", html)
 		}
 		return ast.WalkSkipChildren, nil
 
-	case *extast.TableHeader, *extast.TableRow, *extast.TableCell:
-		// Handled by Table above (WalkSkipChildren)
-
 	case *ast.ThematicBreak:
 		if entering {
-			fmt.Fprintf(w, "───────\n\n")
+			if r.rich {
+				// D2: sits between self-breaking blocks; a trailing "\n\n" would collapse. Wrap in
+				// <br> so the rule is on its own line even between non-block neighbors.
+				fmt.Fprintf(w, "<br>───────<br>")
+			} else {
+				fmt.Fprintf(w, "───────\n\n")
+			}
 		}
 
 	case *ast.Text:
@@ -366,7 +513,12 @@ func (r *tgRenderer) renderNode(w io.Writer, source []byte, n ast.Node, entering
 			txt := EscapeHTML(string(seg.Value(source)))
 			fmt.Fprintf(w, "%s", txt)
 			if node.SoftLineBreak() || node.HardLineBreak() {
-				fmt.Fprintf(w, "\n")
+				if r.rich {
+					// Rich HTML collapses a bare "\n" to a space; emit an explicit line break.
+					fmt.Fprintf(w, "<br>")
+				} else {
+					fmt.Fprintf(w, "\n")
+				}
 			}
 		}
 
@@ -542,6 +694,33 @@ func htmlEscape(s string) string {
 	return s
 }
 
+// collectCellHTMLRich collects cell content as rich inline HTML (C4: cells inline-only).
+// Block-level children (fenced code → <code>, lists → bullet-separated text, blockquote → text)
+// are flattened to inline equivalents. Only inline rich tags are emitted.
+func collectCellHTMLRich(n ast.Node, source []byte) string {
+	var buf bytes.Buffer
+	r := &tgRenderer{rich: true, inCell: true, ordinal: make(map[ast.Node]int), skipCodeNodes: make(map[ast.Node]bool)}
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		ast.Walk(child, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+			return r.renderNode(&buf, source, c, entering)
+		})
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+// EscapeRich escapes a string for embedding in rich HTML, restricting to the allowed named-entity
+// set (only &lt; &gt; &amp; &quot; &apos; &nbsp; &hellip; &mdash; &ndash; &lsquo; &rsquo; &ldquo;
+// &rdquo; are allowed; all other named entities are escaped to numeric form).
+func EscapeRich(s string) string {
+	// First escape the base HTML characters so they become allowed named entities
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
+}
+
 // RenderTelegramHTML converts Markdown text to Telegram-compatible HTML.
 func RenderTelegramHTML(md string) string {
 	md = normalizeTableBold(md)
@@ -562,4 +741,207 @@ func RenderTelegramHTML(md string) string {
 		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
 	}
 	return strings.TrimRight(result, "\n")
+}
+
+// RenderRichHTML converts Markdown text to Bot API 10.1 rich HTML dialect.
+// Uses real block tags: <h1>..<h6>, <ul>/<ol>/<li>, <table><tr><td>,
+// <pre><code class="language-x">. Table cells are inline-only (C4).
+// Leave RenderTelegramHTML unchanged — it is the legacy/fallback path.
+func RenderRichHTML(md string) string {
+	md = normalizeTableBold(md)
+	gm := goldmark.New(
+		goldmark.WithExtensions(extension.GFM),
+	)
+	var buf bytes.Buffer
+	reader := text.NewReader([]byte(md))
+	doc := gm.Parser().Parse(reader)
+	r := &tgRenderer{rich: true}
+	if err := r.Render(&buf, []byte(md), doc); err != nil {
+		return EscapeRich(md)
+	}
+	// D2: rich block elements no longer emit trailing "\n\n"; the only remaining newlines live inside
+	// <pre> (code), so DON'T run the legacy "\n\n\n"->"\n\n" squeeze here — it would collapse blank
+	// lines inside code blocks. RichifyNewlines (applied at send time) handles the <br> conversion.
+	result := buf.String()
+	// Bold fallback: goldmark leaves **bold** unparsed when the closing ** is not right-flanking —
+	// e.g. a punctuation char (fullwidth "）" or ASCII ")") immediately before ** followed by a CJK
+	// letter ("**A（注）**已" stays literal). Convert those survivors to <b> here.
+	result = applyBoldFallback(result)
+	return strings.TrimRight(result, "\n")
+}
+
+// boldFallbackPreserveRe matches regions where a literal "**" must NOT be treated as a bold
+// delimiter: <pre> (code/terminal), inline <code>, and <tg-math-block> (math source). <pre> comes
+// first so a code block (with its inner </code>) is consumed whole. Non-greedy per region.
+var boldFallbackPreserveRe = regexp.MustCompile(`(?s)<pre>.*?</pre>|<code>.*?</code>|<tg-math-block>.*?</tg-math-block>`)
+
+// boldFallbackRe matches a "**...**" run goldmark left unparsed. Content is non-empty, single-line,
+// and free of other "*" so overlapping/partial runs are not merged.
+var boldFallbackRe = regexp.MustCompile(`\*\*([^*\n]+?)\*\*`)
+
+// applyBoldFallback converts surviving "**...**" pairs to <b>...</b>, OUTSIDE preserved regions
+// (<pre>/<code>/<tg-math-block>). Operates on already-escaped rich HTML, so injecting <b>/</b> is
+// safe. No-op when the html carries no "**".
+func applyBoldFallback(html string) string {
+	if !strings.Contains(html, "**") {
+		return html
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range boldFallbackPreserveRe.FindAllStringIndex(html, -1) {
+		b.WriteString(boldFallbackRe.ReplaceAllString(html[last:loc[0]], "<b>$1</b>"))
+		b.WriteString(html[loc[0]:loc[1]])
+		last = loc[1]
+	}
+	b.WriteString(boldFallbackRe.ReplaceAllString(html[last:], "<b>$1</b>"))
+	return b.String()
+}
+
+// richPreserveRe matches regions whose literal newlines are significant in the rich HTML dialect
+// and MUST NOT be converted to <br>: <pre> blocks (whitespace-preserving code/terminal) and
+// <tg-math-block> (math source). Non-greedy so adjacent regions are matched separately.
+var richPreserveRe = regexp.MustCompile(`(?s)<pre>.*?</pre>|<tg-math-block>.*?</tg-math-block>`)
+
+// RichifyNewlines converts literal newlines to <br> for the Bot API 10.1 rich_message.html dialect,
+// where html has REAL HTML whitespace semantics — a bare "\n" collapses to a single space (unlike
+// legacy parse_mode=HTML, where "\n" is a line break). Newlines INSIDE <pre> and <tg-math-block>
+// regions are preserved verbatim. Idempotent: a second pass finds no convertible "\n" (all
+// remaining newlines live inside preserved regions), so re-feeding already-converted html is a
+// no-op. Apply ONLY to the rich html payload, never to the legacy HTML fallback (G3).
+func RichifyNewlines(html string) string {
+	if strings.Contains(html, "\n") {
+		var b strings.Builder
+		last := 0
+		for _, loc := range richPreserveRe.FindAllStringIndex(html, -1) {
+			b.WriteString(strings.ReplaceAll(html[last:loc[0]], "\n", "<br>"))
+			b.WriteString(html[loc[0]:loc[1]])
+			last = loc[1]
+		}
+		b.WriteString(strings.ReplaceAll(html[last:], "\n", "<br>"))
+		html = b.String()
+	}
+	return stripBrAroundDetails(html)
+}
+
+// stripBrAroundDetails removes the <br> that is redundant next to a block-level boundary: a <br>
+// immediately BEFORE an opening <details, immediately AFTER a closing </details>, immediately AFTER a
+// </summary>, or immediately AFTER an <hr/> (a self-breaking rule needs no following line break — the
+// mailbox separator relies on this so the body sits directly under the rule). A <br> immediately BEFORE
+// a closing </details> is KEPT. <details>/<summary> tags inside <pre>/<tg-math-block> regions are
+// HTML-escaped (&lt;details&gt;), so these real-tag replacements never touch them. Idempotent (a second
+// pass finds no such adjacency). The replacements are order-independent: a <br> between adjacent details
+// (</details><br><details>) collapses either way.
+func stripBrAroundDetails(html string) string {
+	if !strings.Contains(html, "<br>") {
+		return html
+	}
+	html = strings.ReplaceAll(html, "<br><details", "<details")
+	html = strings.ReplaceAll(html, "</details><br>", "</details>")
+	html = strings.ReplaceAll(html, "</summary><br>", "</summary>")
+	html = strings.ReplaceAll(html, "<hr/><br>", "<hr/>")
+	return html
+}
+
+// notificationLeadEmojis are the leading emojis of buildHeader-based notifications (BuildNotificationText
+// statusLine, BuildPermissionText, BuildQuestionText). CollapseSessionMeta only collapses a message whose
+// FIRST line starts with one of these — this excludes any message that happens to carry a "📂 " line,
+// preventing false positives. Cron (🔔 / 📨) and SessionSend (💬 / 📨) now flow through BuildNotificationText
+// with a neutral header, so their lead emojis are included here to collapse their metadata like other
+// notifications. Adding a new notification event with a new leading emoji requires adding it here
+// (intentionally default-off for unknown leading tokens).
+// f29 G: the BARE pen (U+1F58A, no VS16) is added so a SessionSend visible line led by the VS16-suffixed
+// pen (🖊️ = U+1F58A U+FE0F) still matches via strings.HasPrefix (the bare rune is a prefix of both forms).
+var notificationLeadEmojis = []string{"🟢", "🔴", "💬", "🔧", "✅", "🔐", "❓", "🔔", "📨", "\U0001F58A"}
+
+// locationLeads are the metadata lines buildHeader emits at line 1+ (order-preserving), before the
+// optional 📊 Context line. They are the run-CONTINUATION set; the collapse ANCHOR (line 1) is NARROWER
+// — see CollapseSessionMetaWithID.
+var locationLeads = []string{"📂 ", "👤 ", "🏷 ", "📟 ", "🖥 "}
+
+func isLocationLine(s string) bool {
+	for _, e := range locationLeads {
+		if strings.HasPrefix(s, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// CollapseSessionMeta wraps the header metadata block (👤 sender, 📂 CWD, 📟 tmux, 🖥 CLI command, 📊
+// Context) of a rich notification in a default-collapsed <details> block, to save vertical space.
+// Rich-path only: it is applied in the rich sender wrappers and never to the legacy fallback. It anchors
+// to HEADER POSITION — the block is wrapped ONLY when line 0 starts with a notification lead emoji AND
+// line 1 starts with "📂 " OR "👤 " (f29: a folder or sender line — the two lines buildHeader emits first;
+// a 📟 pane/🖥 CLI line at index 1 is NOT an anchor so a non-header notification like
+// "✅ Injected …\n📟 …" is never collapsed). The <summary> is a COMPACT context status
+// (📋 C:<pct> (<used>/<total>)) extracted from the 📊 Context line — falling back to the fixed 📋 Session
+// label when no context line is present. ALL metadata (the 👤/📂/📟/🖥 location lines first, then the full
+// 📊 Context line) lives INSIDE the block; only the body stays OUTSIDE. No-op for anything else
+// (stream/tool bodies, <pre> captures, pane-lead notifications), so a location-emoji lookalike deeper in
+// the body is never matched.
+func CollapseSessionMeta(text string) string {
+	return CollapseSessionMetaWithID(text, 0)
+}
+
+// CollapseSessionMetaWithID is CollapseSessionMeta with an optional tg-cli message ID. When msgID > 0 a
+// "🆔 #<msgID>" line is placed first inside the <details> block (before the location + context lines);
+// msgID == 0 omits it (the plain CollapseSessionMeta behaviour used by the logger call sites).
+func CollapseSessionMetaWithID(text string, msgID int64) string {
+	lines := strings.Split(text, "\n")
+	// ANCHOR (f29): the metadata run must START (line 1) with a folder (📂) or sender (👤) line — NOT a
+	// pane/CLI line. buildHeader always emits 📂 or 👤 first for a real notification header; restricting
+	// the anchor keeps a non-header notification that merely starts with a 📟 pane line (e.g.
+	// cmd/bot_helpers.go:544 "✅ Injected …\n📟 …") from being collapsed.
+	if len(lines) < 2 || (!strings.HasPrefix(lines[1], "📂 ") && !strings.HasPrefix(lines[1], "👤 ")) {
+		return text
+	}
+	lead := false
+	for _, e := range notificationLeadEmojis {
+		if strings.HasPrefix(lines[0], e) {
+			lead = true
+			break
+		}
+	}
+	if !lead {
+		return text
+	}
+	// Contiguous metadata run from line 1: the location lines (📂/👤/📟/🖥 in buildHeader emission order),
+	// then an optional 📊 Context line.
+	metaEnd := 1
+	for metaEnd < len(lines) && isLocationLine(lines[metaEnd]) {
+		metaEnd++
+	}
+	locationLines := lines[1:metaEnd] // 📂/👤/📟/🖥 in emission order
+	end := metaEnd
+	contextLine := ""
+	if end < len(lines) && strings.HasPrefix(lines[end], "📊 Context: ") {
+		contextLine = lines[end]
+		end++
+	}
+	// Summary = compact context status (📋 C:<pct> (<used>/<total>)) when the 📊 Context line is present,
+	// else the fixed 📋 Session label. The detail block holds the 📂/📟/🖥 location lines first, then the
+	// full 📊 Context line last (if any), matching the original unfolded header order. Only the body
+	// (lines[end:]) stays outside.
+	summary := "📋 Session"
+	detailLines := make([]string, 0, len(locationLines)+2)
+	if contextLine != "" {
+		summary = "📋 C:" + strings.TrimPrefix(contextLine, "📊 Context: ")
+	}
+	// 🆔 message ID first (Feature 2), then the 📂/📟/🖥 location lines, then the 📊 Context line.
+	if msgID > 0 {
+		detailLines = append(detailLines, "🆔 #"+strconv.FormatInt(msgID, 10))
+	}
+	detailLines = append(detailLines, locationLines...)
+	if contextLine != "" {
+		detailLines = append(detailLines, contextLine)
+	}
+	block := "<details><summary>" + summary + "</summary>\n" + strings.Join(detailLines, "\n") + "\n</details>"
+	body := lines[end:]
+	// The collapsed <details> header replaces the old unfolded header, so the blank line that used to
+	// separate the header from the body is now dead vertical space — drop a single leading blank line.
+	if len(body) > 0 && body[0] == "" {
+		body = body[1:]
+	}
+	out := append([]string{lines[0], block}, body...)
+	return strings.Join(out, "\n")
 }

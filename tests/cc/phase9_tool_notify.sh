@@ -24,7 +24,7 @@ LOG_BEFORE_TOOL=$(wc -l < "$LOG_FILE")
 
 pane_log "[tool_notify] BEFORE tool notify prompt"
 # Inject a prompt that causes Claude to run a Bash command
-inject_prompt "Run this exact bash command and report the output: echo tool_notify_test_ok"
+inject_prompt "Use the Bash tool to run this exact command and report the output: echo tool_notify_test_ok"
 pane_log "[tool_notify] AFTER sending tool notify prompt"
 
 # Wait for ToolUse notification in bot log
@@ -48,12 +48,31 @@ pane_log "[tool_notify] AFTER tool notification check"
 if [ "$TOOL_NOTIFY_FOUND" = true ]; then
   pass "ToolUse notification sent for Bash tool call"
 
-  # Verify the full TG message contains "🔧 Bash" header (in DEBUG full_text log)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
-  if echo "$NEW_LOGS" | grep -A2 "TG message sent \[ToolUse\] full_text" | grep "🔧.*Bash" > /dev/null 2>&1; then
+
+  # Verify the full TG message contains "🔧 Bash" header.
+  # The full_text is multi-line; awk extracts all lines after the marker until the next timestamp line.
+  TOOL_FULL_TEXT_REGION=$(printf '%s\n' "$NEW_LOGS" | awk '
+    /TG message sent \[ToolUse\] full_text:/ { capture=1; next }
+    capture && /^\[[0-9]{4}-/ { capture=0 }
+    capture { print }
+  ')
+  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "🔧.*Bash" 2>/dev/null; then
     pass "ToolUse TG message contains '🔧 Bash' header"
   else
     fail "ToolUse TG message does not contain '🔧 Bash' header"
+  fi
+
+  # TC8: ToolUse body uses collapsed <details> (no 'open' attribute) — rich format
+  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "<details>" 2>/dev/null; then
+    pass "TC8: ToolUse notification uses <details> (collapsed rich details block)"
+  else
+    fail "TC8: ToolUse notification missing <details> element"
+  fi
+  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "<details open" 2>/dev/null; then
+    fail "TC8: ToolUse <details> has 'open' attribute — expected collapsed (no 'open')"
+  else
+    pass "TC8: ToolUse <details> is collapsed (no 'open' attribute)"
   fi
 else
   fail "ToolUse notification not received within ${TIMEOUT}s"
@@ -65,22 +84,29 @@ ELAPSED=0
 STOP13_FOUND=false
 while [ $ELAPSED -lt $TIMEOUT ]; do
   if [ "$(wc -l < "$LOG_FILE")" -gt "$LOG_BEFORE_TOOL" ]; then
-    if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep "Stream relabel ✅:" > /dev/null 2>&1; then
+    # Accept EITHER the StreamFlush relabel path (Stream relabel ✅:) OR the dump-at-Stop
+    # delivery path (: Stop [ / Stop terminal: outcome=direct_send). They are mutually
+    # exclusive per turn — a dump-at-Stop turn never emits the relabel line.
+    if tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE" | grep -E "Stream relabel ✅:|: Stop \[|Stop terminal: outcome=direct_send" > /dev/null 2>&1; then
       STOP13_FOUND=true
       break
     fi
   fi
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  echo "  Waiting for Stream relabel ✅... ${ELAPSED}s / ${TIMEOUT}s"
+  echo "  Waiting for Stream relabel ✅ (or Stop-delivery)... ${ELAPSED}s / ${TIMEOUT}s"
 done
 
 if [ "$STOP13_FOUND" = true ]; then
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_TOOL + 1))" "$LOG_FILE")
 
-  # Extract line numbers for ToolUse notification and Stream relabel ✅
+  # Extract line numbers for ToolUse notification and the finalize anchor.
+  # FINALIZE line = relabel line if present, ELSE the Stop-delivery marker line.
   TOOL_LINE=$(awk '/Notification sent.*ToolUse/{print NR; exit}' <<< "$NEW_LOGS")
   RELABEL_LINE=$(awk '/Stream relabel ✅:/{print NR; exit}' <<< "$NEW_LOGS")
+  if [ -z "$RELABEL_LINE" ]; then
+    RELABEL_LINE=$(awk '/: Stop \[|Stop terminal: outcome=direct_send/{print NR; exit}' <<< "$NEW_LOGS")
+  fi
 
   # Verify both lines exist and are different (independence)
   if [ -n "$TOOL_LINE" ] && [ -n "$RELABEL_LINE" ] && [ "$TOOL_LINE" != "$RELABEL_LINE" ]; then
@@ -109,7 +135,7 @@ if [ "$STOP13_FOUND" = true ]; then
     pass "ToolUse notification does not show '✅ Task Completed' header"
   fi
 else
-  fail "Stream relabel ✅ not received within ${TIMEOUT}s for ordering verification"
+  fail "Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s for ordering verification"
 fi
 
 # Wait for CC to finish the turn

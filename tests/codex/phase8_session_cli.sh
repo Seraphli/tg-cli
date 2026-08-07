@@ -53,7 +53,7 @@ fi
 # Test session send — inject and verify in bot log (API-based, works for both CC and Codex)
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[session_cli] BEFORE session send"
-./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "e2e_session_send_test_marker" > /dev/null 2>&1 || true
+./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --text "Reply with exactly: e2e_session_send_test_marker. Do not run any tools or commands." > /dev/null 2>&1 || true
 sleep 2
 pane_log "[session_cli] AFTER session send"
 set +eo pipefail
@@ -187,3 +187,87 @@ fi
 
 pane_log "[session_log] AFTER transcript tests"
 echo "  Session log tests complete."
+
+echo ""
+echo "--- Codex slash-command inject confirmation (/compact) test [f29 C] ---"
+# f29 C: a codex LOCAL slash-command (e.g. /compact) emits NO UserPromptSubmit and the composer is already
+# cleared by the time a post-hoc CapturePane runs, so the OLD confirmation path yielded a FALSE
+# "inject not confirmed" even though the command executed. The C transaction OWNS the Enter (clear+paste
+# WITHOUT Enter -> compose-confirm under the inject lock -> submit) and then confirms via the codex Working
+# indicator (busy pane-title spinner). This case sends a REAL /compact via `session send --no-header` and
+# asserts the bot log records the inject as CONFIRMED (never "not confirmed"), and that the send carries NO
+# delivery-status annotation (delivery_status="" -> DeliveryStatusTag renders nothing).
+#
+# Placed LAST in the phase on purpose: after Enter, /compact drives the codex session busy for a while
+# (that busy IS the Working confirm), so nothing must run after it — later cases would race the compact.
+#
+# --no-header is REQUIRED: the injected text must be the raw "/compact" (leading "/") for isCodexSlash to
+# fire the C transaction; the default header ("--- 💬 Message from agent [..] ---\n/compact") would put
+# "---" first and defeat the leading-"/" scope check, routing the send through the normal UPS path instead.
+
+# Ensure the session is IDLE before we send — the Working-confirm poll would otherwise latch onto a
+# pre-existing busy state and confirm falsely. The prior session-log tests are read-only, so this settles fast.
+wait_for_idle "$TIMEOUT" "$E2E_PANE"
+SLASH_LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+pane_log "[codex_slash] BEFORE /compact send"
+# session send blocks server-side through phase1+phase2 (SafeInjectText is synchronous in the handler), so by
+# the time this returns the bot log already holds the confirm line + the "Session send via API:" line.
+SLASH_SEND_OUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name e2e-cli --port "$TEST_PORT" --from e2e-test --no-header --text "/compact" 2>&1) || true
+echo "  DEBUG: SLASH_SEND_OUT (${#SLASH_SEND_OUT} chars): $SLASH_SEND_OUT"
+sleep 2
+pane_log "[codex_slash] AFTER /compact send"
+
+SLASH_SLICE=$(tail -n +$((SLASH_LOG_BEFORE+1)) "$LOG_FILE" 2>/dev/null || true)
+
+# (a) The inject is CONFIRMED: the C phase2 logged "codex slash inject confirmed (Working)".
+set +eo pipefail
+echo "$SLASH_SLICE" | grep -q "codex slash inject confirmed"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -eq 0 ]; then
+  pass "codex slash: /compact inject confirmed (Working) in bot log"
+else
+  fail "codex slash: /compact inject NOT confirmed — expected 'codex slash inject confirmed' in log slice"
+fi
+
+# (a') And NOT a false-negative: neither the compose-veto nor the Working-timeout 'not confirmed' line appears.
+set +eo pipefail
+echo "$SLASH_SLICE" | grep -qE "codex slash inject not confirmed|codex slash compose not confirmed"
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -ne 0 ]; then
+  pass "codex slash: no 'not confirmed' inject log for /compact"
+else
+  fail "codex slash: found a 'not confirmed' inject log for /compact (false negative)"
+fi
+
+# (b) The TG notification for this send carries NO delivery-status annotation: the API log line for THIS
+# send (matched by injectText="/compact") records delivery_status="" — the exact value fed to
+# DeliveryStatusTag, which renders nothing for "".
+SLASH_API_LINE=$(echo "$SLASH_SLICE" | grep "Session send via API:" | grep 'injectText="/compact"' || true)
+echo "  DEBUG: SLASH_API_LINE: $SLASH_API_LINE"
+set +eo pipefail
+echo "$SLASH_API_LINE" | grep -q 'delivery_status=""'
+_ps=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps[1]}" -eq 0 ]; then
+  pass "codex slash: /compact send carries NO delivery-status annotation (delivery_status=\"\")"
+else
+  fail "codex slash: /compact send has a delivery-status annotation (expected delivery_status=\"\"): $SLASH_API_LINE"
+fi
+
+# (b') CLI side of the same guarantee: a confirmed send prints the plain "Message sent" with no delivery Warning.
+set +eo pipefail
+echo "$SLASH_SEND_OUT" | grep -q "Message sent to e2e-cli"
+_ps_msg=("${PIPESTATUS[@]}")
+echo "$SLASH_SEND_OUT" | grep -qiE "delivery unconfirmed|submit failed|Warning:"
+_ps_warn=("${PIPESTATUS[@]}")
+set -eo pipefail
+if [ "${_ps_msg[1]}" -eq 0 ] && [ "${_ps_warn[1]}" -ne 0 ]; then
+  pass "codex slash: CLI reports plain 'Message sent' with no delivery warning"
+else
+  fail "codex slash: CLI output missing plain send or shows a delivery warning: $SLASH_SEND_OUT"
+fi
+
+pane_log "[codex_slash] AFTER assertions"
+echo "  Codex slash-command inject confirmation test complete."

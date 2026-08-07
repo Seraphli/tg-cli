@@ -88,6 +88,10 @@ func RebuildAskMarkup(questions []stores.QuestionMeta) *tele.ReplyMarkup {
 		}
 	}
 	rows = append(rows, markup.Row(markup.Data("💬 Chat about this", "tool", "AskUserQuestion|chat")))
+	// Fix 18: preserve the ❌ Cancel button after a toggle. The initial keyboard (cmd/hooks/pending.go)
+	// appends Cancel as the last row; the rebuilt keyboard must too, else Cancel disappears after any
+	// option toggle.
+	rows = append(rows, markup.Row(markup.Data("❌ Cancel", "tool", "AskUserQuestion|cancel")))
 
 	markup.Inline(rows...)
 	return markup

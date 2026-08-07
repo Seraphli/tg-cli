@@ -26,7 +26,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		// Pre-check session liveness before processing the response
 		if snapOk && snap.TmuxTarget != "" {
 			if !helpers.CheckSessionAlive(snap.TmuxTarget, func(t string) {
-				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
+				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
 			}) {
 				http.Error(w, "session disconnected", 410)
 				return
@@ -85,7 +85,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 					logger.Info(fmt.Sprintf("AskUserQuestion option toggled via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
 					newMarkup := helpers.RebuildAskMarkup(questions)
 					editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
-					helpers.RetryFreezeEdit(bot, editMsg, snap.MsgText, newMarkup)
+					helpers.RetryFreezeEditAuto(bot, editMsg, snap.Rich, snap.MsgText, newMarkup)
 				} else {
 					// Select option — use store method for atomic update
 					questions, err := bs.PendingWait.SelectQuestionOption(snap.UUID, qIdx, optIdx)
@@ -108,7 +108,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 						logger.Info(fmt.Sprintf("AskUserQuestion option selected via API: msg_id=%d q=%d opt=%d label=%s", msgID, qIdx, optIdx, snap.Questions[qIdx].OptionLabels[optIdx]))
 						newMarkup := helpers.RebuildAskMarkup(questions)
 						editMsg := &tele.Message{ID: msgID, Chat: &tele.Chat{ID: snap.ChatID}}
-						helpers.RetryFreezeEdit(bot, editMsg, snap.MsgText, newMarkup)
+						helpers.RetryFreezeEditAuto(bot, editMsg, snap.Rich, snap.MsgText, newMarkup)
 					}
 				}
 			}
@@ -154,7 +154,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				return
 			}
 			if !helpers.CheckSessionAlive(target, func(t string) {
-				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, t)
+				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
 			}) {
 				http.Error(w, "session disconnected", 410)
 				return
@@ -202,9 +202,10 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		})
 		if won {
 			capturedMarkup := frozenMarkup
+			capturedRich := pwSnap.Rich
 			bs.PendingMsgStore.EditOrDefer(capturedUUID, func(eID int, eChatID int64, editMsgText string, topicID int) {
 				editMsg := &tele.Message{ID: eID, Chat: &tele.Chat{ID: eChatID}}
-				_, err := helpers.RetryFreezeEdit(bot, editMsg, editMsgText, capturedMarkup)
+				_, err := helpers.RetryFreezeEditAuto(bot, editMsg, capturedRich, editMsgText, capturedMarkup)
 				if err != nil {
 					logger.Error(fmt.Sprintf("group text API: AskQ EDIT failed msg_id=%d err=%v", eID, err))
 				} else {
