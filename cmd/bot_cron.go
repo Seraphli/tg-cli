@@ -183,6 +183,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		StopCooldown:     bs.StopCooldown,
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
+		HookRunning:      bs.HookRunning,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,

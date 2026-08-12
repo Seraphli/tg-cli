@@ -261,6 +261,127 @@ func ParseCodexTranscript(f *os.File, noTools bool, filteredTools map[string]boo
 	return entries
 }
 
+// ParsePiTranscript parses pi v3 JSONL transcript format.
+// pi v3 format: a header line {"type":"session",...} followed by
+// {"type":"message","message":{"role":"user/assistant/toolResult","content":...,"stopReason":"..."}} lines.
+// user content is EITHER a plain string OR an array of {"type":"text","text":"..."} blocks.
+// assistant content is an array of typed blocks: "text" (field text), "thinking" (skipped),
+// and "toolCall" (fields name + arguments). toolResult roles are skipped (mirrors codex skipping tool results).
+// Assistant stopReason is one of {stop, length, toolUse, error, aborted}; a TERMINAL stopReason is any of
+// {stop, length, error, aborted} (NOT toolUse). The parser emits all message entries regardless of stopReason;
+// latest-assistant-text extraction for the delivery path lives elsewhere (delivery is live streaming).
+func ParsePiTranscript(f *os.File, noTools bool, filteredTools map[string]bool, formatToolDetail func(string, map[string]interface{}) string) []TranscriptLogEntry {
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+	var entries []TranscriptLogEntry
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var raw struct {
+			Type      string          `json:"type"`
+			Timestamp string          `json:"timestamp"`
+			Message   json.RawMessage `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &raw) != nil {
+			continue
+		}
+		// Skip the session header and any non-message line.
+		if raw.Type != "message" {
+			continue
+		}
+		var msg struct {
+			Role       string          `json:"role"`
+			Content    json.RawMessage `json:"content"`
+			StopReason string          `json:"stopReason"`
+		}
+		if json.Unmarshal(raw.Message, &msg) != nil {
+			continue
+		}
+		if msg.Role == "user" {
+			// content is EITHER a plain string OR an array of {"type":"text","text":...} blocks.
+			var contentStr string
+			if json.Unmarshal(msg.Content, &contentStr) == nil {
+				if contentStr != "" {
+					entries = append(entries, TranscriptLogEntry{Type: "user", Timestamp: raw.Timestamp, Text: contentStr})
+				}
+				continue
+			}
+			var contentArr []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(msg.Content, &contentArr) != nil {
+				continue
+			}
+			var parts []string
+			for _, c := range contentArr {
+				if c.Type == "text" && c.Text != "" {
+					parts = append(parts, c.Text)
+				}
+			}
+			if len(parts) > 0 {
+				entries = append(entries, TranscriptLogEntry{Type: "user", Timestamp: raw.Timestamp, Text: strings.Join(parts, "\n")})
+			}
+		} else if msg.Role == "assistant" {
+			var contentBlocks []struct {
+				Type      string          `json:"type"`
+				Text      string          `json:"text"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			if json.Unmarshal(msg.Content, &contentBlocks) != nil {
+				continue
+			}
+			var textParts []string
+			toolName := ""
+			toolDetail := ""
+			for _, b := range contentBlocks {
+				switch b.Type {
+				case "text":
+					if b.Text != "" {
+						textParts = append(textParts, b.Text)
+					}
+				case "thinking":
+					// Skip reasoning blocks entirely.
+				case "toolCall":
+					// Use the first toolCall for the tool/tool_detail fields. Item B: call the formatToolDetail
+					// callback the way the CC and codex parsers do (this parser previously took the callback but
+					// NEVER invoked it, hardcoding the raw arguments JSON). Unmarshal the arguments OBJECT and
+					// pass it with the tool name normalised to the canonical CC name (NormalizePiToolName), so
+					// the CC-keyed formatters render a clean detail (e.g. the bash command) instead of raw JSON.
+					// entry.Tool keeps pi's ACTUAL lowercase name (O2 — the session-log label reflects what pi
+					// ran; --no-tools filtering, keyed on CC names, is unchanged).
+					if toolName == "" {
+						toolName = b.Name
+						var argMap map[string]interface{}
+						if json.Unmarshal(b.Arguments, &argMap) == nil {
+							toolDetail = formatToolDetail(NormalizePiToolName(b.Name), argMap)
+						}
+					}
+				}
+			}
+			if len(textParts) == 0 && toolName == "" {
+				continue
+			}
+			// When no_tools=true: skip an entry that is only a filtered tool call (no text).
+			if noTools && toolName != "" && filteredTools[toolName] && len(textParts) == 0 {
+				continue
+			}
+			entries = append(entries, TranscriptLogEntry{
+				Type:       "assistant",
+				Timestamp:  raw.Timestamp,
+				Text:       strings.Join(textParts, "\n"),
+				Tool:       toolName,
+				ToolDetail: toolDetail,
+			})
+		}
+		// role == "toolResult" (and any other role) is skipped, mirroring codex which skips tool results.
+	}
+	return entries
+}
+
 // TranscriptRound represents one round of interaction (contiguous user messages + contiguous assistant messages).
 type TranscriptRound struct {
 	UserTexts      []string
@@ -284,13 +405,15 @@ func ReadLastNRounds(transcriptPath string, n int, backend string) ([]Transcript
 	var entries []TranscriptLogEntry
 	if backend == "codex" {
 		entries = ParseCodexTranscript(f, true, noToolsFilter, noopDetail)
+	} else if backend == "pi" {
+		entries = ParsePiTranscript(f, true, noToolsFilter, noopDetail)
 	} else {
 		entries = ParseCCTranscript(f, true, noToolsFilter, noopDetail)
 	}
 	var rounds []TranscriptRound
 	var current TranscriptRound
 	lastRole := ""
-	ccBackend := backend != "codex"
+	ccBackend := backend != "codex" && backend != "pi"
 	for _, e := range entries {
 		if e.Text == "" {
 			continue
@@ -301,7 +424,7 @@ func ReadLastNRounds(transcriptPath string, n int, backend string) ([]Transcript
 		role := e.Type
 		// A CC user entry opens a new round only if it is a genuine human turn (origin.kind=="human"); a
 		// non-human CC user entry (nudge, interrupt) is still appended to the current round, never dropped.
-		// codex (no origin field) is unchanged: any user entry opens a round.
+		// codex and pi (no origin field) are unchanged: any user entry opens a round.
 		userOpensRound := role == "user" && (!ccBackend || e.OriginKind == "human")
 		switch {
 		case role == "user" && userOpensRound && lastRole != "user":
@@ -346,6 +469,8 @@ func ReadLastNLines(transcriptPath string, n int, backend string) ([]TranscriptL
 	var entries []TranscriptLogEntry
 	if backend == "codex" {
 		entries = ParseCodexTranscript(f, true, noToolsFilter, noopDetail)
+	} else if backend == "pi" {
+		entries = ParsePiTranscript(f, true, noToolsFilter, noopDetail)
 	} else {
 		entries = ParseCCTranscript(f, true, noToolsFilter, noopDetail)
 	}
@@ -371,6 +496,13 @@ func extractToolParam(name string, input map[string]interface{}) string {
 	case "Read", "Edit", "Write":
 		if fp, ok := input["file_path"].(string); ok {
 			return fp
+		}
+		if p, ok := input["path"].(string); ok { // pi's field is `path`
+			return p
+		}
+	case "ls": // pi (lowercase, no CC analogue): the listed directory path
+		if p, ok := input["path"].(string); ok {
+			return p
 		}
 	case "Agent":
 		if desc, ok := input["description"].(string); ok {
@@ -418,6 +550,10 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 		entries = ParseCodexTranscript(f, false, nil, func(name string, input map[string]interface{}) string {
 			return extractToolParam(name, input)
 		})
+	} else if backend == "pi" {
+		entries = ParsePiTranscript(f, false, nil, func(name string, input map[string]interface{}) string {
+			return extractToolParam(name, input)
+		})
 	} else {
 		entries = ParseCCTranscript(f, false, nil, func(name string, input map[string]interface{}) string {
 			return extractToolParam(name, input)
@@ -449,11 +585,11 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 		var rnds []ctxRound
 		var current ctxRound
 		lastRole := ""
-		ccBackend := backend != "codex"
+		ccBackend := backend != "codex" && backend != "pi"
 		for _, e := range filtered {
 			role := e.Type
 			// A user entry opens a new round only if it is a genuine human turn. On the CC path that
-			// means origin.kind=="human"; on codex (no origin field) any user entry opens a round, as before.
+			// means origin.kind=="human"; on codex and pi (no origin field) any user entry opens a round, as before.
 			if role == "user" && lastRole == "assistant" && (!ccBackend || e.OriginKind == "human") {
 				if len(current.entries) > 0 {
 					rnds = append(rnds, current)

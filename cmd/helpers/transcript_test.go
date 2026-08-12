@@ -3,6 +3,7 @@ package helpers
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -148,10 +149,10 @@ type nhCase struct {
 
 func nonHumanCases() []nhCase {
 	return []nhCase{
-		{"interrupt-array", interruptTxt, ccUserArrNoOrigin(interruptTxt)},                                              // site :92
+		{"interrupt-array", interruptTxt, ccUserArrNoOrigin(interruptTxt)},                                               // site :92
 		{"nonhuman-origin-string", "system routed notice", ccUserOriginStr("task-notification", "system routed notice")}, // site :55
-		{"ismeta-string", "meta please continue str", ccMetaStr("meta please continue str")},                            // site :55
-		{"ismeta-array", "meta please continue arr", ccMetaArr("meta please continue arr")},                             // site :92
+		{"ismeta-string", "meta please continue str", ccMetaStr("meta please continue str")},                             // site :55
+		{"ismeta-array", "meta please continue arr", ccMetaArr("meta please continue arr")},                              // site :92
 		{"self-recovery-1", selfRecov1, ccMetaArr(selfRecov1)},
 		{"self-recovery-2", selfRecov2, ccMetaArr(selfRecov2)},
 		{"self-recovery-3", selfRecov3, ccMetaArr(selfRecov3)},
@@ -330,5 +331,81 @@ func TestCodexRoundsUnchanged(t *testing.T) {
 		strings.Join(rounds[0].UserTexts, "|") != "cx-user-2" ||
 		strings.Join(rounds[0].AssistantTexts, "|") != "cx-asst-2" {
 		t.Fatalf("codex ReadLastNRounds changed: %+v", rounds)
+	}
+}
+
+// TC-transcript: ParsePiTranscript on a pi v3 JSONL fixture must emit the final assistant
+// text ("FINAL ANSWER") and EXCLUDE the thinking block content ("SECRET").
+func TestParsePiTranscript(t *testing.T) {
+	// pi v3 entry-wrapper lines: session header, user message, assistant message whose
+	// content is [thinking(SECRET), text(FINAL ANSWER)] with stopReason "stop".
+	fixture := `{"type":"session","version":3,"id":"sess-uuid","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/x"}
+{"type":"message","id":"u1","parentId":null,"timestamp":"2026-08-08T00:00:01.000Z","message":{"role":"user","content":"hello"}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"SECRET"},{"type":"text","text":"FINAL ANSWER"}],"provider":"newapi","model":"deepseek-v4-flash-free","stopReason":"stop"}}
+`
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	noop := func(string, map[string]interface{}) string { return "" }
+	entries := ParsePiTranscript(f, false, nil, noop)
+	// Find the LAST assistant entry.
+	var last *TranscriptLogEntry
+	for i := range entries {
+		if entries[i].Type == "assistant" {
+			last = &entries[i]
+		}
+	}
+	if last == nil {
+		t.Fatalf("no assistant entry parsed from fixture: %+v", entries)
+	}
+	if last.Text != "FINAL ANSWER" {
+		t.Fatalf("expected assistant Text %q, got %q", "FINAL ANSWER", last.Text)
+	}
+	if strings.Contains(last.Text, "SECRET") {
+		t.Fatalf("thinking content must be excluded, but Text contains SECRET: %q", last.Text)
+	}
+}
+
+// TestParsePiTranscriptToolDetail covers Round-2 Item B: ParsePiTranscript must now CALL the formatToolDetail
+// callback (it previously took it but never invoked it, hardcoding the raw arguments JSON). With extractToolParam
+// as the formatter, a pi bash toolCall renders the command string, and entry.Tool keeps pi's lowercase name (O2).
+// RED on the pre-fix build (ToolDetail is the raw `{"command":...}` JSON).
+func TestParsePiTranscriptToolDetail(t *testing.T) {
+	fixture := `{"type":"session","version":3,"id":"sess","timestamp":"2026-08-08T00:00:00.000Z","cwd":"/x"}
+{"type":"message","id":"a1","timestamp":"2026-08-08T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"echo hello_world"}}],"stopReason":"toolUse"}}
+`
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	formatToolDetail := func(name string, input map[string]interface{}) string { return extractToolParam(name, input) }
+	entries := ParsePiTranscript(f, false, nil, formatToolDetail)
+	var tool *TranscriptLogEntry
+	for i := range entries {
+		if entries[i].Tool != "" {
+			tool = &entries[i]
+			break
+		}
+	}
+	if tool == nil {
+		t.Fatalf("no tool entry parsed from the pi transcript: %+v", entries)
+	}
+	if tool.Tool != "bash" {
+		t.Errorf("entry.Tool = %q, want pi lowercase %q (O2)", tool.Tool, "bash")
+	}
+	// The detail must be the rendered command (via formatToolDetail + NormalizePiToolName), NOT the raw args JSON.
+	if tool.ToolDetail != "echo hello_world" {
+		t.Errorf("entry.ToolDetail = %q, want the command %q (pre-fix dumps the raw arguments JSON)", tool.ToolDetail, "echo hello_world")
 	}
 }

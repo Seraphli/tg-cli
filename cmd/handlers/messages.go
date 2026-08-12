@@ -227,6 +227,7 @@ func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, sub
 		StopCooldown:     bs.StopCooldown,
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
+		HookRunning:      bs.HookRunning,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,
@@ -240,10 +241,40 @@ func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, sub
 }
 
 // processUserInput handles shared logic for OnText and OnVoice after routing.
+// stripBotMention removes a trailing @<botUsername> that Telegram appends to a slash-command's first token
+// in groups (e.g. "/reload@mybot arg" -> "/reload arg"), so the literal command reaches the pane. Non-slash
+// text and text without the suffix are returned unchanged.
+func stripBotMention(text, botUsername string) string {
+	if botUsername == "" || !strings.HasPrefix(text, "/") {
+		return text
+	}
+	suffix := "@" + botUsername
+	if i := strings.IndexAny(text, " \n\t"); i >= 0 {
+		return strings.TrimSuffix(text[:i], suffix) + text[i:]
+	}
+	return strings.TrimSuffix(text, suffix)
+}
+
+// isRestartCommand reports whether text is the /restart command or one of its aliases (/rs, /r), with or
+// without the @botname mention Telegram appends to slash commands in groups. It is the single source of
+// truth for which slash commands the bot intercepts as a restart. Round-4 Item 6 renamed the old /reload
+// to /restart and un-intercepted /reload so the literal reaches the pane for the backend's own hot reload —
+// so /reload (and /reload@bot) MUST NOT match here.
+func isRestartCommand(text string) bool {
+	return text == "/restart" || strings.HasPrefix(text, "/restart@") ||
+		text == "/rs" || strings.HasPrefix(text, "/rs@") ||
+		text == "/r" || strings.HasPrefix(text, "/r@")
+}
+
 func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string, imagePath ...string) error {
 	imgPath := ""
 	if len(imagePath) > 0 {
 		imgPath = imagePath[0]
+	}
+	// Strip the @botname suffix Telegram appends to a slash-command in groups, so the literal command
+	// (e.g. /reload — now un-intercepted and owned by the backend's own hot reload) reaches the pane.
+	if bot != nil && bot.Me != nil {
+		text = stripBotMention(text, bot.Me.Username)
 	}
 	key := stores.MergeKey(c.Chat().ID)
 	if buf := bs.MergeBuffers.Get(key); buf != nil {
@@ -416,7 +447,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 				if injector.SessionExists(*targetPtr) {
 					for i := 0; i < 20; i++ {
 						time.Sleep(500 * time.Millisecond)
-						if !helpers.IsSessionRunning(tmuxStr) {
+						if !helpers.IsSessionRunning(bs.HookRunning, tmuxStr) {
 							break
 						}
 					}
@@ -629,8 +660,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 					c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
 					c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") ||
 					c.Message().Text == "/t" || strings.HasPrefix(c.Message().Text, "/t@") ||
-					c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
-					c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@")
+					isRestartCommand(c.Message().Text)
 				if isCmd {
 					_, target, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
 					if err != nil {
@@ -646,9 +676,8 @@ func RegisterMessageHandlers(bs *types.BotState) {
 						c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") {
 						return handleCaptureCommand(bs, c, target)
 					}
-					if c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
-						c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@") {
-						return handleReloadCommand(bs, c, target)
+					if isRestartCommand(c.Message().Text) {
+						return handleRestartCommand(bs, c, target)
 					}
 					return handleEscapeCommand(c, target)
 				}
@@ -678,13 +707,12 @@ func RegisterMessageHandlers(bs *types.BotState) {
 				}
 				return handleEscapeCommand(c, target)
 			}
-			if c.Message().Text == "/reload" || strings.HasPrefix(c.Message().Text, "/reload@") ||
-				c.Message().Text == "/r" || strings.HasPrefix(c.Message().Text, "/r@") {
+			if isRestartCommand(c.Message().Text) {
 				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
-				return handleReloadCommand(bs, c, target)
+				return handleRestartCommand(bs, c, target)
 			}
 		}
 		return processUserInput(bs, c, bot, c.Message().Text, false, voicePrefix)

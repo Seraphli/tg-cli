@@ -34,7 +34,7 @@ var hookBackendFlag string
 
 func init() {
 	HookCmd.Flags().IntVar(&hookPortFlag, "port", 0, "HTTP server port")
-	HookCmd.Flags().StringVar(&hookBackendFlag, "backend", "cc", "Backend CLI type (cc or codex)")
+	HookCmd.Flags().StringVar(&hookBackendFlag, "backend", "cc", "Backend CLI type (cc, codex, or pi)")
 }
 
 // hookLog appends a debug line to bot.log.

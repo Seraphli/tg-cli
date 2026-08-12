@@ -35,6 +35,7 @@ func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit .
 		StopCooldown:     bs.StopCooldown,
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
+		HookRunning:      bs.HookRunning,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,
@@ -278,6 +279,68 @@ func getUpgradeMutex(cwd string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// exitCommandForCLI returns the slash command that quits the running CLI. pi has NO /exit — it quits with
+// /quit (its built-ins are exactly compact/new/quit/reload); cc and codex (and any other/unknown) use /exit,
+// both proven working. claudeCmd is the pane's process command line as read from ps (e.g. "pi --continue",
+// "claude --resume", "codex ...").
+func exitCommandForCLI(claudeCmd string) string {
+	fields := strings.Fields(claudeCmd)
+	if len(fields) == 0 {
+		return "/exit"
+	}
+	base := fields[0]
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	if base == "pi" {
+		return "/quit"
+	}
+	return "/exit"
+}
+
+// waitForSessionExit blocks until the pane's SessionEnd is signaled on ch or timeout elapses. Returns true
+// if the session exited (safe to inject the restart command), false on timeout (the agent is still alive).
+func waitForSessionExit(ch <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// restartSequence drives the exit-and-resume: send the backend's exit command, wait for the pane's
+// SessionEnd, and ONLY if it exited inject the restart command. On timeout it ABORTS — it does NOT inject
+// the launch command (which would land as a junk prompt in the still-live agent — the production /reload
+// bug) and returns an error naming the pane. sendKeys/waitExit/inject are injected so the timeout-abort
+// (no restart inject) is unit-testable without a live pane.
+func restartSequence(target injector.TmuxTarget, tmuxTarget, exitCmd, restartCmd string,
+	sendKeys func(injector.TmuxTarget, ...string) error, waitExit func() bool, inject func(string) error) error {
+	if err := sendKeys(target, exitCmd, "Enter"); err != nil {
+		return fmt.Errorf("send %s: %w", exitCmd, err)
+	}
+	logger.Info(fmt.Sprintf("doUpgradeSession: sent %s to %s", exitCmd, tmuxTarget))
+	if !waitExit() {
+		return fmt.Errorf("session %s did not exit within 30s after %s; aborted restart, launch command NOT injected (agent still running)", tmuxTarget, exitCmd)
+	}
+	logger.Info(fmt.Sprintf("doUpgradeSession: SessionEnd received for %s, restarting command=%s", tmuxTarget, restartCmd))
+	return inject(restartCmd)
+}
+
+// backendDisplayName maps a DetectBackend result to a human label for restart status messages.
+func backendDisplayName(backend string) string {
+	switch backend {
+	case "pi":
+		return "pi"
+	case "codex":
+		return "Codex"
+	case "cc":
+		return "Claude Code"
+	default:
+		return "agent"
+	}
+}
+
 func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
@@ -326,46 +389,55 @@ func doUpgradeSession(bs *types.BotState, tmuxTarget string) error {
 		claudeCmd = re.ReplaceAllString(claudeCmd, "")
 		claudeCmd += permFlag
 	}
-	logger.Info(fmt.Sprintf("doUpgradeSession: detected command=%s permMode=%s target=%s", claudeCmd, permMode, tmuxTarget))
+	exitCmd := exitCommandForCLI(claudeCmd)
+	logger.Info(fmt.Sprintf("doUpgradeSession: detected command=%s permMode=%s exitCmd=%s target=%s", claudeCmd, permMode, exitCmd, tmuxTarget))
 	ch := make(chan struct{}, 1)
 	bs.PendingUpgradeRestart.Store(tmuxTarget, ch)
-	injector.SendKeys(target, "/exit", "Enter")
-	logger.Info(fmt.Sprintf("doUpgradeSession: sent /exit to %s", tmuxTarget))
-	select {
-	case <-ch:
-		logger.Info(fmt.Sprintf("doUpgradeSession: SessionEnd received for %s", tmuxTarget))
-	case <-time.After(30 * time.Second):
-		logger.Info(fmt.Sprintf("doUpgradeSession: SessionEnd timeout for %s, proceeding anyway", tmuxTarget))
-	}
-	bs.PendingUpgradeRestart.Delete(tmuxTarget)
-	time.Sleep(3 * time.Second)
-	logger.Info(fmt.Sprintf("doUpgradeSession: restarting CC with command=%s target=%s", claudeCmd, tmuxTarget))
-	if err := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, claudeCmd); err != nil {
-		return fmt.Errorf("inject restart command: %w", err)
+	err = restartSequence(target, tmuxTarget, exitCmd, claudeCmd,
+		injector.SendKeys,
+		func() bool {
+			exited := waitForSessionExit(ch, 30*time.Second)
+			bs.PendingUpgradeRestart.Delete(tmuxTarget)
+			if exited {
+				time.Sleep(3 * time.Second)
+			}
+			return exited
+		},
+		func(cmd string) error {
+			if e := helpers.QueuedInject(bs.SessionEvents, bs.SessionState, target, cmd); e != nil {
+				return fmt.Errorf("inject restart command: %w", e)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return err
 	}
 	bs.VersionNotified.Delete(tmuxTarget)
 	return nil
 }
 
-// handleReloadCommand handles /reload command by exiting and restarting CC in the same tmux pane.
-// Reuses doUpgradeSession since the underlying "exit and re-enter" flow is identical to the version upgrade path.
-func handleReloadCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
+// handleRestartCommand handles /restart (alias /rs, /r) by exiting and resuming the agent in the same tmux
+// pane. Reuses doUpgradeSession since the underlying "exit and re-enter" flow is identical to the version
+// upgrade path. Status strings are backend-correct — this is NOT CC-specific (pi/codex resume too).
+func handleRestartCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
 	tmuxTarget := injector.FormatTarget(target)
-	if helpers.IsSessionRunning(tmuxTarget) {
-		return c.Reply("⚠️ Session is busy. Wait for idle before reloading.")
+	if helpers.IsSessionRunning(bs.HookRunning, tmuxTarget) {
+		return c.Reply("⚠️ Session is busy. Wait for idle before restarting.")
 	}
+	name := backendDisplayName(helpers.DetectBackend(tmuxTarget))
 	paneLabel := notify.FormatPaneID(tmuxTarget)
-	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), fmt.Sprintf("🔄 Reloading CC...\n📟 %s", paneLabel), tele.ModeHTML)
+	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), fmt.Sprintf("🔄 Restarting %s session...\n📟 %s", name, paneLabel), tele.ModeHTML)
 	if err != nil {
 		return err
 	}
 	go func() {
 		if err := doUpgradeSession(bs, tmuxTarget); err != nil {
-			logger.Error(fmt.Sprintf("handleReloadCommand: doUpgradeSession failed: %v", err))
-			helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("❌ Reload failed: %s\n📟 %s", err.Error(), paneLabel), tele.ModeHTML)
+			logger.Error(fmt.Sprintf("handleRestartCommand: doUpgradeSession failed: %v", err))
+			helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("❌ Restart failed: %s\n📟 %s", err.Error(), paneLabel), tele.ModeHTML)
 			return
 		}
-		helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("✅ CC reloaded\n📟 %s", paneLabel), tele.ModeHTML)
+		helpers.RetryEdit(bs.Bot, msg, fmt.Sprintf("✅ %s session restarted\n📟 %s", name, paneLabel), tele.ModeHTML)
 	}()
 	return nil
 }

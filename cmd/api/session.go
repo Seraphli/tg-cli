@@ -39,7 +39,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			if targetFilter != "" && info.TmuxTarget != targetFilter {
 				continue
 			}
-			running := helpers.IsSessionRunning(info.TmuxTarget)
+			running := helpers.IsSessionRunning(bs.HookRunning, info.TmuxTarget)
 			if running {
 				allIdle = false
 			}
@@ -59,7 +59,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			backend := helpers.DetectBackend(targetFilter)
 			var idle bool
 			if title != "" && backend != "" {
-				idle = !helpers.IsSessionRunning(targetFilter)
+				idle = !helpers.IsSessionRunning(bs.HookRunning, targetFilter)
 			} else if title != "" {
 				idle = !helpers.TitleIsBusy("codex", title)
 			}
@@ -151,7 +151,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				Target:         info.TmuxTarget,
 				CWD:            info.CWD,
 				ProjectDir:     info.ProjectDir,
-				Running:        helpers.IsSessionRunning(info.TmuxTarget),
+				Running:        helpers.IsSessionRunning(bs.HookRunning, info.TmuxTarget),
 				TranscriptPath: info.TranscriptPath,
 			})
 		}
@@ -270,7 +270,13 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 				return detail
 			case "Write", "Read":
 				fp, _ := input["file_path"].(string)
+				if fp == "" {
+					fp, _ = input["path"].(string) // pi's field is `path`
+				}
 				return fp
+			case "ls": // pi (lowercase, no CC analogue): the listed directory path
+				p, _ := input["path"].(string)
+				return p
 			case "Glob", "Grep":
 				pat, _ := input["pattern"].(string)
 				return pat
@@ -295,6 +301,8 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			var fileEntries []helpers.TranscriptLogEntry
 			if info.Backend == "codex" {
 				fileEntries = helpers.ParseCodexTranscript(f, noTools, filteredTools, formatToolDetail)
+			} else if info.Backend == "pi" {
+				fileEntries = helpers.ParsePiTranscript(f, noTools, filteredTools, formatToolDetail)
 			} else {
 				fileEntries = helpers.ParseCCTranscript(f, noTools, filteredTools, formatToolDetail)
 			}
@@ -577,6 +585,7 @@ func buildSafeInjectParams(bs *types.BotState) helpers.SafeInjectTextParams {
 		StopCooldown:     bs.StopCooldown,
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
+		HookRunning:      bs.HookRunning,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,

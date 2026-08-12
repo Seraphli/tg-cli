@@ -190,6 +190,19 @@ func ReadContextUsage(sessionID string) (usedPct int, usedTokens int, windowSize
 	if err := json.Unmarshal(data, &ctx); err != nil {
 		return 0, 0, 0, false
 	}
+	// pi-shape context file: denominator is contextWindow - reserveTokens
+	// (distance to pi's auto-compaction), not the CC size*80/100 effective limit.
+	if backend, _ := ctx["backend"].(string); backend == "pi" {
+		tokens, _ := ctx["context_tokens"].(float64)
+		window, _ := ctx["context_window"].(float64)
+		reserve, _ := ctx["reserve_tokens"].(float64)
+		effLimit := window - reserve
+		if effLimit <= 0 {
+			return 0, 0, 0, false
+		}
+		pct := int(tokens / effLimit * 100)
+		return pct, int(tokens), int(effLimit), true
+	}
 	size, sizeOk := ctx["context_window_size"].(float64)
 	if !sizeOk {
 		return 0, 0, 0, false
@@ -781,6 +794,32 @@ func findUsagePct(s string) string {
 		return ""
 	}
 	return s[start : idx+len("% used")]
+}
+
+// NormalizePiToolName maps a pi tool name (lowercase) onto the canonical CC tool name so the downstream CC
+// rendering / knownTools / ShouldNotifyTool logic applies unchanged. It maps ONLY the six pi tools that have
+// a CC analogue; `ls` is deliberately LEFT UNCHANGED (lowercase) because pi's `ls` has no CC analogue —
+// inventing an "Ls" tool would require a new settings-menu entry AND a migration of every saved
+// toolNotifyList, and without that migration ShouldNotifyTool("Ls") returns false (the name misses the list
+// and the knownTools guard skips the "Other" fallthrough), silently silencing pi ls notifications that today
+// fire via the Other bucket. Unmapped names (incl. ls and any codex/unknown name) pass through untouched.
+func NormalizePiToolName(name string) string {
+	switch name {
+	case "bash":
+		return "Bash"
+	case "read":
+		return "Read"
+	case "write":
+		return "Write"
+	case "edit":
+		return "Edit"
+	case "grep":
+		return "Grep"
+	case "find":
+		return "Glob"
+	default:
+		return name
+	}
 }
 
 // knownTools is the set of named tool categories. Tools not in this set are classified as "Other".

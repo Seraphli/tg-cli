@@ -112,12 +112,35 @@ func CleanupPendingState(
 }
 
 // IsSessionRunning checks if a CLI session is actively running by examining the tmux pane.
-func IsSessionRunning(tmuxTarget string) bool {
+func IsSessionRunning(hookRunning *stores.HookRunningStateStore, tmuxTarget string) bool {
 	title := GetPaneTitle(tmuxTarget)
 	if title == "" {
-		return false
+		return false // dead/closed pane -> idle, BEFORE the store
 	}
-	return TitleIsBusy(DetectBackend(tmuxTarget), title)
+	backend := DetectBackend(tmuxTarget) // LIVE detection, at call time
+	return storeOrTitleBusy(hookRunning, backend, tmuxTarget, title)
+}
+
+// storeOrTitleBusy is pure and unit-testable without a live tmux pane: the store is
+// passed in, never a package var. For a pi target it consults the run-state store
+// first (return running when known); every other backend uses the title path.
+//
+// NORMATIVE (do not reorder): the pi branch is gated on THIS-TICK backend detection — either the LIVE
+// DetectBackend(target) == "pi" (the IsSessionRunning path) OR the batched detectBackend(info.Command,
+// children) snapshot computed on the same tick (the PaneState typing-tick path). Both are current-tick
+// (NOT any stored/remembered backend), and the classifier sits AFTER the title == "" guard in each caller.
+// When the pi process dies, pane_current_command is no longer "pi" -> detection returns "" -> the store is
+// bypassed -> the pane reads idle (the dead-pi self-heal holds on BOTH paths). A remembered backend would
+// keep it busy forever. The title == "" guard first means a closed/dead pane returns idle regardless of the
+// store. No timeout/reaper. No package var, no nil fallback — a required param fails loud if misused rather
+// than silently degrading pi to the title path.
+func storeOrTitleBusy(hookRunning *stores.HookRunningStateStore, backend, target, title string) bool {
+	if backend == "pi" {
+		if running, known := hookRunning.IsRunning(target); known {
+			return running
+		}
+	}
+	return TitleIsBusy(backend, title)
 }
 
 // TitleIsBusy is the single busy classifier for every pane-title decision — the live path

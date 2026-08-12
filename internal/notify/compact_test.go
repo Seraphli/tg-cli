@@ -1550,3 +1550,115 @@ func TestCompactBashCommandRuneRestoreFillCJK(t *testing.T) {
 		t.Errorf("CJK arg '中文' missing (restore-fill should prefer shorter rune-length args first): %q", got)
 	}
 }
+
+// TestBuildCompactToolLinePi covers Round-2 Item 2: after the hook-side name normalisation, a normalised pi
+// Read/Write/Edit carries pi's `path` field (not CC's `file_path`), so str() must fall back to `path`; and
+// pi's `ls` (kept lowercase, no CC analogue) must render via its own case instead of the random-map-field
+// default. Both assertions are RED on the pre-fix build (no `path` fallback -> empty info; no `ls` case ->
+// 🔧 + a random "path=..." field).
+func TestBuildCompactToolLinePi(t *testing.T) {
+	// Read with pi's `path` field: the basename must appear (str fallback file_path -> path).
+	got := BuildCompactToolLine("Read", []byte(`{"path":"/home/seraphli/proj/main.go"}`), "/tmp", 40)
+	if !strings.Contains(got, "Read") || !strings.Contains(got, "main.go") {
+		t.Errorf("pi Read should render the basename via the path fallback, got %q", got)
+	}
+	// ls (lowercase) must use the folder emoji + the path, NOT the 🔧 default with a random "key=value" field.
+	gotLs := BuildCompactToolLine("ls", []byte(`{"path":"/home/seraphli/proj"}`), "/tmp", 40)
+	if !strings.Contains(gotLs, "📂") {
+		t.Errorf("pi ls should render the 📂 folder emoji, got %q", gotLs)
+	}
+	if strings.Contains(gotLs, "path=") {
+		t.Errorf("pi ls must NOT render the random-map-field default (path=...), got %q", gotLs)
+	}
+	if !strings.Contains(gotLs, "proj") {
+		t.Errorf("pi ls should render the listed directory path, got %q", gotLs)
+	}
+}
+
+// TestBuildToolResultTextPiArray covers Round-2 Item A: pi tool results are a JSON array of text blocks
+// ([{"type":"text","text":"…"}]); the pre-fix code matches neither the string nor the map unmarshal and dumps
+// the raw JSON. The fix joins the text blocks and renders them like a plain-string result. RED on the pre-fix
+// build (the raw "[{"/"type" JSON leaks into the output).
+func TestBuildToolResultTextPiArray(t *testing.T) {
+	got := BuildToolResultText("Bash", []byte(`[{"type":"text","text":"PI_RESULT_MARKER_OUTPUT"}]`))
+	if !strings.Contains(got, "PI_RESULT_MARKER_OUTPUT") {
+		t.Errorf("pi array result should render the block text, got %q", got)
+	}
+	if strings.Contains(got, "[{") || strings.Contains(got, "type") {
+		t.Errorf("pi array result must NOT dump the raw JSON array, got %q", got)
+	}
+	// A multi-block array joins the text fields.
+	got2 := BuildToolResultText("Bash", []byte(`[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]`))
+	if !strings.Contains(got2, "line one") || !strings.Contains(got2, "line two") {
+		t.Errorf("multi-block pi array result should join text fields, got %q", got2)
+	}
+}
+
+// TestBuildCompactToolDetailsPi covers Round-4 Item 4: the collapsed details body of a compact tool
+// notification comes from buildToolNotifyBody, which read CC-only field names for Read/Edit/Write. A
+// normalised pi call carries pi's field names (path / oldText / newText / content — not
+// file_path / old_string / new_string), so the absolute path never rendered; and pi Read produced an
+// EMPTY body, so BuildCompactToolDetails returned a bare summary with NO expandable <details> at all
+// (the boss's production symptom: "📖 Read: README.md" with nothing to expand and no path). The fix
+// mirrors BuildCompactToolLine's str("file_path","path") fallback into buildToolNotifyBody. Each pi case
+// asserts the absolute path is present in the details body (plus the old/new diff for Edit and a real
+// <details> wrapper for Read); each CC case asserts no regression. RED on the pre-fix build (pi path /
+// diff absent; pi Read has no <details>).
+func TestBuildCompactToolDetailsPi(t *testing.T) {
+	const absPath = "/home/seraphli/proj/main.go"
+	tests := []struct {
+		name        string
+		tool        string
+		input       string
+		wantContain []string // substrings that MUST appear in the compact details output
+	}{
+		// pi-shaped inputs (pi field names) — RED pre-fix, GREEN post-fix.
+		{
+			name:        "pi Read renders the abs path in an expandable details",
+			tool:        "Read",
+			input:       `{"path":"` + absPath + `"}`,
+			wantContain: []string{"<details>", absPath},
+		},
+		{
+			name:        "pi Edit renders the abs path and the old/new diff",
+			tool:        "Edit",
+			input:       `{"path":"` + absPath + `","oldText":"OLDMARK","newText":"NEWMARK"}`,
+			wantContain: []string{absPath, "OLDMARK", "NEWMARK"},
+		},
+		{
+			name:        "pi Write renders the abs path",
+			tool:        "Write",
+			input:       `{"path":"` + absPath + `","content":"WRITEMARK"}`,
+			wantContain: []string{absPath, "WRITEMARK"},
+		},
+		// CC-shaped inputs (canonical field names) — no regression, GREEN on both builds.
+		{
+			name:        "cc Read still renders the abs path",
+			tool:        "Read",
+			input:       `{"file_path":"` + absPath + `"}`,
+			wantContain: []string{"<details>", absPath},
+		},
+		{
+			name:        "cc Edit still renders the abs path and the old/new diff",
+			tool:        "Edit",
+			input:       `{"file_path":"` + absPath + `","old_string":"CCOLD","new_string":"CCNEW"}`,
+			wantContain: []string{absPath, "CCOLD", "CCNEW"},
+		},
+		{
+			name:        "cc Write still renders the abs path",
+			tool:        "Write",
+			input:       `{"file_path":"` + absPath + `","content":"CCWRITE"}`,
+			wantContain: []string{absPath, "CCWRITE"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildCompactToolDetails(tt.tool, []byte(tt.input), "/tmp", 60)
+			for _, want := range tt.wantContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("BuildCompactToolDetails(%s) = %q, missing %q", tt.tool, got, want)
+				}
+			}
+		})
+	}
+}

@@ -76,7 +76,7 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 			var sentChats sync.Map
 			for _, info := range sessions {
 				go func(tickCtx context.Context, info stores.SessionInfo) {
-					title, paneRunning := helpers.PaneState(info.TmuxTarget, paneMap, paneChildren)
+					title, paneRunning := helpers.PaneState(info.TmuxTarget, paneMap, paneChildren, bs.HookRunning)
 					if !paneRunning {
 						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
 						if bs.InjectQueue.HasItems(info.TmuxTarget) {
@@ -277,8 +277,9 @@ func runBot(cmd *cobra.Command, args []string) {
 		{Text: "bot_escape", Description: "Send Escape to interrupt Claude"},
 		{Text: "stop", Description: "Send Escape to interrupt Claude"},
 		{Text: "t", Description: "Send Escape to interrupt Claude"},
-		{Text: "reload", Description: "Reload CC session (exit and resume)"},
-		{Text: "r", Description: "Reload CC session (exit and resume)"},
+		{Text: "restart", Description: "Restart agent session (exit and resume)"},
+		{Text: "rs", Description: "Restart agent session (exit and resume)"},
+		{Text: "r", Description: "Restart agent session (exit and resume)"},
 		{Text: "resume", Description: "Resume a previous Claude Code session"},
 		{Text: "bot_new", Description: "Launch new Claude Code session"},
 		{Text: "bot_usage", Description: "Show CC usage limits"},

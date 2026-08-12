@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	_ "embed"
 	"bufio"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,6 +61,9 @@ var ccConfigJSON []byte
 
 //go:embed config/codex.json
 var codexConfigJSON []byte
+
+//go:embed config/pi-extension.ts
+var piExtensionTS []byte
 
 //go:embed commands/tg-cli/cron.md
 var cronSkillDoc []byte
@@ -291,6 +294,48 @@ func InstallCCHooks(settingsPath, hookCommand string) error {
 	} else {
 		fmt.Printf("CC hooks updated (%s)\n", settingsPath)
 	}
+	return nil
+}
+
+// InstallPiExtension writes the tg-cli pi extension (embedded pi-extension.ts) into
+// PI_CODING_AGENT_DIR/extensions/tg-cli.ts (default ~/.pi/agent/extensions), substituting the
+// resolved bot port for the __HOOK_PORT__ placeholder. pi auto-discovers extensions/*.ts, so no
+// settings.json entry is needed. Byte-idempotent (mirrors InstallCodexHooks): unchanged content is
+// left untouched. Reused by both `tg-cli setup` and `tg-cli service upgrade`.
+func InstallPiExtension(home string, port int) error {
+	content := strings.ReplaceAll(string(piExtensionTS), "__HOOK_PORT__", strconv.Itoa(port))
+	piDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if piDir == "" {
+		piDir = filepath.Join(home, ".pi", "agent")
+	}
+	extDir := filepath.Join(piDir, "extensions")
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		return fmt.Errorf("create pi extensions dir: %w", err)
+	}
+	target := filepath.Join(extDir, "tg-cli.ts")
+	if existing, err := os.ReadFile(target); err == nil && string(existing) == content {
+		fmt.Printf("Pi extension already up-to-date (%s)\n", target)
+		return nil
+	}
+	if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write pi extension: %w", err)
+	}
+	fmt.Printf("Pi extension updated (%s)\n", target)
+	return nil
+}
+
+// UninstallPiExtension removes ONLY the tg-cli pi extension file (extensions/tg-cli.ts), honoring
+// PI_CODING_AGENT_DIR. It never removes the extensions/ dir. A not-exist error is ignored.
+func UninstallPiExtension(home string) error {
+	piDir := os.Getenv("PI_CODING_AGENT_DIR")
+	if piDir == "" {
+		piDir = filepath.Join(home, ".pi", "agent")
+	}
+	target := filepath.Join(piDir, "extensions", "tg-cli.ts")
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove pi extension: %w", err)
+	}
+	fmt.Printf("Pi extension uninstalled from %s\n", target)
 	return nil
 }
 
@@ -545,6 +590,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 		if err := InstallCodexHooks(home, hookCommand); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: codex hooks setup failed: %v\n", err)
 		}
+		// Install pi extension (write to ~/.pi/agent/extensions/tg-cli.ts)
+		if err := InstallPiExtension(home, port); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: pi extension setup failed: %v\n", err)
+		}
 	} else {
 		// Uninstall: remove tg-cli entries from CODEX_HOME/hooks.json
 		codexUninstallHome := os.Getenv("CODEX_HOME")
@@ -574,6 +623,10 @@ func runSetup(cmd *cobra.Command, args []string) {
 					fmt.Printf("Codex hooks uninstalled from %s\n", codexHooksPath)
 				}
 			}
+		}
+		// Uninstall: remove pi extension (~/.pi/agent/extensions/tg-cli.ts)
+		if err := UninstallPiExtension(home); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: pi extension uninstall failed: %v\n", err)
 		}
 	}
 	skipTmux, _ := cmd.Flags().GetBool("skip-tmux")

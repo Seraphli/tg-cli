@@ -41,6 +41,7 @@ export E2E_BACKEND="$BACKEND"
 case "$BACKEND" in
   cc) source "$SCRIPT_DIR/cc/cc_common.sh" ;;
   codex) source "$SCRIPT_DIR/codex/codex_common.sh" ;;
+  pi) source "$SCRIPT_DIR/pi/pi_common.sh" ;;
   all) source "$SCRIPT_DIR/cc/cc_common.sh"; source "$SCRIPT_DIR/codex/codex_common.sh" ;;
 esac
 
@@ -111,13 +112,17 @@ build_phase_list() {
       phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
       phases+=( $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V) )
       ;;
+    pi)
+      phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
+      phases+=( $(ls "$SCRIPT_DIR/pi"/phase*.sh 2>/dev/null | sort -V) )
+      ;;
     all)
       phases+=( $(ls "$SCRIPT_DIR/common"/phase*.sh 2>/dev/null | sort -V) )
       phases+=( $(ls "$SCRIPT_DIR/cc"/phase*.sh 2>/dev/null | sort -V) )
       phases+=( $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V) )
       ;;
     *)
-      echo "ERROR: Unknown backend '$BACKEND'. Use cc, codex, or all."
+      echo "ERROR: Unknown backend '$BACKEND'. Use cc, codex, pi, or all."
       exit 1
       ;;
   esac
@@ -132,6 +137,7 @@ find_phase() {
   case "$BACKEND" in
     cc) dirs="cc common" ;;
     codex) dirs="codex common" ;;
+    pi) dirs="pi common" ;;
     *) dirs="common cc codex" ;;
   esac
   for dir in $dirs; do
@@ -195,6 +201,10 @@ else
     done
   elif [ "$BACKEND" = "codex" ]; then
     for phase in $(ls "$SCRIPT_DIR/codex"/phase*.sh 2>/dev/null | sort -V); do
+      [ -f "$phase" ] && run_phase "$phase"
+    done
+  elif [ "$BACKEND" = "pi" ]; then
+    for phase in $(ls "$SCRIPT_DIR/pi"/phase*.sh 2>/dev/null | sort -V); do
       [ -f "$phase" ] && run_phase "$phase"
     done
   else

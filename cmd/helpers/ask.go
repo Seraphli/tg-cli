@@ -207,6 +207,7 @@ type SafeInjectTextParams struct {
 	StopCooldown     *stores.StopCooldownStore
 	ReactionTracker  *stores.ReactionTrackerStore
 	SessionState     *stores.SessionStateStore
+	HookRunning      *stores.HookRunningStateStore
 	HookSessionLocks *sync.Map
 	SessionEvents    *stores.SessionEventStore
 	PendingMsgStore  *stores.PendingMsgStore // Deferred EDIT after AskQ answer
@@ -232,7 +233,7 @@ type SafeInjectTextParams struct {
 type injectResult struct {
 	err           error
 	ch            chan bool
-	confirmType   string // "askq", "prompt", "codex_slash", ""
+	confirmType   string // "askq", "prompt", "codex_slash", "pi_slash", ""
 	shouldSubmit  bool
 	captureTarget injector.TmuxTarget
 	snippet       string
@@ -240,31 +241,33 @@ type injectResult struct {
 	submitted     bool // f29 C: codex_slash — the phase1 transaction pressed Enter (composer confirmed)
 }
 
-// isCodexSlash reports whether text is a codex slash-command — the scope of the f29 C inject-confirmation
-// transaction; every other case keeps the existing UPS/capture path. Source-faithful to the codex 0.144.x
-// slash grammar (codex-rs tui/src/bottom_pane/prompt_args.rs parse_slash_name +
-// tui/src/slash_input.rs validate_submission/inline_command): the input must LITERALLY start with "/"
-// (codex treats space-led input as ordinary text — no trimming), the first whitespace-delimited token
-// must name a non-empty command (parse_slash_name returns None for a bare "/"), and the name itself may
-// not contain "/" — which excludes multi-slash file paths like /tmp/x.jpg. Root-path single-slash image
-// paths (/image.jpg) still pass this text predicate and are excluded at the gate by codexSlashGate's
-// AltSnippet image bypass.
-func isCodexSlash(backend, text string) bool {
-	if backend != "codex" || !strings.HasPrefix(text, "/") {
+// isLocalSlash reports whether text is a LOCAL slash-command — a built-in that its backend intercepts BEFORE
+// prompt() (so NO UserPromptSubmit is emitted), which is the scope of the inject-confirmation transaction;
+// every other case keeps the existing UPS/capture path. Both codex and pi intercept their built-ins this
+// way, so the same text grammar admits both. Source-faithful to the codex 0.144.x slash grammar (codex-rs
+// tui/src/bottom_pane/prompt_args.rs parse_slash_name + tui/src/slash_input.rs
+// validate_submission/inline_command) — pi's interactive-mode.js uses the same `if (text === "/x")` shape:
+// the input must LITERALLY start with "/" (space-led input is ordinary text — no trimming), the first
+// whitespace-delimited token must name a non-empty command (a bare "/" is None), and the name itself may not
+// contain "/" — which excludes multi-slash file paths like /tmp/x.jpg. Root-path single-slash image paths
+// (/image.jpg) still pass this text predicate and are excluded at the gate by localSlashGate's AltSnippet
+// image bypass.
+func isLocalSlash(backend, text string) bool {
+	if (backend != "codex" && backend != "pi") || !strings.HasPrefix(text, "/") {
 		return false
 	}
 	token := strings.Fields(text)[0]
 	return len(token) > 1 && !strings.Contains(token[1:], "/")
 }
 
-// codexSlashGate decides whether the f29 C codex-slash transaction runs for an inject. Image injects are
-// bypassed unconditionally: AltSnippet is set ONLY by the image-inject path (messages.go, "[Image"), and
-// codex renders a valid pasted image path as an attachment chip — the composer never shows the pasted
-// text, so compose-confirm could never match and the transaction would always veto with a false
+// localSlashGate decides whether the local-slash inject-confirmation transaction runs for an inject. Image
+// injects are bypassed unconditionally: AltSnippet is set ONLY by the image-inject path (messages.go,
+// "[Image"), and a valid pasted image path renders as an attachment chip — the composer never shows the
+// pasted text, so compose-confirm could never match and the transaction would always veto with a false
 // ErrInjectNotConfirmed (the attempt-5 codex phase14 regression). A root-path image like /image.jpg is a
 // legal single-slash token the text predicate alone cannot exclude, hence this explicit bypass.
-func codexSlashGate(backend, text, altSnippet string) bool {
-	return altSnippet == "" && isCodexSlash(backend, text)
+func localSlashGate(backend, text, altSnippet string) bool {
+	return altSnippet == "" && isLocalSlash(backend, text)
 }
 
 // codexComposerHasText reports whether the codex composer (a line led by the "›" prompt char) currently
@@ -284,6 +287,56 @@ func codexComposerHasText(pane, snippet string) bool {
 		}
 	}
 	return false
+}
+
+// piComposerHasText reports whether pi's composer currently shows our pasted snippet — the compose-confirm
+// predicate for the pi local-slash transaction. Unlike codex, pi's composer has NO prompt glyph; it is the
+// bare line(s) between the LAST TWO full-width rule lines in the pane. Scan bottom-up, take the last two
+// "rule" lines (a line that is ENTIRELY "─" after trimming — nothing else), and the composer is the region
+// between them; return true iff a between-rules line contains the snippet.
+//
+// SAFETY — read carefully, do NOT "improve" this into a whole-pane scan: the composer is the BOTTOM-MOST
+// bordered region — below it there are only the cwd line and the status line, with NO rules between. The
+// safety does NOT come from "only the composer draws rules" (that is false): DynamicBorder.render() =
+// "─".repeat(width) is also used by bash-execution boxes AND every *-selector dialog, and pi's markdown
+// renderer draws a bare "─" rule for an <hr> too — all of those render ABOVE the composer, so POSITION
+// (last-two, bottom-up) is the ONLY discriminator. Markdown tables (┌─┬─┐ / ├─┼─┤) and latex rules
+// (space-padded) contain other characters and are excluded by the entirely-"─" matcher. If fewer than two
+// rule lines are present, treat as NOT confirmed (veto) — that covers the dialog-open / alt-screen states
+// where the composer is not present.
+func piComposerHasText(pane, snippet string) bool {
+	lines := strings.Split(pane, "\n")
+	var ruleIdx []int
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.Trim(lines[i], " \t ")
+		if trimmed != "" && strings.Trim(trimmed, "─") == "" {
+			ruleIdx = append(ruleIdx, i)
+			if len(ruleIdx) == 2 {
+				break
+			}
+		}
+	}
+	if len(ruleIdx) < 2 {
+		return false // veto: composer not present (dialog/alt-screen) or fewer than two rules
+	}
+	lower, upper := ruleIdx[0], ruleIdx[1] // ruleIdx[0] is the bottom-most rule (larger index)
+	for i := upper + 1; i < lower; i++ {
+		if strings.Contains(lines[i], snippet) {
+			return true
+		}
+	}
+	return false
+}
+
+// piCaptureConfirms reports whether pi's composer holds our injected content — the compose-confirm
+// predicate for a pi inject on the general (non-slash) path. It checks BOTH snippet and altSnippet because
+// pi renders a pasted image/file as the LITERAL PATH in its composer (the boss's ToAPI-reg.zip case), NOT a
+// "[Image …]" chip; altSnippet ("[Image") is a CC-ism carried in by the image-inject path (messages.go).
+// Matching either rendering is robust; the between-rules glyph-less scan is delegated to piComposerHasText.
+// The altSnippet != "" guard matters: piComposerHasText(pane, "") matches every line, so an empty altSnippet
+// must never be treated as present.
+func piCaptureConfirms(pane, snippet, altSnippet string) bool {
+	return piComposerHasText(pane, snippet) || (altSnippet != "" && piComposerHasText(pane, altSnippet))
 }
 
 // SafeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
@@ -375,7 +428,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 	// PRE-INJECT: check if there's a pending entry (AskQ or PermissionRequest) via PendingWait
 	pwSnap, hasPending := p.PendingWait.FindByTmuxTarget(tmuxTarget)
 	hasAskQ := hasPending && pwSnap != nil && pwSnap.ToolName == "AskUserQuestion"
-	if !p.Force && IsSessionRunning(tmuxTarget) && !hasPending {
+	if !p.Force && IsSessionRunning(p.HookRunning, tmuxTarget) && !hasPending {
 		chat, chatIDStr, topicID := p.ResolveChat(tmuxTarget)
 		chatIDInt := int64(0)
 		for _, c := range chatIDStr {
@@ -515,24 +568,31 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 	if len(snippet) > 50 {
 		snippet = snippet[:50]
 	}
-	// f29 C: codex slash-command inject confirmation. codex emits NO UserPromptSubmit for a local slash
-	// command, and by the time a post-hoc capture runs the composer is already cleared — so the normal path
-	// yields a false ErrInjectNotConfirmed even though the command executed. Instead we OWN the Enter: paste
-	// WITHOUT Enter and poll the composer for our text UNDER the inject lock (still under sessionMu here, so
-	// the busy/pending state-check→mutation stays atomic — no TOCTOU), submit on confirm, then phase2 polls
-	// for the Working indicator. Scope: codex backend + leading "/" only; normal prompts keep the UPS path.
+	// Local-slash inject confirmation (codex + pi). Both backends emit NO UserPromptSubmit for a built-in
+	// slash command, and by the time a post-hoc capture runs the composer is already cleared — so the normal
+	// path yields a false ErrInjectNotConfirmed even though the command executed. Instead we OWN the Enter:
+	// paste WITHOUT Enter and poll the composer for our text UNDER the inject lock (still under sessionMu here,
+	// so the busy/pending state-check→mutation stays atomic — no TOCTOU), submit on confirm. The compose
+	// predicate is backend-specific: codex scans the "›" prompt line, pi scans the last-two-rules composer
+	// region. codex then polls the Working indicator in phase2; pi has none (a local slash starts no agent
+	// run) so pi confirmation ends at "composer confirmed + Enter pressed". Scope: codex/pi + leading "/" only;
+	// normal prompts keep the UPS path. codex behaviour is byte-identical to before.
 	if shouldSubmit && p.SessionState != nil {
-		if info := p.SessionState.FindInfoByTarget(tmuxTarget); info != nil && codexSlashGate(info.Backend, text, p.AltSnippet) {
-			submitted, injErr := injector.InjectTextConfirmSubmit(target, text, func(pane string) bool {
-				return codexComposerHasText(pane, snippet)
-			}, 3*time.Second, 250*time.Millisecond)
+		if info := p.SessionState.FindInfoByTarget(tmuxTarget); info != nil && localSlashGate(info.Backend, text, p.AltSnippet) {
+			confirmType := "codex_slash"
+			confirm := func(pane string) bool { return codexComposerHasText(pane, snippet) }
+			if info.Backend == "pi" {
+				confirmType = "pi_slash"
+				confirm = func(pane string) bool { return piComposerHasText(pane, snippet) }
+			}
+			submitted, injErr := injector.InjectTextConfirmSubmit(target, text, confirm, 3*time.Second, 250*time.Millisecond)
 			if sessionMu != nil {
 				sessionMu.Unlock()
 			}
 			if injErr != nil {
 				return injectResult{err: injErr}
 			}
-			return injectResult{confirmType: "codex_slash", captureTarget: target, snippet: snippet, submitted: submitted}
+			return injectResult{confirmType: confirmType, captureTarget: target, snippet: snippet, submitted: submitted}
 		}
 	}
 	ch := p.InjectConfirm.Register(tmuxTarget, stores.ConfirmUserPromptSubmit, text)
@@ -574,6 +634,19 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		}
 		return nil
 	}
+	if res.confirmType == "pi_slash" {
+		// pi local slash: the clear+paste+compose-confirm+submit already ran in phase1 under sessionMu. pi
+		// confirmation ENDS here — a pi local slash starts NO agent run, so there is no Working indicator to
+		// poll (unlike codex). If the composer showed our text and we pressed Enter (res.submitted), it is
+		// confirmed; otherwise the transaction pressed nothing → unconfirmed.
+		if !res.submitted {
+			logger.Info(fmt.Sprintf("safeInjectText: pi slash compose not confirmed (no submit), target=%s", tmuxTarget))
+			return fmt.Errorf("%w for target=%s", ErrInjectNotConfirmed, tmuxTarget)
+		}
+		p.ReactionTracker.ClearReactions(p.Bot, tmuxTarget)
+		logger.Info(fmt.Sprintf("safeInjectText: pi slash inject confirmed (composer+enter), target=%s", tmuxTarget))
+		return nil
+	}
 	if res.confirmType == "codex_slash" {
 		// f29 C: the clear+paste+compose-confirm+submit already ran in phase1 under sessionMu. If the
 		// composer never showed our text, the transaction pressed nothing → unconfirmed (soft
@@ -588,7 +661,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		// it executed — known behavior, no special-casing.
 		deadline := time.Now().Add(3 * time.Second)
 		for {
-			if IsSessionRunning(tmuxTarget) {
+			if IsSessionRunning(p.HookRunning, tmuxTarget) {
 				p.ReactionTracker.ClearReactions(p.Bot, tmuxTarget)
 				logger.Info(fmt.Sprintf("safeInjectText: codex slash inject confirmed (Working), target=%s", tmuxTarget))
 				return nil
@@ -603,8 +676,10 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 	// confirmType == "prompt"
 	// CapturePane verification — scan bottom-up, distinguish idle/staged/submitted states
 	promptChars := []string{"❯"}
+	backend := ""
 	if p.SessionState != nil {
 		if info := p.SessionState.FindInfoByTarget(tmuxTarget); info != nil {
+			backend = info.Backend
 			switch info.Backend {
 			case "codex":
 				promptChars = []string{"›"}
@@ -625,41 +700,54 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 			continue
 		}
 		lastCaptureContent = captureContent
-		lines := strings.Split(captureContent, "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := lines[i]
-			raw := strings.TrimRight(line, " \t")
-			idx := -1
-			pcLen := 0
-			for _, pc := range promptChars {
-				if j := strings.Index(raw, pc); j >= 0 {
-					idx = j
-					pcLen = len(pc)
-					break
+		if backend == "pi" && !res.shouldSubmit {
+			// pi's composer has NO prompt glyph (a box between two full-width rule lines) so the prompt-char
+			// scan below never matches it, and the submit=false staged-text path (image/file inject WITH a
+			// caption) has no UserPromptSubmit fallback — confirm from the composer holding our pasted path
+			// (res.snippet) or the "[Image" chip (res.altSnippet). Gated on !res.shouldSubmit: a SUBMITTED pi
+			// inject keeps the prompt-char scan → UPS fallback, whose actual-submission+content proof must never
+			// be preempted by composer-has-text (which is ALSO the state of a FAILED Enter).
+			if piCaptureConfirms(captureContent, res.snippet, res.altSnippet) {
+				captureConfirmed = true
+				captureState = "pi-composer"
+			}
+		} else {
+			lines := strings.Split(captureContent, "\n")
+			for i := len(lines) - 1; i >= 0; i-- {
+				line := lines[i]
+				raw := strings.TrimRight(line, " \t")
+				idx := -1
+				pcLen := 0
+				for _, pc := range promptChars {
+					if j := strings.Index(raw, pc); j >= 0 {
+						idx = j
+						pcLen = len(pc)
+						break
+					}
 				}
+				if idx < 0 {
+					continue
+				}
+				after := raw[idx+pcLen:]
+				after = strings.TrimLeft(after, " \xc2\xa0")
+				matched := strings.Contains(after, res.snippet)
+				if !matched && res.altSnippet != "" {
+					matched = strings.Contains(after, res.altSnippet)
+				}
+				if after == "" || !matched {
+					continue
+				}
+				leading := raw[:idx]
+				if leading == "" {
+					captureState = "input"
+				} else if strings.TrimSpace(leading) == "" {
+					captureState = "staged"
+				} else {
+					captureState = "submitted"
+				}
+				captureConfirmed = true
+				break
 			}
-			if idx < 0 {
-				continue
-			}
-			after := raw[idx+pcLen:]
-			after = strings.TrimLeft(after, " \xc2\xa0")
-			matched := strings.Contains(after, res.snippet)
-			if !matched && res.altSnippet != "" {
-				matched = strings.Contains(after, res.altSnippet)
-			}
-			if after == "" || !matched {
-				continue
-			}
-			leading := raw[:idx]
-			if leading == "" {
-				captureState = "input"
-			} else if strings.TrimSpace(leading) == "" {
-				captureState = "staged"
-			} else {
-				captureState = "submitted"
-			}
-			captureConfirmed = true
-			break
 		}
 		if captureConfirmed {
 			break
@@ -671,8 +759,12 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		if start < 0 {
 			start = 0
 		}
-		logger.Debug(fmt.Sprintf("safeInjectText: capturePane MISS snippet=%q altSnippet=%q promptChars=%v pane_tail:\n%s",
-			res.snippet, res.altSnippet, promptChars, strings.Join(all[start:], "\n")))
+		mode := "prompt-scan"
+		if backend == "pi" && !res.shouldSubmit {
+			mode = "pi-composer"
+		}
+		logger.Debug(fmt.Sprintf("safeInjectText: capturePane MISS mode=%s snippet=%q altSnippet=%q promptChars=%v pane_tail:\n%s",
+			mode, res.snippet, res.altSnippet, promptChars, strings.Join(all[start:], "\n")))
 	}
 	logger.Debug(fmt.Sprintf("safeInjectText: capturePane=%v state=%s target=%s", captureConfirmed, captureState, tmuxTarget))
 	confirmed := captureConfirmed

@@ -24,15 +24,30 @@ func setSent(e *stores.StreamEntry, i int, text string) {
 	e.SentText[i] = text
 }
 
+// alignToParagraph truncates text to everything up to AND including the LAST "\n\n" paragraph boundary (F1).
+// ok=false when text contains no "\n\n". Byte-index based; the returned string is a prefix of text. Used by the
+// ticker flush to render only whole paragraphs (boss ruling: send/edit only at a paragraph boundary).
+func alignToParagraph(text string) (string, bool) {
+	idx := strings.LastIndex(text, "\n\n")
+	if idx < 0 {
+		return "", false
+	}
+	return text[:idx+2], true
+}
+
 // renderStreamChunks renders the entry's FROZEN plan (nd + rich/legacy chunk lists, built once in flushSession
 // p2) into TG message(s): send new chunks, edit changed ones, delete surplus old continuation messages if the
 // re-render shrank the chunk count. f25 MAJOR: it renders the frozen plan VERBATIM (no recompute of nd or
 // chunks) so the snapshot-time prediction equals the render exactly.
-func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, nd notify.NotificationData, chunks, legacyChunks []string, relabel bool) {
+func renderStreamChunks(bs *BotState, sessionID string, e *stores.StreamEntry, nd notify.NotificationData, chunks, legacyChunks []string, relabel, interrupt bool) {
 	chat := &tele.Chat{ID: e.ChatID}
 	for i, chunk := range chunks {
 		nd.Body = chunk
 		nd.Finalized = relabel && i == len(chunks)-1
+		// Item 7: the "🔄 Interrupted — retrying…" mark rides on the LAST chunk's header (like Finalized), so a
+		// multi-chunk truncated bubble is marked at its tail. Interrupted takes precedence over Finalized in
+		// BuildNotificationText — but a to-be-marked errored bubble is never a Stop-relabel target anyway.
+		nd.Interrupted = interrupt && i == len(chunks)-1
 		if len(chunks) > 1 {
 			nd.Page = i + 1
 			nd.TotalPages = len(chunks)
@@ -103,6 +118,7 @@ type flushJob struct {
 	complete             bool
 	finalize             bool
 	relabel              bool
+	interrupt            bool // Item 7: render this entry's header as "🔄 Interrupted — retrying…" (one-shot)
 	nd                   notify.NotificationData
 	chunks               []string
 	legacyChunks         []string
@@ -135,7 +151,11 @@ func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDi
 		// Skip already-finalized messages — EXCEPT the turn's last one at Stop, which still needs the 💬→✅
 		// header relabel even though its content is sealed.
 		needRelabel := stop && i == lastIdx && !e.Relabeled
-		if e.Sealed && !needRelabel {
+		// Item 7: a sealed bubble newly flagged Interrupted (a retryable-error retry on the same turn) must be
+		// re-rendered ONCE to add the "🔄 Interrupted — retrying…" header — the SAME sealed-entry re-render
+		// exception as needRelabel, one-shot via InterruptRendered.
+		needInterrupt := e.Interrupted && !e.InterruptRendered
+		if e.Sealed && !needRelabel && !needInterrupt {
 			continue
 		}
 		text, complete := e.AssembledText()
@@ -150,9 +170,30 @@ func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDi
 		// so a slightly-late final delta is still accepted on the next loop.
 		finalize := complete || (force && isLast)
 		relabel := stop && isLast && finalize
+		// Ticker paragraph alignment (boss ruling): ONLY the ticker flush (flushTry — its sole production call
+		// site is startStreamLoop) aligns to a paragraph boundary; every other flush and every finalize render
+		// the FULL text. F1: render only up to & incl the last "\n\n"; the remainder is NOT consumed (Deltas
+		// untouched — a later flush re-reads it). F3/F4: finalize / non-ticker render full (block skipped).
+		renderText := text
+		if mode == flushTry && !finalize {
+			aligned, ok := alignToParagraph(text)
+			// F2: no boundary yet, or the only boundary encloses whitespace (e.g. a leading "\n\n"). The
+			// TrimSpace clause is note3's interpretation call INSIDE ruling #2 ("no boundary yet -> do not
+			// send"), mirroring the existing empty-text guard above — not a change to the ruling.
+			if !ok || strings.TrimSpace(aligned) == "" {
+				continue // Dirty & LastFlush preserved (skip is BEFORE the assignments below) — retry next tick/delta
+			}
+			// F5: the rendered body must never shrink. Skip when the aligned body is not longer than the body
+			// already committed for this entry (RenderedLen, the enqueue-time high-water). Same skip semantics as
+			// F2 (Dirty preserved). This is the SOLE guard against renderStreamChunks surplus-deletion.
+			if len(aligned) <= e.RenderedLen {
+				continue
+			}
+			renderText = aligned
+		}
 		e.Dirty = false
 		e.LastFlush = time.Now()
-		jobs = append(jobs, flushJob{e: e, mid: mid, text: text, complete: complete, finalize: finalize, relabel: relabel, positionedAtSnapshot: e.PositionedChunks})
+		jobs = append(jobs, flushJob{e: e, mid: mid, text: renderText, complete: complete, finalize: finalize, relabel: relabel, interrupt: needInterrupt, positionedAtSnapshot: e.PositionedChunks})
 	}
 	ss.DataMu.Unlock()
 	// No renderable job (all sealed / empty text) — return WITHOUT enqueuing so an unconditional pre-tool flush
@@ -201,12 +242,17 @@ func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDi
 				continue // session reset / entry rotated away between snapshot and render
 			}
 			ss.DataMu.Unlock()
-			renderStreamChunks(bs, sessionID, j.e, j.nd, j.chunks, j.legacyChunks, j.relabel)
-			if j.finalize {
+			renderStreamChunks(bs, sessionID, j.e, j.nd, j.chunks, j.legacyChunks, j.relabel, j.interrupt)
+			if j.finalize || j.interrupt {
 				ss.DataMu.Lock()
-				j.e.Sealed = true
-				if j.relabel {
-					j.e.Relabeled = true
+				if j.finalize {
+					j.e.Sealed = true
+					if j.relabel {
+						j.e.Relabeled = true
+					}
+				}
+				if j.interrupt {
+					j.e.InterruptRendered = true // one-shot: the sealed bubble carries the mark; do not re-render it
 				}
 				ss.DataMu.Unlock()
 			}
@@ -255,6 +301,7 @@ func commitPositioned(ss *stores.SessionStream, jobs []flushJob) {
 			continue // entry rotated away / session closed between snapshot and commit (B2)
 		}
 		j.e.PositionedChunks = len(j.chunks)
+		j.e.RenderedLen = len(j.text) // F5 high-water: byte length of the body just committed for this entry
 		if j.willSendBelow {
 			sendBelow = true
 		}

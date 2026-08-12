@@ -19,9 +19,15 @@ TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 echo "Waiting for Claude to settle..."
 wait_for_idle
 
-# Inject a moderate-length prompt (~180-240 words ≈ ~1700 runes, well under RichMaxRunes=30000)
-# SPEC 2.3: rich messages stay single up to 32768 chars — this turn must NOT trigger a continuation chunk
-LONG_PROMPT="Without using any tools, write a single flowing paragraph of between 180 and 240 words about the history and evolution of computer operating systems — touch on early batch processing, 1960s time-sharing, Unix and its philosophy, the rise of personal computers, Linux and open source, and modern mobile operating systems. Write it as one continuous prose response (no lists, no headings). Do not use any tools."
+# Inject a moderate-length prompt (~180-240 words ≈ ~1700 runes, well under RichMaxRunes=30000) structured as
+# SEVERAL short paragraphs separated by blank lines. WHY the blank lines (Round-3 fix): the ticker flush now
+# aligns to a paragraph boundary (\n\n), so a SINGLE-paragraph reply never renders incrementally — it lands
+# whole at Stop, STREAM_FOUND stays false, and the phase falls through to the direct_send branch (:96-97),
+# leaving the incremental-streaming/pagination assertions (:72-89) UN-exercised (that is exactly what a
+# single-paragraph stimulus did before this fix). Multiple paragraphs put a \n\n mid-stream so the ticker
+# renders before Stop and STREAM_FOUND becomes true, genuinely exercising those assertions. Length stays
+# moderate so the turn still must NOT trigger a continuation chunk (SPEC 2.3: rich stays single up to 32768).
+LONG_PROMPT="Without using any tools, write between 180 and 240 words about the history and evolution of computer operating systems — touch on early batch processing, 1960s time-sharing, Unix and its philosophy, the rise of personal computers, Linux and open source, and modern mobile operating systems. Organize it as several short paragraphs, one per era, and separate every paragraph from the next with a blank line. Use prose only (no lists, no headings). Do not use any tools."
 pane_log "[pagination] BEFORE injecting long prompt"
 inject_prompt "$LONG_PROMPT"
 echo "Long prompt injected, waiting for Claude to respond (expecting single rich message, no continuation)..."

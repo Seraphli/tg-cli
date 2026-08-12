@@ -215,6 +215,8 @@ func detectBackend(command string, cliCommand func() string) string {
 		return "cc"
 	case "codex":
 		return "codex"
+	case "pi":
+		return "pi"
 	case "node":
 		for _, token := range strings.Fields(cliCommand()) {
 			base := filepath.Base(token)

@@ -352,6 +352,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 						StopCooldown:     bs.StopCooldown,
 						ReactionTracker:  bs.ReactionTracker,
 						SessionState:     bs.SessionState,
+						HookRunning:      bs.HookRunning,
 						HookSessionLocks: &bs.HookSessionLocks,
 						SessionEvents:    bs.SessionEvents,
 						PendingMsgStore:  bs.PendingMsgStore,

@@ -14,7 +14,7 @@ type StreamMeta struct {
 }
 
 // StreamEntry is one streamed assistant message (one message_id).
-// Deltas/FinalIdx/Dirty/LastFlush/PositionedChunks are guarded by SessionStream.DataMu.
+// Deltas/FinalIdx/Dirty/LastFlush/PositionedChunks/RenderedLen are guarded by SessionStream.DataMu.
 // Msgs/SentText/TablesSent are mutated only by flush (serialized by SessionStream.FlushMu).
 // Sealed is normally set by flush (FlushMu), but FinalizeLastWithText also sets it under DataMu to
 // install the authoritative Stop text and slam the drop-barrier on late MD — both writers are safe
@@ -37,7 +37,12 @@ type StreamEntry struct {
 	TablesSent bool
 	Sealed     bool // content done (no more delta / tables sent) — NOT the same as Stop relabel
 	Relabeled  bool // Stop header 💬→✅ already applied to this (last) message
-	Rich       bool // true = message was first sent as rich (Bot API 10.1); all edits must match
+	// Interrupted marks this (sealed) bubble as a pi run truncated by a retryable provider error that pi is
+	// auto-retrying on the SAME turn (Item 7). InterruptRendered is the one-shot guard (mirrors Relabeled): the
+	// flush re-renders the sealed bubble ONCE with the "🔄 Interrupted — retrying…" header, then never again.
+	Interrupted       bool
+	InterruptRendered bool
+	Rich              bool // true = message was first sent as rich (Bot API 10.1); all edits must match
 	Dirty      bool
 	LastFlush  time.Time
 	// PositionedChunks is how many chunks have been placed/queued for this bubble so far (the enqueue-time
@@ -46,6 +51,11 @@ type StreamEntry struct {
 	// lag sees the already-queued count and does not re-split. A planned chunk count exceeding this means a NEW
 	// TG message will be SENT below (new bubble or pagination growth) -> SendBelowSinceTool.
 	PositionedChunks int
+	// RenderedLen is the byte length of the body text last committed for this entry (the aligned body for a
+	// ticker flush, the full body otherwise), committed in commitPositioned alongside PositionedChunks at a
+	// SUCCESSFUL enqueue. The ticker paragraph alignment (F5) skips an entry whose newly-aligned body would not
+	// exceed it, so the rendered body never shrinks. Guarded by DataMu.
+	RenderedLen int
 	// StopClass is the sticky post-Stop classification (commit 18) of an entry CREATED by the post-Stop state
 	// machine while ss.Stopped. Decided exactly once at the first non-empty delta: StopCopy (a verbatim
 	// paragraph run of the authoritative Stop body — every delta dropped, never armed) or New (a genuinely new
@@ -232,12 +242,13 @@ func recordClosedTurns(ss *SessionStream) {
 }
 
 // Post-Stop late-MessageDisplay design (commit 18) — residuals (accepted tradeoffs):
-//   (a) a NEW message whose first non-empty fragment verbatim-matches a paragraph run of the authoritative
-//       Stop body is classified STOP-COPY and dropped WHOLE (boss-accepted homogeneity tradeoff — dedup wins
-//       over the rare case of a genuinely-new message that happens to start with the Stop body verbatim).
-//   (b) no cross-turn tombstone is recorded if no late MD of that turn arrives before Rotate (maybeTombstone
-//       fires only on observation in the stopped handler).
-//   (c) incomplete late entries are cleared at Rotate (existing lifecycle — Rotate wipes ss.Msgs/ss.Order).
+//
+//	(a) a NEW message whose first non-empty fragment verbatim-matches a paragraph run of the authoritative
+//	    Stop body is classified STOP-COPY and dropped WHOLE (boss-accepted homogeneity tradeoff — dedup wins
+//	    over the rare case of a genuinely-new message that happens to start with the Stop body verbatim).
+//	(b) no cross-turn tombstone is recorded if no late MD of that turn arrives before Rotate (maybeTombstone
+//	    fires only on observation in the stopped handler).
+//	(c) incomplete late entries are cleared at Rotate (existing lifecycle — Rotate wipes ss.Msgs/ss.Order).
 //
 // PostStopAction tells the MessageDisplay handler what follow-up (if any) a delta requires while the session
 // is Stopped (commit 18). The non-stopped path always returns PostStopNone.
@@ -301,9 +312,9 @@ func (s *StreamStore) AppendExisting(sessionID, messageID, turnID string, index 
 //   - known & Sealed              → drop (late/duplicate on an armed-then-sealed or pre-Stop sealed entry).
 //   - armed (in ss.Order) & unsealed → append; ArmedComplete if now complete, else ArmedProgress (P4/P5).
 //   - unknown / unarmed placeholder → PER-MESSAGE STICKY CLASSIFICATION (P1) on the first NON-EMPTY delta:
-//       STOP-COPY (a paragraph run of LastStopBody) → drop every delta, never arm (no storage);
-//       NEW → store the delta and request arming once the assembled text is non-empty (P2);
-//       empty/whitespace deltas defer (record index/FinalIdx continuity only, never classify, never Dirty).
+//     STOP-COPY (a paragraph run of LastStopBody) → drop every delta, never arm (no storage);
+//     NEW → store the delta and request arming once the assembled text is non-empty (P2);
+//     empty/whitespace deltas defer (record index/FinalIdx continuity only, never classify, never Dirty).
 //
 // On the first observation of a late turn_id it records the turn tombstone (P6, recordClosedTurns semantics).
 func stoppedMachine(ss *SessionStream, messageID, turnID string, index int, delta string, final bool) (handled, dropped bool, post PostStopAction) {
@@ -560,6 +571,34 @@ func (s *StreamStore) MarkStopped(sessionID string) {
 	ss.Stopped = true
 	recordClosedTurns(ss)
 	ss.DataMu.Unlock()
+}
+
+// MarkInterruptedRetry flags the LAST rendered bubble of turnID as interrupted-and-retrying (Item 7), so the
+// next flush re-renders it once with the "🔄 Interrupted — retrying…" header. Called from the agent_retry hook
+// handler, which the pi extension POSTs at the retry's agent_start — BEFORE the retry's first MessageDisplay,
+// so on the ordered Hook FIFO the retry bubble does not exist yet and the last turnID entry IS the errored
+// (truncated) one. Returns true iff an entry was marked. No-op (false) when the turn has no rendered bubble
+// (the run errored before any assistant text) or it was already marked.
+func (s *StreamStore) MarkInterruptedRetry(sessionID, turnID string) bool {
+	ss := s.lookup(sessionID)
+	if ss == nil {
+		return false
+	}
+	ss.DataMu.Lock()
+	defer ss.DataMu.Unlock()
+	for i := len(ss.Order) - 1; i >= 0; i-- {
+		e := ss.Msgs[ss.Order[i]]
+		if e == nil || e.TurnID != turnID {
+			continue
+		}
+		if e.InterruptRendered {
+			return false // already marked and rendered
+		}
+		e.Interrupted = true
+		e.Dirty = true
+		return true
+	}
+	return false
 }
 
 // TryClose closes the turn (Stopped=true) ONLY if quiescent (no dirty entry and the last message is complete),

@@ -282,6 +282,9 @@ var serviceUpgradeCmd = &cobra.Command{
 		if err := InstallCCHooks(claudeSettingsPath, hookCommand); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: CC hooks sync failed: %v\n", err)
 		}
+		if err := InstallPiExtension(home, port); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: pi extension sync failed: %v\n", err)
+		}
 		fmt.Println("Starting service...")
 		systemctl("start", serviceName())
 		// Poll /health until the new bot is ready (up to 30s), then remove upgrade flag

@@ -447,7 +447,7 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	// goroutine runs OFF the Hook FIFO so this wait never blocks the FIFO.
 	if mode == stores.InjectModeIdle {
 		waitDeadline := time.Now().Add(30 * time.Second)
-		for helpers.IsSessionRunning(tmuxTarget) {
+		for helpers.IsSessionRunning(bs.HookRunning, tmuxTarget) {
 			if time.Now().After(waitDeadline) {
 				logger.Info(fmt.Sprintf("deliverInjectQueue: idle wait timed out, leaving queue for retry (target=%s, mode=idle)", tmuxTarget))
 				return
@@ -502,6 +502,7 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 		StopCooldown:     bs.StopCooldown,
 		ReactionTracker:  bs.ReactionTracker,
 		SessionState:     bs.SessionState,
+		HookRunning:      bs.HookRunning,
 		HookSessionLocks: &bs.HookSessionLocks,
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/injector"
 )
 
@@ -52,8 +53,10 @@ func TestPaneState(t *testing.T) {
 		// error path). This is the branch that lets flushInjectQueue run for a pane that is gone.
 		{"absent pane yields empty and not-running", "%99", "", false},
 	}
+	// No pi panes here, so the run-state store is never consulted; a fresh empty store is enough.
+	store := stores.NewHookRunningStateStore()
 	for _, c := range cases {
-		title, running := PaneState(c.target, panes, children)
+		title, running := PaneState(c.target, panes, children, store)
 		if title != c.wantTitle || running != c.wantRunning {
 			t.Errorf("%s: PaneState(%q) = (%q, %v), want (%q, %v)", c.name, c.target, title, running, c.wantTitle, c.wantRunning)
 		}
@@ -77,12 +80,69 @@ func TestPaneStateUsesChildrenMapNotLivePs(t *testing.T) {
 		"%8": {Command: "node", PID: "1008", Title: "⠙ project"},
 	}
 	children := map[string]string{"1008": "/usr/bin/node /home/u/.local/bin/codex"}
-	title, running := PaneState("%8", panes, children)
+	title, running := PaneState("%8", panes, children, stores.NewHookRunningStateStore())
 	if title != "⠙ project" || !running {
 		t.Errorf("PaneState(node, codex child) = (%q, %v), want (%q, true)", title, running, "⠙ project")
 	}
 	if calls != 0 {
 		t.Errorf("live ps resolver called %d times for a batched node pane, want 0 (PaneState must resolve from the children map, not the live ps)", calls)
+	}
+}
+
+// TestPaneStateStoreAware covers the store-aware busy routing PaneState now uses (storeOrTitleBusy). A
+// running pi session — which TitleIsBusy cannot classify (it only handles cc/codex) — must read busy from
+// the in-memory run-state store; cc panes must still classify from the title and IGNORE the store; and a
+// pi pane whose process died (current command no longer "pi") must self-heal to idle because detectBackend
+// returns "" and the store is bypassed. It also proves the store-aware path never falls back to the live
+// per-target ps resolver (psCliCommandForPID stays at zero invocations — the f29 no-live-exec invariant).
+func TestPaneStateStoreAware(t *testing.T) {
+	orig := psCliCommandForPID
+	defer func() { psCliCommandForPID = orig }()
+	psCalled := false
+	psCliCommandForPID = func(shellPID string) string {
+		psCalled = true
+		return ""
+	}
+	panes := map[string]injector.PaneInfo{
+		"%1": {Command: "pi", PID: "2001", Title: "pi session"},    // pi, store set RUNNING -> busy from store
+		"%2": {Command: "pi", PID: "2002", Title: "pi session"},    // pi, store unknown -> title path -> idle
+		"%3": {Command: "pi", PID: "2003", Title: "pi session"},    // pi, store set IDLE -> idle from store
+		"%4": {Command: "claude", PID: "2004", Title: "· Working"}, // cc busy title + store RUNNING -> title wins
+		"%5": {Command: "claude", PID: "2005", Title: "✳ ready"},   // cc idle title + store RUNNING -> store ignored
+		"%6": {Command: "bash", PID: "2006", Title: "· Working"},   // dead pi (command != "pi") + store RUNNING -> idle
+	}
+	children := map[string]string{}
+	store := stores.NewHookRunningStateStore()
+	store.SetRunning("%1") // pi running
+	// "%2" intentionally left unknown (never set) — store returns known=false, falls to the title path.
+	store.SetIdle("%3")    // pi explicitly idle
+	store.SetRunning("%4") // cc: store says running, but cc must classify from the title
+	store.SetRunning("%5") // cc: store says running, but an idle "✳" title must win (store ignored for cc)
+	store.SetRunning("%6") // dead pi: store still says running, but backend "" bypasses the store
+	cases := []struct {
+		name        string
+		target      string
+		wantTitle   string
+		wantRunning bool
+	}{
+		// Core fix: a running pi session reads busy from the store (old TitleIsBusy returned false for pi).
+		{"pi running from store", "%1", "pi session", true},
+		{"pi unknown in store not running", "%2", "pi session", false},
+		{"pi idle from store not running", "%3", "pi session", false},
+		// Rider 3a: cc classifies from the title, never the store.
+		{"cc busy title is running (store ignored)", "%4", "· Working", true},
+		{"cc idle title not running even though store says running", "%5", "✳ ready", false},
+		// Rider 3b: a pi process that died shows a non-"pi" command -> detectBackend "" -> store bypassed.
+		{"dead pi self-heals to idle despite store running", "%6", "· Working", false},
+	}
+	for _, c := range cases {
+		title, running := PaneState(c.target, panes, children, store)
+		if title != c.wantTitle || running != c.wantRunning {
+			t.Errorf("%s: PaneState(%q) = (%q, %v), want (%q, %v)", c.name, c.target, title, running, c.wantTitle, c.wantRunning)
+		}
+	}
+	if psCalled {
+		t.Errorf("live ps resolver invoked during store-aware PaneState; want zero live per-target ps (f29 no-live-exec invariant)")
 	}
 }
 

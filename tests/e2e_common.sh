@@ -56,6 +56,20 @@ export CREDENTIALS
 CC_WORKDIR="$TEST_CONFIG_DIR/cwd"
 mkdir -p "$CC_WORKDIR"
 export CC_WORKDIR
+# --- pi backend isolation (t11) ---
+# PI_CODING_AGENT_DIR overrides pi's config dir (default ~/.pi/agent). Export it GLOBALLY for every
+# backend: `tg-cli install`/`setup`/`upgrade` (run by setup_hooks) now calls InstallPiExtension
+# (setup.go:594), which writes the pi extension into <PI_CODING_AGENT_DIR>/extensions/tg-cli.ts — so this
+# MUST point at the isolated per-run test dir, NEVER the boss's live ~/.pi/agent. A pi-less cc/codex run
+# is unaffected (the extension just lands in the throwaway test dir).
+export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$TEST_CONFIG_DIR/pi-agent}"
+# pi provider/model for the E2E: openai-completions via the NewAPI proxy (streams token-by-token, unlike
+# CC's anthropic-messages dump-at-Stop). The proxy TOKEN is env-var only (NEWAPI_E2E_KEY), never hardcoded
+# and never committed — same convention as the CC ANTHROPIC_AUTH_TOKEN. Base URL / model / provider are not
+# secret, so they carry safe defaults.
+export PI_E2E_PROVIDER="${PI_E2E_PROVIDER:-newapi}"
+export PI_E2E_MODEL="${PI_E2E_MODEL:-deepseek-v4-flash-free}"
+export PI_E2E_BASE_URL="${PI_E2E_BASE_URL:-https://newapi.seraphli.eu.cc/v1}"
 # One common wait budget for all backends, sized for the slowest (codex). Formerly split by E2E_BACKEND;
 # flattened per boss ruling 2026-07-31 so a range run gives codex the same 180 the all-phases branch already did.
 TIMEOUT=180
@@ -473,6 +487,13 @@ validate_phase_log() {
     !/^\[[0-9]{4}-/ { next }   # only real log lines (skip multi-line full_text content)
     { if (match($0, /turn_id=[^ ]+/)) curtid = substr($0, RSTART, RLENGTH) }   # current turn from any turn-tagged line
     /ToolUse: notification disabled for tool=/ { if (curtid != "") td[curtid] = 1; next }   # f20: mark this turn tool-notify-disabled
+    /Raw hook payload \[agent_retry\]:/ {   # Item 7 signal: pi auto-retried THIS turn after a RETRYABLE provider error. This ONE line is turn-scoped ("turn_id":"tN") AND error-specific (agent_retry is POSTed by the pi extension ONLY on a retryable error — never for a queued continuation or overflow-compaction re-run), so it alone authorises the exemption; the old leg (b) transcript stopReason=error cross-check is gone (Occam — the signal already carries that fact).
+      if (match($0, /"turn_id":"[^"]+"/)) {
+        atk = substr($0, RSTART, RLENGTH); sub(/^"turn_id":"/, "", atk); sub(/"$/, "", atk)
+        retry["turn_id=" atk] = 1
+      }
+      next
+    }
     /compact tool sent|compact tool overflow sent/ { last = "SEP"; next }
     /Notification sent .*: ToolUse / { last = "SEP"; next }
     /AskUserQuestion sent: msg_id=/ { last = "SEP"; next }
@@ -487,6 +508,8 @@ validate_phase_log() {
       if (last == "M") {
         if (td[tid])   # f20: tool notification disabled by config in this turn -> adjacency is expected
           print "NOTE: V3 exemption - same-turn consecutive sends accepted, ToolUse notification disabled by config in this turn (" tid "): " lastmid " -> " mid
+        else if (retry[tid])   # Item 7 signal held (pi retried this turn after a retryable error) -> exempt directly; the agent_retry line is already error-specific, so no transcript read
+          print "NOTE: V3 exemption - pi retry-after-error (network/error-caused re-run, boss-approved): agent_retry in " tid ": " lastmid " -> " mid
         else
           print "consecutive Message sends in same " tid " with no separator: " lastmid " -> " mid
       }
@@ -495,15 +518,23 @@ validate_phase_log() {
     }' || true)
   v3notes=$(printf '%s\n' "$v3raw" | grep "^NOTE:" || true)
   v3viol=$(printf '%s\n' "$v3raw" | grep "^consecutive " || true)
-  if [ -n "$v3notes" ]; then
-    echo "  [validate_phase_log:$label] V3 exemption(s) applied (ToolUse notification disabled by config):"
-    printf '%s\n' "$v3notes" | head -5
+  # Item 5 (boss ruling — network/error retry ONLY), revisited under Item 7: the exemption keys DIRECTLY on the
+  # pi extension's agent_retry signal (parsed in the awk above). agent_retry is emitted ONLY at a same-turn retry
+  # after a RETRYABLE provider error (cmd/config/pi-extension.ts), so it is BOTH turn-scoped and error-specific —
+  # one mechanism carries the whole fact. The old two-leg conjunction (a: a second agent_start; b: a jq transcript
+  # stopReason=error cross-check) is REMOVED (Occam: two mechanisms for the same fact = duplicate state). A flagged
+  # same-turn pair WITHOUT an agent_retry line stays a real violation, so a non-error re-run (queued continuation,
+  # overflow-compaction — a second agent_start but no agent_retry) is NOT exempted. cc stays fully sensitive: it
+  # emits no agent_retry (pi-extension only), so retry[] is never set and the exemption never engages.
+  if [ -n "$(printf '%s' "$v3notes" | tr -d '[:space:]')" ]; then
+    echo "  [validate_phase_log:$label] V3 exemption(s) applied:"
+    printf '%s\n' "$v3notes" | grep -v '^[[:space:]]*$' | head -5
   fi
-  if [ -n "$v3viol" ]; then
+  if [ -n "$(printf '%s' "$v3viol" | tr -d '[:space:]')" ]; then
     echo "  [validate_phase_log:$label] V3 FAIL — message ordering:"
-    printf '%s\n' "$v3viol" | head -5
+    printf '%s\n' "$v3viol" | grep -v '^[[:space:]]*$' | head -5
     pane_log "[$label] V3 FAIL pane" "$pane_target"
-    fail "[$label] V3 message ordering: $(printf '%s' "$v3viol" | head -1)"
+    fail "[$label] V3 message ordering: $(printf '%s\n' "$v3viol" | grep -v '^[[:space:]]*$' | head -1)"
   fi
 
   pass "[$label] log validations V1/V2/V3"

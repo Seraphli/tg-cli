@@ -91,6 +91,41 @@ func TestBuildToolNotifyText_RichBrWithPrePreserved(t *testing.T) {
 	noBareNewlineOutsidePre(t, "toolnotify", txt)
 }
 
+// AgentError: the pi extension's error-branch notification event ("AgentError") must render its OWN
+// dedicated header ("⚠️ Run Error") — NOT fall through to the default "✅ Task Completed", which would be
+// the exact misreport we must avoid for a failed run. The body must be carried verbatim.
+func TestBuildNotificationText_AgentError(t *testing.T) {
+	txt := BuildNotificationText(NotificationData{Event: "AgentError", Body: "boom details"})
+	if !strings.Contains(txt, "⚠️") {
+		t.Errorf("AgentError header missing ⚠️ emoji: %q", txt)
+	}
+	if !strings.Contains(txt, "Run Error") {
+		t.Errorf("AgentError header missing \"Run Error\" status: %q", txt)
+	}
+	if !strings.Contains(txt, "boom details") {
+		t.Errorf("AgentError body not rendered: %q", txt)
+	}
+	if strings.Contains(txt, "Task Completed") {
+		t.Errorf("AgentError must NOT render \"Task Completed\" (default misreport): %q", txt)
+	}
+}
+
+// AgentInterrupted: the pi extension's ESC-abort notification event ("AgentInterrupted", stopReason
+// "aborted") must render its OWN dedicated header ("⏹ Interrupted") — NOT fall through to the default
+// "✅ Task Completed", which would misreport an interrupted turn as a completed one (R2/R3).
+func TestBuildNotificationText_AgentInterrupted(t *testing.T) {
+	txt := BuildNotificationText(NotificationData{Event: "AgentInterrupted", Body: "⏹ pi run interrupted"})
+	if !strings.Contains(txt, "⏹") {
+		t.Errorf("AgentInterrupted header missing ⏹ stop glyph: %q", txt)
+	}
+	if !strings.Contains(txt, "Interrupted") {
+		t.Errorf("AgentInterrupted header missing \"Interrupted\" status: %q", txt)
+	}
+	if strings.Contains(txt, "Task Completed") {
+		t.Errorf("AgentInterrupted must NOT render \"Task Completed\" (default misreport): %q", txt)
+	}
+}
+
 // Fix 13a: a no-arg tool (e.g. TaskList with tool_input {}) has no formatted body, but must still
 // produce a name-only skeleton "🔧 <tool>" — never "" — so the caller sends a notification (the tool
 // call must be visible on TG and must separate adjacent assistant text messages for V3 ordering).

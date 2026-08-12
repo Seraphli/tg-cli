@@ -258,7 +258,7 @@ func runBusyTick(bs *BotState) {
 	snapshot := make(map[string]*routeSnapshot)
 	for _, info := range bs.SessionState.All() {
 		target := info.TmuxTarget
-		running := helpers.IsSessionRunning(target)
+		running := helpers.IsSessionRunning(bs.HookRunning, target)
 		seenTargets[target] = true
 
 		// f29 D: on a busy→idle transition, capture the pane tail and warn ONCE if it shows a 401

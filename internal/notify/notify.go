@@ -27,6 +27,10 @@ type NotificationData struct {
 	ContextWindowSize int
 	ContextUsedTokens int
 	Finalized         bool
+	// Interrupted (Event=="Message", Item 7): this streamed bubble's pi run was truncated by a retryable
+	// provider error that pi is auto-retrying on the same turn — render "🔄 Interrupted — retrying…". Takes
+	// precedence over Finalized.
+	Interrupted bool
 	// Cron fields (Event=="Cron"): the cron job identity for the notification header.
 	CronJobID    string
 	CronName     string
@@ -1359,13 +1363,22 @@ func BuildNotificationText(data NotificationData) string {
 		// no longer carries a " from <agent>" suffix.
 		status += DeliveryStatusTag(data.DeliveryStatus)
 	case data.Event == "Message":
-		if data.Finalized {
+		switch {
+		case data.Interrupted:
+			// Item 7: this streamed bubble's pi run was truncated by a retryable provider error (stream cut,
+			// overloaded, 429/5xx) and pi is auto-retrying the SAME turn — a complete answer follows in a new
+			// bubble below. Mark the truncated bubble so the half-message is not mistaken for a real answer.
+			// Distinct from ✅ Task Completed (done), ⏹ Interrupted (ESC abort), and ⚠️ Run Error (Item 3b,
+			// retries exhausted). Precedence over Finalized (an errored bubble is never a Stop-relabel target).
+			emoji = "🔄"
+			status = "Interrupted — retrying…"
+		case data.Finalized:
 			// f29 F: the turn-FINAL streamed message (Finalized = the relabeled last chunk, position-based
 			// per cmd/stream.go) is labeled "Task Completed" to match the Stop-direct-send; earlier bubbles
 			// (Finalized=false) stay "💬 Message".
 			emoji = "✅"
 			status = "Task Completed"
-		} else {
+		default:
 			emoji = "💬"
 			status = "Message"
 		}
@@ -1374,6 +1387,14 @@ func BuildNotificationText(data NotificationData) string {
 		// the position-based label (turn-final → Task Completed) is documented alongside the Message case.
 		emoji = "✅"
 		status = "Task Completed"
+	case data.Event == "AgentInterrupted":
+		// pi ESC-abort (stopReason "aborted"): a distinct header with a STOP glyph — NOT the default
+		// "✅ Task Completed", which would misreport an interrupted turn as a completed one.
+		emoji = "⏹"
+		status = "Interrupted"
+	case data.Event == "AgentError":
+		emoji = "⚠️"
+		status = "Run Error"
 	default:
 		emoji = "✅"
 		status = "Task Completed"
@@ -1447,6 +1468,18 @@ func buildToolNotifyBody(toolName string, toolInput json.RawMessage, cwd string)
 	esc := func(v interface{}) string {
 		return markdown.EscapeHTML(fmt.Sprintf("%v", v))
 	}
+	// first returns the first present key's value among aliases, letting a normalised pi tool (CC name, pi
+	// field keys) resolve — e.g. Read/Edit/Write use first("file_path", "path") because pi's field is `path`.
+	// Symmetric with BuildCompactToolLine's str() fallback (Fix R4 Item 4); the compact one-line summary got
+	// the fallback in commit 32bf054 but this details body did not, so a pi Read/Edit/Write rendered no path.
+	first := func(keys ...string) (interface{}, bool) {
+		for _, key := range keys {
+			if v, ok := fields[key]; ok {
+				return v, true
+			}
+		}
+		return nil, false
+	}
 	switch toolName {
 	case "Bash":
 		if cmd, ok := fields["command"]; ok {
@@ -1462,18 +1495,18 @@ func buildToolNotifyBody(toolName string, toolInput json.RawMessage, cwd string)
 			fmt.Fprintf(&b, "\n🔄 background: %s", esc(bg))
 		}
 	case "Edit":
-		if fp, ok := fields["file_path"]; ok {
+		if fp, ok := first("file_path", "path"); ok {
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if ra, ok := fields["replace_all"]; ok {
 			fmt.Fprintf(&b, "\n🔄 replace_all: %s", esc(ra))
 		}
 		oldStr := ""
-		if old, ok := fields["old_string"]; ok {
+		if old, ok := first("old_string", "oldText"); ok {
 			oldStr = fmt.Sprintf("%v", old)
 		}
 		newStr := ""
-		if ns, ok := fields["new_string"]; ok {
+		if ns, ok := first("new_string", "newText"); ok {
 			newStr = fmt.Sprintf("%v", ns)
 		}
 		if oldStr != "" {
@@ -1487,14 +1520,14 @@ func buildToolNotifyBody(toolName string, toolInput json.RawMessage, cwd string)
 			fmt.Fprintf(&b, "\n\nNew: (empty)")
 		}
 	case "Write":
-		if fp, ok := fields["file_path"]; ok {
+		if fp, ok := first("file_path", "path"); ok {
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if content, ok := fields["content"]; ok {
 			fmt.Fprintf(&b, "\n\n<pre>%s</pre>", markdown.ExpandTabs(esc(content)))
 		}
 	case "Read":
-		if fp, ok := fields["file_path"]; ok {
+		if fp, ok := first("file_path", "path"); ok {
 			fmt.Fprintf(&b, "📄 %s", esc(fp))
 		}
 		if offset, ok := fields["offset"]; ok {
@@ -1639,9 +1672,13 @@ func BuildCompactToolLine(toolName string, toolInput json.RawMessage, cwd string
 	if err := json.Unmarshal(toolInput, &fields); err != nil {
 		return markdown.EscapeHTML(toolName)
 	}
-	str := func(key string) string {
-		if v, ok := fields[key]; ok {
-			return fmt.Sprintf("%v", v)
+	// str returns the first present key's value. The fallback list lets a normalised pi tool (CC name, but pi
+	// field keys) resolve: e.g. Read/Edit/Write use str("file_path", "path") since pi's field is `path`.
+	str := func(keys ...string) string {
+		for _, key := range keys {
+			if v, ok := fields[key]; ok {
+				return fmt.Sprintf("%v", v)
+			}
 		}
 		return ""
 	}
@@ -1672,6 +1709,9 @@ func BuildCompactToolLine(toolName string, toolInput json.RawMessage, cwd string
 		emoji = "📝"
 	case "Bash":
 		emoji = "💻"
+	case "ls":
+		// pi's `ls` (kept lowercase — no CC analogue; see NormalizePiToolName).
+		emoji = "📂"
 	case "Glob", "Grep":
 		emoji = "🔍"
 	case "Agent":
@@ -1695,10 +1735,13 @@ func BuildCompactToolLine(toolName string, toolInput json.RawMessage, cwd string
 	switch toolName {
 	case "Read":
 		// Fix 17: compact Read shows only the filename (basename) — the full path is in the collapsed
-		// details body. TailPath(...,1) returns the last path segment.
-		info = truncate(TailPath(str("file_path"), 1), maxLen)
+		// details body. TailPath(...,1) returns the last path segment. pi's field is `path` (fallback).
+		info = truncate(TailPath(str("file_path", "path"), 1), maxLen)
 	case "Edit", "Write":
-		info = truncate(TailPath(str("file_path"), 3), maxLen)
+		info = truncate(TailPath(str("file_path", "path"), 3), maxLen)
+	case "ls":
+		// pi `ls` (lowercase): show the listed directory path (field `path`; empty = cwd).
+		info = truncate(TailPath(str("path"), 3), maxLen)
 	case "Bash":
 		info = CompactBashCommand(str("command"), maxLen)
 	case "Glob":
@@ -1764,6 +1807,26 @@ func BuildToolResultText(toolName string, toolResponse json.RawMessage) string {
 	var strResult string
 	if err := json.Unmarshal(toolResponse, &strResult); err == nil {
 		return "✅ Result:\n<pre>" + markdown.EscapeHTML(strResult) + "</pre>"
+	}
+	// pi tool results are an ARRAY of content blocks — [{"type":"text","text":"…"}] (verified in pi 0.84.1
+	// transcripts + bot.log). Neither the string unmarshal above nor the map unmarshal below matches an array,
+	// so without this branch a pi result falls through to the raw <pre> JSON dump. Join the text blocks and
+	// render like the plain-string case. A CC map result (object) fails this array unmarshal and falls through
+	// to the map branch unchanged.
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(toolResponse, &blocks); err == nil && len(blocks) > 0 {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return "✅ Result:\n<pre>" + markdown.EscapeHTML(strings.Join(parts, "\n")) + "</pre>"
+		}
 	}
 	var fields map[string]interface{}
 	if err := json.Unmarshal(toolResponse, &fields); err == nil {

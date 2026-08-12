@@ -515,3 +515,59 @@ func TestFetchMergedUsageWith_CodexOKClaudeRealError(t *testing.T) {
 
 // Ensure fmt import is used (used in helper only via Sprintf if needed).
 var _ = fmt.Sprintf
+
+func TestReadContextUsagePi(t *testing.T) {
+	dir := filepath.Join(os.TempDir(), "tg-cli", "context")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir context dir: %v", err)
+	}
+	write := func(sid, body string) {
+		p := filepath.Join(dir, sid+".json")
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatalf("write %s: %v", sid, err)
+		}
+		t.Cleanup(func() { os.Remove(p) })
+	}
+
+	// Case 1: pi-shape, non-zero tokens -> pct = 48000/(180000-16384)*100 = 29.
+	write("tc_pi_ctx_1", `{"backend":"pi","context_tokens":48000,"context_window":180000,"reserve_tokens":16384}`)
+	if pct, used, total, ok := ReadContextUsage("tc_pi_ctx_1"); !ok || pct != 29 || used != 48000 || total != 163616 {
+		t.Errorf("case1: got pct=%d used=%d total=%d ok=%v; want 29/48000/163616/true", pct, used, total, ok)
+	}
+
+	// Case 2: tokens-null observable (extension writes 0) -> 0% per the boss ruling.
+	write("tc_pi_ctx_2", `{"backend":"pi","context_tokens":0,"context_window":180000,"reserve_tokens":16384}`)
+	if pct, used, total, ok := ReadContextUsage("tc_pi_ctx_2"); !ok || pct != 0 || used != 0 || total != 163616 {
+		t.Errorf("case2: got pct=%d used=%d total=%d ok=%v; want 0/0/163616/true", pct, used, total, ok)
+	}
+
+	// Case 3: no window (context_window 0) -> effLimit <= 0 -> ok=false (no segment).
+	write("tc_pi_ctx_3", `{"backend":"pi","context_tokens":0,"context_window":0,"reserve_tokens":16384}`)
+	if _, _, _, ok := ReadContextUsage("tc_pi_ctx_3"); ok {
+		t.Errorf("case3: got ok=true; want ok=false for zero window")
+	}
+
+	// Case 4: CC-shape file still uses size*80/100 (regression guard; cc/codex numbers must stay byte-identical).
+	write("tc_pi_ctx_4", `{"context_window_size":200000,"current_usage":{"input_tokens":80000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
+	if pct, used, total, ok := ReadContextUsage("tc_pi_ctx_4"); !ok || pct != 50 || used != 80000 || total != 160000 {
+		t.Errorf("case4 (CC regression): got pct=%d used=%d total=%d ok=%v; want 50/80000/160000/true", pct, used, total, ok)
+	}
+}
+
+// TestNormalizePiToolName covers Round-2 Item 2: the six pi tools with a CC analogue map to the canonical CC
+// name; `ls` is deliberately left UNCHANGED (no CC analogue — normalising it would silence ls via
+// ShouldNotifyTool, note3 CHANGE 2); unknown/codex names pass through untouched.
+func TestNormalizePiToolName(t *testing.T) {
+	cases := map[string]string{
+		"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit",
+		"grep": "Grep", "find": "Glob",
+		"ls":     "ls",     // UNCHANGED — no CC analogue
+		"Bash":   "Bash",   // already canonical -> untouched
+		"unknown": "unknown", // pass-through
+	}
+	for in, want := range cases {
+		if got := NormalizePiToolName(in); got != want {
+			t.Errorf("NormalizePiToolName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

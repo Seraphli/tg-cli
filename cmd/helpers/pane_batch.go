@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/injector"
 )
 
@@ -13,7 +14,11 @@ import (
 // yields ("", false) — the same empty-title / not-running result the old GetPaneTitle error path
 // produced, so the caller's inject-queue-flush branch still runs. A "node" pane resolves its real
 // backend by looking its shell pid up in children (built once per tick), so no per-pane ps runs here.
-func PaneState(tmuxTarget string, panes map[string]injector.PaneInfo, children map[string]string) (string, bool) {
+// The busy decision routes through storeOrTitleBusy (store-aware for pi; title-based for cc/codex/other),
+// so a running pi session — which TitleIsBusy cannot classify — reads busy from the in-memory run-state
+// store. A pi pane whose process died self-heals to idle: on the next tick Command != "pi" -> detectBackend
+// returns "" -> the store is bypassed -> TitleIsBusy("", title) == false.
+func PaneState(tmuxTarget string, panes map[string]injector.PaneInfo, children map[string]string, hookRunning *stores.HookRunningStateStore) (string, bool) {
 	target, err := injector.ParseTarget(tmuxTarget)
 	if err != nil {
 		return "", false
@@ -28,12 +33,14 @@ func PaneState(tmuxTarget string, panes map[string]injector.PaneInfo, children m
 	if info.Title == "" {
 		return info.Title, false
 	}
-	// The busy decision is the single classifier TitleIsBusy (it trims + applies the cc/codex prefix
-	// rules); the backend comes from the shared detectBackend switch (its closure resolves a "node" pane
-	// from the pre-fetched children map — NOT a live ps call — and is not invoked for claude/codex/other).
-	// The returned title is info.Title UNCHANGED — this getter must not normalize (it only feeds
-	// typingLog); the whitespace trim for the decision lives only inside TitleIsBusy.
-	running := TitleIsBusy(detectBackend(info.Command, func() string { return children[info.PID] }), info.Title)
+	// The busy decision routes through storeOrTitleBusy (store-aware for pi; title-based for cc/codex/other);
+	// the backend comes from the shared detectBackend switch (its closure resolves a "node" pane from the
+	// pre-fetched children map — NOT a live ps call — and is not invoked for claude/codex/other/pi). The
+	// returned title is info.Title UNCHANGED — this getter must not normalize (it only feeds typingLog); the
+	// whitespace trim for the decision lives only inside TitleIsBusy. tmuxTarget (the raw string arg) is the
+	// store key — the same bare pane-id the agent_start hook uses in bs.HookRunning.SetRunning.
+	backend := detectBackend(info.Command, func() string { return children[info.PID] })
+	running := storeOrTitleBusy(hookRunning, backend, tmuxTarget, info.Title)
 	return info.Title, running
 }
 

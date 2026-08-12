@@ -44,6 +44,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 		}
 		// Strip socket suffix so internal stores use bare pane IDs (e.g. %859 not %859@/tmp/...)
 		p.TmuxTarget = notify.FormatPaneID(p.TmuxTarget)
+		// Normalise pi's lowercase tool names onto the canonical CC names ONCE at ingest, before p.ToolName's
+		// first use, so all downstream CC logic (ShouldNotifyTool/knownTools, BuildCompactToolLine, the Tools
+		// menu, PendingWait match) applies unchanged. The archived `raw` payload keeps pi's actual name. `ls`
+		// stays lowercase (no CC analogue) so it keeps falling through to the "Other" bucket.
+		if p.Backend == "pi" {
+			p.ToolName = helpers.NormalizePiToolName(p.ToolName)
+		}
 		// Capture the ingress arrival time IMMEDIATELY after parse + FormatPaneID. This is the authoritative
 		// best-effort arrival stamp — carried into the queued job metadata (drain eligibility deadline) and
 		// stamped onto the archive ts (RecordHookEventAt) so archive ORDER BY ts == arrival order even though
@@ -197,6 +204,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								StopCooldown:     bs.StopCooldown,
 								ReactionTracker:  bs.ReactionTracker,
 								SessionState:     bs.SessionState,
+								HookRunning:      bs.HookRunning,
 								HookSessionLocks: &bs.HookSessionLocks,
 								SessionEvents:    bs.SessionEvents,
 								PendingMsgStore:  bs.PendingMsgStore,
@@ -394,6 +402,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 									StopCooldown:     bs.StopCooldown,
 									ReactionTracker:  bs.ReactionTracker,
 									SessionState:     bs.SessionState,
+									HookRunning:      bs.HookRunning,
 									HookSessionLocks: &bs.HookSessionLocks,
 									SessionEvents:    bs.SessionEvents,
 									PendingMsgStore:  bs.PendingMsgStore,
@@ -433,6 +442,49 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					if p.TmuxTarget != "" {
 						go cb.CheckSessionVersion(bs, p.TmuxTarget)
 					}
+				}
+			case "agent_start":
+				// pi extension POSTs agent_start at run start (before the first tool call) to mark busy.
+				if p.TmuxTarget != "" {
+					bs.HookRunning.SetRunning(p.TmuxTarget)
+					cb.TypingLog("state: event=agent_start target=%s state=running", p.TmuxTarget)
+				}
+			case "agent_idle":
+				// pi extension POSTs agent_idle at agent_settled when a run ended in an INTERRUPTED/ERROR
+				// stopReason (aborted = ESC, error = retries exhausted) — instead of Stop (which would relabel
+				// the last bubble to "Task Completed"). Clears busy (pi busy is store-held with no reaper; Stop's
+				// SetIdle is the only other clear) and does NOTHING else to the turn — no
+				// finalize/relabel/TryClose/StopCooldown/CancelPendingWait (pending waits are cancelled by the
+				// next UserPromptSubmit, ~register.go:256). Matches CC, which posts no Stop on an interrupt.
+				// R2/R3 — notifications unify UPWARD: EVERY interrupt notifies. Dispatch on stop_reason (pi's own
+				// value, forwarded VERBATIM by the extension — never guessed here): "aborted" => a standalone
+				// Interrupted notification; "error" => the AgentError notification carrying error_message;
+				// anything else => SetIdle only, no notification.
+				if p.TmuxTarget != "" {
+					bs.HookRunning.SetIdle(p.TmuxTarget)
+					cb.TypingLog("state: event=agent_idle target=%s state=idle", p.TmuxTarget)
+				}
+				if chat != nil {
+					switch p.StopReason {
+					case "aborted":
+						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentInterrupted", p.Project, cwdForRoute, p.TmuxTarget, "⏹ pi run interrupted", "", hookAgentName, hookTopicID)
+					case "error":
+						errBody := "⚠️ pi run error\n\n" + p.ErrorMessage
+						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, errBody, "", hookAgentName, hookTopicID)
+					}
+				}
+			case "agent_retry":
+				// pi extension POSTs agent_retry at the retry's agent_start when the PREVIOUS run of this SAME turn
+				// ended in a retryable provider error (stream truncation / overloaded / 429 / 5xx) and pi is auto-
+				// continuing. Mark the already-rendered (truncated) bubble of this turn interrupted-and-retrying
+				// (Item 7): a complete answer follows in a new bubble below. The retry's own agent_start already
+				// SetRunning, so agent_retry touches ONLY the bubble — no busy state, no notification. Complementary
+				// to (never disturbs) the agent_idle settled path (Item 3b: retries EXHAUSTED -> AgentError).
+				if bs.Streams.MarkInterruptedRetry(p.SessionID, p.TurnID) {
+					cb.FlushStreamOp(bs, p.SessionID) // re-render the sealed bubble once with the interrupted mark
+					logger.Info(fmt.Sprintf("agent_retry: marked interrupted bubble session=%s turn_id=%s error=%s", p.SessionID, p.TurnID, p.ErrorMessage))
+				} else {
+					logger.Info(fmt.Sprintf("agent_retry: no bubble to mark session=%s turn_id=%s", p.SessionID, p.TurnID))
 				}
 			case "PreToolUse":
 				if p.TmuxTarget != "" {
@@ -507,10 +559,11 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							return m.Event == "MessageDisplay" && !m.ArrivedAt.After(deadline) &&
 								!(m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
 						}
-						// boundary: the front-scan STOPS here — the next tool/turn-terminal, anything past the
+						// boundary: the front-scan STOPS here — the next tool, THIS tool's own PostToolUse (so a
+						// post-tool MD is never drained into the pre-tool flush), a turn-terminal, anything past the
 						// deadline, or a different-prompt MessageDisplay (rev 15 MAJOR1 zero-grace terminate).
 						boundary := func(m stores.JobMeta) bool {
-							return m.Event == "PreToolUse" || m.Event == "Stop" || m.Event == "UserPromptSubmit" ||
+							return m.Event == "PreToolUse" || m.Event == "PostToolUse" || m.Event == "Stop" || m.Event == "UserPromptSubmit" ||
 								m.Event == "SessionEnd" || m.ArrivedAt.After(deadline) ||
 								(m.Event == "MessageDisplay" && m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
 						}

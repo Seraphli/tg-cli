@@ -446,3 +446,48 @@ func TestTwoReservedMDContend(t *testing.T) {
 		t.Fatalf("queue exceeded cap+1: max observed %d", maxLen.Load())
 	}
 }
+
+// TestExtractStopsAtPostToolUse: with an S6-shaped boundary that INCLUDES PostToolUse (matching the fixed
+// register.go), the front-scan STOPS at THIS tool's own PostToolUse — so a post-tool MessageDisplay queued
+// behind PostToolUse but before Stop is NOT drained into the pre-tool flush. The extract returns nothing and
+// reports hitBoundary. Mirrors the driver-job construction of the other extract tests (worker parked so the
+// idle worker never dequeues the seated jobs while we scan them).
+func TestExtractStopsAtPostToolUse(t *testing.T) {
+	s := NewSessionEventStore()
+	w := s.getOrCreate("sess")
+	base := time.Now()
+	// eligible: any MessageDisplay. boundary: S6-shaped, INCLUDING PostToolUse.
+	eligible := func(m JobMeta) bool { return m.Event == "MessageDisplay" }
+	boundary := func(m JobMeta) bool {
+		return m.Event == "PreToolUse" || m.Event == "PostToolUse" || m.Event == "Stop" ||
+			m.Event == "UserPromptSubmit" || m.Event == "SessionEnd"
+	}
+	noop := func() error { return nil }
+	gotCh := make(chan []*sessionEventJob, 1)
+	hitCh := make(chan bool, 1)
+	unblock := make(chan struct{})
+	s.DispatchAsync("sess", "driver", func() error {
+		// Seat the queue: PostToolUse(boundary), MD(post — behind the boundary), Stop.
+		w.mu.Lock()
+		w.jobs = []*sessionEventJob{
+			{event: "PostToolUse", promptID: "p1", arrivedAt: base, handler: noop},
+			{event: "MessageDisplay", promptID: "p1", arrivedAt: base, handler: noop},
+			{event: "Stop", promptID: "p1", arrivedAt: base, handler: noop},
+		}
+		got, hitBoundary := extractEligibleBeforeBoundaryLocked(w, eligible, boundary)
+		w.mu.Unlock()
+		gotCh <- got
+		hitCh <- hitBoundary
+		<-unblock // keep the worker parked so it never dequeues the seated jobs
+		return nil
+	})
+	got := <-gotCh
+	hitBoundary := <-hitCh
+	if len(got) != 0 {
+		t.Fatalf("post-tool MD must NOT be extracted (scan stops at PostToolUse boundary), got %d extracted", len(got))
+	}
+	if !hitBoundary {
+		t.Errorf("expected hitBoundary == true (PostToolUse is a boundary), got false")
+	}
+	close(unblock)
+}
