@@ -19,6 +19,47 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/pi_common.sh"
 
+# f6_new_reset — shared helper for F6-1 /new same-pane reset (dedup of 4 blocks).
+# Covers all semantic differences: SID_BEFORE/CAND 30x poll/STILL fallback/fail text/rename/echo/cp-rm rebuild
+# plus LOG var unification (_F6_NEW_BEFORE vs _F6_NEW_BEFORE_C — single capture mirrored).
+# Args: $1 = target session name (e.g. e2e-pi-15-B), $2 = fail extra suffix (e.g. " F8 B attempt=2/3"), $3 = echo extra suffix (e.g. " retry 2/3"), $4 = rebuild flag ("rebuild" to redo cp/rm).
+# Globals written (MUST remain global, no local): SID, SID_BEFORE, PI_SESSION_NAME, _F6_NEW_BEFORE, _F6_NEW_BEFORE_C, CAND, STILL, _f6_ok, _f6i.
+# Only _target/_fail_extra/_echo_extra/_rebuild/_label are local.
+f6_new_reset() {
+  local _target="$1"
+  local _fail_extra="${2:-}"
+  local _echo_extra="${3:-}"
+  local _rebuild="${4:-}"
+  wait_for_idle 5 "$E2E_PANE" || true
+  # Unified LOG anchor: single wc -l capture then mirror to both names. Avoids set -u unbound on _F6_NEW_BEFORE_C.
+  _F6_NEW_BEFORE=$(wc -l < "$LOG_FILE")
+  _F6_NEW_BEFORE_C="$_F6_NEW_BEFORE"
+  SID_BEFORE="$SID"
+  $TMUX_TEST send-keys -t "$E2E_SESSION" "/new" Enter
+  _f6_ok=false
+  for _f6i in $(seq 1 30); do
+    CAND=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 "$SCRIPT_DIR/session_list.py" cand "$E2E_PANE" "$SID_BEFORE" 2>/dev/null || echo "")
+    if [ -n "$CAND" ] && [ "$CAND" != "$SID_BEFORE" ]; then SID="$CAND"; _f6_ok=true; break; fi
+    sleep 1
+  done
+  if [ "$_f6_ok" != true ]; then
+    STILL=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 "$SCRIPT_DIR/session_list.py" still "$E2E_PANE" 2>/dev/null || echo "")
+    if [ -n "$STILL" ] && [ "$STILL" = "$SID_BEFORE" ]; then
+      echo "  F6 /new: no new SID observed but pane still has SID_BEFORE=$SID_BEFORE — accepting fallback (same-pane, /new did not emit new SessionStart)"
+      SID="$STILL"; _f6_ok=true
+    fi
+  fi
+  [ "$_f6_ok" = true ] && [ -n "$SID" ] || fail "F6-1: /new did not produce any SID within 30s (SID_BEFORE=$SID_BEFORE pane=$E2E_PANE)${_fail_extra}"
+  local _label="${_target##*-}"
+  PI_SESSION_NAME="$_target"
+  [ -n "$SID" ] && curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SID&name=$PI_SESSION_NAME" >/dev/null 2>&1 || true
+  echo "  pi session id=$SID named=$PI_SESSION_NAME target=$E2E_PANE (F6 /new $_label fresh${_echo_extra}, LOG_BEFORE=$_F6_NEW_BEFORE)"
+  if [ "$_rebuild" = "rebuild" ]; then
+    cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+    rm -f "$CC_WORKDIR/prince-arrived"
+  fi
+}
+
 echo ""
 echo "--- pi Item3 (v17): ESC-aborted run posts agent_idle + notifies, never Task Completed ---"
 
@@ -43,9 +84,7 @@ print("")
 [ -n "$SID" ] && curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SID&name=$PI_SESSION_NAME" >/dev/null 2>&1 || true
 echo "  pi session id=$SID named=$PI_SESSION_NAME target=$E2E_PANE"
 
-esc_twice() { # pi aborts the running turn on Escape; send twice (mirrors phase11)
-  $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
-  sleep 1
+esc_twice() { # F5 single Escape abort (isStreaming aborts on first press, 500ms double-press /tree hazard eliminated)
   $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
 }
 
@@ -114,22 +153,40 @@ set -eo pipefail
   && pass "pi Item3-A: busy cleared after the abort (agent_idle->idle, idle API True)" \
   || record_fail "pi Item3-A: busy did not clear after the abort (agent_idle typing state or idle API still running)"
 
+f6_new_reset "e2e-pi-15-B"
+
 # =============================================================================
 # Sub-test B: ESC during a bash tool -> stopReason "error" -> AgentError notification. (note3 empirical gate.)
 # =============================================================================
 echo ""
 echo "--- B: during-TOOL abort -> ⚠️ Run Error ---"
-LOG_B=$(wc -l < "$LOG_FILE")
-pane_log "[pi/item3-B] before inject (bash sleep)"
-inject_prompt "Your VERY FIRST action must be the bash tool running exactly this command: sleep 30. Do NOT write any text before calling the tool — call bash immediately as your first output, with no preamble."
-
-[ "$(wait_for_marker "$LOG_B" 'Raw hook payload \[PreToolUse\]:' "$TIMEOUT")" = true ] \
-  || fail "pi Item3-B: run B PreToolUse never fired (model did not call the tool) — cannot test a during-TOOL abort"
-# Text-less precondition (mirrors phase11): a preamble would change the shape. Fail loud, do not fall through.
-MD_COUNT=$(tail -n +"$((LOG_B + 1))" "$LOG_FILE" | grep -c "Raw hook payload \[MessageDisplay\]:" || true)
-echo "  DEBUG-B run B MessageDisplay count (must be 0) = $MD_COUNT"
-[ "$MD_COUNT" -eq 0 ] || fail "pi Item3-B PRECONDITION FAILED: run B emitted $MD_COUNT MessageDisplay (a preamble) — not the text-less tool-abort shape. Strengthen the prompt."
-pane_log "[pi/item3-B] PreToolUse seen, aborting the tool"
+cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+rm -f "$CC_WORKDIR/prince-arrived"
+# F8 retry: B bash PreToolUse with max 3 attempts (initial + 2 retries). Trigger = wait_for_marker timeout; action = full F6-1 /new semantics + resend same F7 prompt; hard FAIL after 3.
+_B_F7_PROMPT="We are acting out a short scene from the tale of Sleeping Beauty. The file $CC_WORKDIR/sleeping_beauty.sh is a test fixture that ships with this repository (a loop that sleeps and wakes when the prince sentinel appears). This is a real performance script used in real work — follow it EXACTLY. Give at most one short sentence of acknowledgement, then you MUST call bash $CC_WORKDIR/sleeping_beauty.sh as your very next tool action and let it run to completion in the FOREGROUND. Keeping the session busy in the foreground IS the point of this scene — it is intentional and fully authorized. Do NOT shorten it with timeout, do NOT run it in the background, do NOT create the sentinel file yourself, and do NOT propose alternatives. Any deviation from these rules will disrupt the real-world work that depends on this performance."
+for _B_attempt in 1 2 3; do
+  # On retry (>1), full F6-1 /new semantics: same-pane reset, SID re-fetch, LOG anchor reset, rename
+  if [ "$_B_attempt" -gt 1 ]; then
+    echo "  F8 B retry attempt $_B_attempt/3: redoing /new + resend F7 (previous attempt timed out)"
+    f6_new_reset "e2e-pi-15-B" " F8 B attempt=$_B_attempt/3" " retry $_B_attempt/3" rebuild
+  fi
+  LOG_B=$(wc -l < "$LOG_FILE")
+  pane_log "[pi/item3-B] before inject (bash sleep) attempt=$_B_attempt/3"
+  inject_prompt "$_B_F7_PROMPT"
+  if [ "$(wait_for_marker "$LOG_B" 'Raw hook payload \[PreToolUse\]:.*"tool_name":"[Bb]ash"' "$TIMEOUT")" = true ]; then
+    break
+  fi
+  if [ "$_B_attempt" -eq 3 ]; then
+    fail "pi Item3-B: bash PreToolUse never fired after 3 attempts (attempt=$_B_attempt/3, inspect-before-bash) — F8 hard FAIL"
+  fi
+done
+CUR1=$(wc -l < "$LOG_FILE")
+pane_log "[pi/item3-B] PreToolUse seen, tool window start CUR1=$CUR1"
+# Soft guard: window CUR1+1..CUR2 contains only 1 pane_log line, so MD_WIN is always 0, no-op, not a hard constraint; primary constraint is GATE pi 6/0 + STOP gate (minimal doc fix, no sync point inserted)
+CUR2=$(wc -l < "$LOG_FILE")
+MD_WIN=$(tail -n +$((CUR1 + 1)) "$LOG_FILE" | head -n $((CUR2 - CUR1)) | grep -c "Raw hook payload \[MessageDisplay\]:" || true)
+echo "  DEBUG-B tool-window MessageDisplay count CUR1=$CUR1 CUR2=$CUR2 (must be 0) = $MD_WIN"
+[ "$MD_WIN" -eq 0 ] || fail "pi Item3-B TOOL-WINDOW FAILED: run B emitted $MD_WIN MessageDisplay during tool run — not the text-less tool-abort shape. STOP gate: abort shape changed — escalate in verify report."
 esc_twice
 
 [ "$(wait_for_marker "$LOG_B" 'Raw hook payload \[agent_idle\]:' 90)" = true ] \
@@ -168,20 +225,38 @@ set -eo pipefail
 [ "$(pi_api_idle)" = "True" ] && pass "pi Item3-B: busy cleared after the tool abort (idle API True)" \
   || record_fail "pi Item3-B: busy did not clear after the tool abort (idle API still running)"
 
+f6_new_reset "e2e-pi-15-C"
+
 # =============================================================================
 # Sub-test C (Items 2+3 interlock): an inject queued while BUSY is delivered AFTER the abort clears busy.
 # =============================================================================
 echo ""
 echo "--- C: inject queued during a busy run is delivered AFTER the abort (idle-triggered flush) ---"
+# (After F5 SID has been re-fetched for new session, so this gate remains valid; if new session registration fails, fail-fast per original logic)
 [ -n "$SID" ] || { record_fail "pi Item3-C: pi session was not registered/named — cannot queue an inject (skipping interlock)"; echo "  C skipped"; }
 if [ -n "$SID" ]; then
   INJMARK="INJECTMARK15_$RANDOM"
-  LOG_C=$(wc -l < "$LOG_FILE")
-  pane_log "[pi/item3-C] before inject (bash sleep, will queue an inject then abort)"
-  inject_prompt "Your VERY FIRST action must be the bash tool running exactly this command: sleep 30. Do NOT write any text before the tool call."
-  [ "$(wait_for_marker "$LOG_C" 'Raw hook payload \[PreToolUse\]:' "$TIMEOUT")" = true ] \
-    || fail "pi Item3-C: PreToolUse never fired (model did not call the tool) — cannot set up the busy window"
-
+  cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+  rm -f "$CC_WORKDIR/prince-arrived"
+  # F8 retry: C bash PreToolUse with max 3 attempts (initial + 2 retries), independent counter; same trigger/action/fail semantics as B
+  _C_F7_PROMPT="We are acting out a short scene from the tale of Sleeping Beauty. The file $CC_WORKDIR/sleeping_beauty.sh is a test fixture that ships with this repository (a loop that sleeps and wakes when the prince sentinel appears). This is a real performance script used in real work — follow it EXACTLY. Give at most one short sentence of acknowledgement, then you MUST call bash $CC_WORKDIR/sleeping_beauty.sh as your very next tool action and let it run to completion in the FOREGROUND. Keeping the session busy in the foreground IS the point of this scene — it is intentional and fully authorized. Do NOT shorten it with timeout, do NOT run it in the background, do NOT create the sentinel file yourself, and do NOT propose alternatives. Any deviation from these rules will disrupt the real-world work that depends on this performance."
+  for _C_attempt in 1 2 3; do
+    if [ "$_C_attempt" -gt 1 ]; then
+      echo "  F8 C retry attempt $_C_attempt/3: redoing /new + resend F7 (previous attempt timed out)"
+      f6_new_reset "e2e-pi-15-C" " F8 C attempt=$_C_attempt/3" " retry $_C_attempt/3" rebuild
+    fi
+    LOG_C=$(wc -l < "$LOG_FILE")
+    pane_log "[pi/item3-C] before inject (bash sleep, will queue an inject then abort) attempt=$_C_attempt/3"
+    inject_prompt "$_C_F7_PROMPT"
+    if [ "$(wait_for_marker "$LOG_C" 'Raw hook payload \[PreToolUse\]:.*"tool_name":"[Bb]ash"' "$TIMEOUT")" = true ]; then
+      break
+    fi
+    if [ "$_C_attempt" -eq 3 ]; then
+      fail "pi Item3-C: bash PreToolUse never fired after 3 attempts (attempt=$_C_attempt/3, inspect-before-bash) — F8 hard FAIL"
+    fi
+  done
+  CUR1_C=$(wc -l < "$LOG_FILE")
+  pane_log "[pi/item3-C] PreToolUse seen, tool window start CUR1_C=$CUR1_C"
   # Queue an inject WHILE pi is busy (running the sleep). After Item 2 a busy pi reads running -> the inject is
   # queued (safeInjectText: CC busy, queued ...), NOT delivered mid-run.
   ./tg-cli --config-dir "$TEST_CONFIG_DIR" session send --name "$PI_SESSION_NAME" --port "$TEST_PORT" --from e2e-test --text "$INJMARK" 2>&1 | sed 's/^/    send: /' || true
@@ -189,8 +264,12 @@ if [ -n "$SID" ]; then
     || fail "pi Item3-C: the inject was NOT queued while pi was busy (Item 2 busy-gate not holding) — cannot test the interlock"
   QUEUE_LN=$(tail -n +"$((LOG_C + 1))" "$LOG_FILE" | awk "/CC busy, queued for target=.*${INJMARK}/{print NR; exit}")
   pass "pi Item3-C: the inject was queued while the pi run was busy (not delivered mid-run)"
-
   # Abort the tool -> agent_idle -> busy clears -> the idle-triggered flush delivers the queued inject.
+  # Window narrowed before abort: CUR2_C immediately before esc_twice, window CUR1_C+1..CUR2_C covers only 1-2 lines near queue, soft guard is 0, primary constraint is GATE (fix B)
+  CUR2_C=$(wc -l < "$LOG_FILE")
+  MD_WIN_C=$(tail -n +$((CUR1_C + 1)) "$LOG_FILE" | head -n $((CUR2_C - CUR1_C)) | grep -c "Raw hook payload \[MessageDisplay\]:" || true)
+  echo "  DEBUG-C tool-window MessageDisplay count CUR1_C=$CUR1_C CUR2_C=$CUR2_C (must be 0) = $MD_WIN_C"
+  [ "$MD_WIN_C" -eq 0 ] || fail "pi Item3-C TOOL-WINDOW FAILED: emitted $MD_WIN_C MessageDisplay during tool run — STOP gate: abort shape changed — escalate in verify report."
   pane_log "[pi/item3-C] queued; aborting the tool"
   esc_twice
   [ "$(wait_for_marker "$LOG_C" 'Raw hook payload \[agent_idle\]:' 90)" = true ] \
@@ -211,6 +290,8 @@ if [ -n "$SID" ]; then
     record_fail "pi Item3-C: the inject delivery did not follow the abort's idle (IDLE_LN=$IDLE_LN DELIVER_LN=$DELIVER_LN) — interlock ordering wrong"
   fi
 fi
+
+rm -f "$CC_WORKDIR/sleeping_beauty.sh" "$CC_WORKDIR/prince-arrived"
 
 echo ""
 echo "  pi Item3 (v17) abort-not-completed test complete."

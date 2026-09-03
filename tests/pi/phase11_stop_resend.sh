@@ -63,9 +63,7 @@ MD_COUNT=$(printf '%s\n' "$SLICE_B_PRE" | grep -c "Raw hook payload \[MessageDis
 echo "  DEBUG: run B MessageDisplay count (must be 0) = $MD_COUNT"
 [ "$MD_COUNT" -eq 0 ] || fail "pi Item1 PRECONDITION FAILED: run B emitted $MD_COUNT MessageDisplay (a preamble before the tool) — the test would be non-discriminating. Strengthen the prompt so bash is the first output. NOT falling through to the main asserts."
 
-# Abort run B before the tool returns (Escape) — pi aborts the running turn on Escape.
-$TMUX_TEST send-keys -t "$E2E_SESSION" Escape
-sleep 1
+# Abort run B before the tool returns (Escape) — F5 single Escape abort (isStreaming aborts on first press, 500ms double-press /tree hazard eliminated)
 $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
 
 # Wait for run B to settle (agent_settled -> Stop payload) after the abort.

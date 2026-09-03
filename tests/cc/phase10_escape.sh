@@ -119,7 +119,9 @@ LOG_BEFORE_FOLLOWUP=$(wc -l < "$LOG_FILE")
 
 # 9. Send follow-up message via /group/text API
 echo "  Sending follow-up message via /group/text API..."
-FOLLOWUP_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=post+escape+followup")
+FOLLOWUP_TEXT="post escape followup reply with plain text only, do not call any tools"
+FOLLOWUP_ENCODED=$(printf '%s' "$FOLLOWUP_TEXT" | jq -sRr @uri)
+FOLLOWUP_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=$FOLLOWUP_ENCODED")
 
 echo "  /group/text response: $FOLLOWUP_RESP"
 
@@ -167,6 +169,9 @@ if [ "$UPS_FOUND" = true ]; then
 else
   fail "CC did not receive follow-up message (no UserPromptSubmit within ${TIMEOUT}s)"
 fi
+
+wait_for_idle
+pane_log "[escape] followup turn idle"
 
 # Rich-freeze regression guard (v9 ESC-freeze): the AskQ freeze edit after ESC uses the rich
 # (RetryFreezeEditAuto→rich) path; a rich-payload rejection would log an "EDIT failed" line.

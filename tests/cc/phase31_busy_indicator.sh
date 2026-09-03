@@ -435,21 +435,9 @@ fi
 pane_log "[busy] TC-f BEFORE stop"
 # The prince arrives: create the external sentinel sleeping_beauty.sh polls for, so the script returns on its
 # own, CC finishes the Bash tool call and goes idle — NO background shell at teardown (the boss's external-wake
-# design, replacing the withdrawn foreground-sleep). Under this wake the Escape Escape + C-u below are now
-# REDUNDANT belt-and-suspenders (no background job remains to interrupt); retained per note3's directive to
-# keep them (attempt 2).
+# design, replacing the withdrawn foreground-sleep).
 touch "$CC_WORKDIR/prince-arrived"
-# Interrupt the still-running quiet-busy sleep so CC returns to idle before the final /exit. Otherwise
-# /exit with a running foreground shell makes CC pop a "Background work is running / Exit anyway?"
-# dialog that stop_claude never dismisses (it only sends /exit + Enter then waits for SessionEnd), so
-# CC never exits and stop_claude fails at 30s. Escape Escape = the boss-documented CC interrupt;
-# wait_for_idle confirms CC is back at the prompt.
-$TMUX_TEST send-keys -t "e2e-cc-31f" Escape Escape
 wait_for_idle
-# f10: the Escape Escape interrupt restores the previous prompt back into the composer (CC v2.1.202),
-# so clear it with C-u — otherwise the final /exit concatenates onto the restored text (observed:
-# "sleep 180/exit" -> Bash error -> no SessionEnd -> stop_claude timeout).
-$TMUX_TEST send-keys -t "e2e-cc-31f" C-u
 # f12: do NOT call stop_claude here — 31f is the LAST start_claude session, so the EXIT-trap
 # _cc_phase_cleanup (cc_common.sh:120, rc==0 branch) runs validate_phase_inline THEN stop_claude for it.
 # An explicit stop here double-stops (the trap then hits "session not found" -> rc=1 -> phase crash).
