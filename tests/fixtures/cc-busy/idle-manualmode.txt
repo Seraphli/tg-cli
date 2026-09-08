@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.261
+▝▜██████▀  nvidia/nemotron-3-super-120b-a12b:free · API Usage Billing
+  ▝▝ ▝▝    /tmp/ser62-samples/work-ccperm
+
+
+❯ Run the bash command: echo hello
+
+  Thought for 11s, ran 1 shell command
+
+● The command echo hello executed successfully and produced the following output:
+
+  hello
+
+✻ Cooked for 11s · done 4:45 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents

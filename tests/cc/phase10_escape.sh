@@ -180,3 +180,73 @@ if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -qE "(DoCancelAsk|Cance
 else
   pass "AskUserQuestion rich freeze edit succeeded after escape (no EDIT failed)"
 fi
+
+echo ""
+echo "--- TC-INT: mid-turn interrupt self-heals to idle + delivers queued follow-up (codexcheck#2) ---"
+# A REAL busy turn whose transcript carries echoed spinner text, Escaped BEFORE completion. The content
+# classifier must read the interrupted pane as IDLE (interrupted state shows no live spinner status line;
+# the echoed "✻ Pondering…" sits in the transcript, not the live status) and a queued follow-up must then
+# be delivered. The AskQ-cancel case above does NOT cover this interrupted-turn echoed-spinner residual.
+wait_for_idle
+LOG_BEFORE_INT=$(wc -l < "$LOG_FILE")
+# Echo a spinner-glyph line (adversarial transcript material) then a long generation so at Escape the
+# transcript holds "✻ Pondering…" above the interrupt marker.
+inject_prompt "First, on its own line, print exactly this literal text and nothing else on that line: ✻ Pondering… (12s). Then, without using any tools, write 40 numbered paragraphs LONG_1 through LONG_40, each at least 60 words, about the history of cartography. Write them one at a time and take your time."
+
+# Wait until CC is actually busy (1s busy tick logs "busy status sent chat="). Inline poll of $LOG_FILE
+# because wait_for_log_pattern is NOT defined here (it is local to phase31).
+INT_ELAPSED=0
+INT_BUSY=false
+while [ $INT_ELAPSED -lt 30 ]; do
+  if tail -n +"$((LOG_BEFORE_INT + 1))" "$LOG_FILE" | grep -q "busy status sent chat=" 2>/dev/null; then
+    INT_BUSY=true
+    break
+  fi
+  sleep 1
+  INT_ELAPSED=$((INT_ELAPSED + 1))
+done
+if [ "$INT_BUSY" = true ]; then
+  pass "TC-INT: session busy mid-turn"
+else
+  fail "TC-INT: session did not become busy before interrupt"
+fi
+
+# Escape MID-TURN (before the 40 paragraphs finish).
+RESP_INT=$(curl -s "http://127.0.0.1:$TEST_PORT/escape?target=$ENCODED_TARGET")
+echo "  DEBUG: RESP_INT (${#RESP_INT} chars): $RESP_INT"
+STATUS_INT=$(echo "$RESP_INT" | jq -r '.status // empty' 2>/dev/null)
+if [ "$STATUS_INT" = "ok" ]; then
+  pass "TC-INT: /escape ok (mid-turn)"
+else
+  fail "TC-INT: /escape API failed (mid-turn): $RESP_INT"
+fi
+
+# Self-heal: the classifier must read the interrupted pane IDLE. wait_for_idle polls /session/idle and
+# HARD-FAILS (fail -> exit 1) on timeout; if the classifier false-stuck on the echoed "✻ Pondering…", the
+# session would stay busy and this times out/fails.
+wait_for_idle
+pass "TC-INT: session self-healed to idle after mid-turn Escape (content classifier, no store)"
+
+# Queued follow-up must be delivered post-interrupt (mirror the existing /group/text -> "Group text API injected" pattern).
+LOG_BEFORE_INT_FU=$(wc -l < "$LOG_FILE")
+INT_FU_TEXT="post interrupt followup, reply with plain text only, do not call any tools"
+INT_FU_ENCODED=$(printf '%s' "$INT_FU_TEXT" | jq -sRr @uri)
+INT_FU_RESP=$(curl -s "http://127.0.0.1:$TEST_PORT/group/text?target=$ENCODED_TARGET&text=$INT_FU_ENCODED")
+echo "  /group/text (TC-INT) response: $INT_FU_RESP"
+INT_FU_ELAPSED=0
+INT_FU_FOUND=false
+while [ $INT_FU_ELAPSED -lt $TIMEOUT ]; do
+  if tail -n +"$((LOG_BEFORE_INT_FU + 1))" "$LOG_FILE" | grep -q "Group text API injected" 2>/dev/null; then
+    INT_FU_FOUND=true
+    break
+  fi
+  sleep 2
+  INT_FU_ELAPSED=$((INT_FU_ELAPSED + 2))
+done
+if [ "$INT_FU_FOUND" = true ]; then
+  pass "TC-INT: queued follow-up delivered after interrupt"
+else
+  fail "TC-INT: queued follow-up not delivered after interrupt within ${TIMEOUT}s (API response: $INT_FU_RESP)"
+fi
+
+wait_for_idle

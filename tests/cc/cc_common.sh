@@ -10,7 +10,7 @@ start_claude() {
   E2E_SESSION="$session_name"
   export E2E_SESSION
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
-  $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 -c "$CC_WORKDIR"
+  $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 -c "$CC_WORKDIR" -e DISABLE_AUTOUPDATER=1
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   # Launch CC via the shared canonical builder cc_launch_cmd (defined in e2e_common.sh): it forwards the same

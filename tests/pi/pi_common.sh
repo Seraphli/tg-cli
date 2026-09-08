@@ -106,7 +106,8 @@ _launch_pi_pane() {
   $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 \
     -e "NEWAPI_E2E_KEY=$NEWAPI_E2E_KEY" \
     -e "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR" \
-    -e "PI_OFFLINE=1"
+    -e "PI_OFFLINE=1" \
+    -e DISABLE_AUTOUPDATER=1
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" "$(build_pi_launch "$session_dir")"

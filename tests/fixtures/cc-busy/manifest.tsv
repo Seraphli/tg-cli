@@ -1,0 +1,18 @@
+# SER-62 cc-busy fixture verdicts. Secrets scan (sk-* tokens, credential paths, env exports) run on all 17 fixtures: CLEAN.
+busy-with-draft.txt	busy
+busy-wrapped-draft.txt	busy
+busy-askq-layout.txt	busy
+busy-live-pct7.txt	busy
+busy-numbered-draft.txt	busy
+busy-kneading.txt	busy
+busy-catapulting.txt	busy
+busy-misting.txt	busy
+idle-with-draft.txt	idle
+idle-wrapped-draft.txt	idle
+idle-adversarial.txt	idle
+idle-doneline.txt	idle
+idle-fresh.txt	idle
+idle-manualmode.txt	idle
+idle-interrupted.txt	idle
+idle-askq-wait.txt	idle
+idle-live-pct15.txt	idle

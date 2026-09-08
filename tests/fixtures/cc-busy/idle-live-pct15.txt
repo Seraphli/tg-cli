@@ -1,0 +1,50 @@
+    Verified on every captured state:
+    - BUSY (your %7): border -> skip '278918 tokens' row -> first content = status line 'Propagating…' -> BUSY. (Old one-line rule read the counter -> false-IDLE = the hole.)
+    - IDLE after turn: border -> first content = done-line (no …) -> IDLE; transcript markers ABOVE the done-line never reached (gap-3 shield). Verified cc-fixture-adversarial-idle.
+    - FRESH idle: border -> skip '◈ max · /effort' chrome row -> first content = banner line -> IDLE. Verified cc-fixture-fresh-idle. (I found the effort row is the same class as your counter row — a right-aligned chrome
+  line above the border — so the skip set covers both.)
+
+  (3) FIXTURES:
+    - askq DEGRADE PATH defined + verified: when the AskUserQuestion/permission dialog replaces the input box (the '❯' is a selection cursor '❯ 1. Red', NOT an empty prompt), the empty-prompt input box is NOT found ->
+  DEGRADE to IDLE (dialog = waiting for input = not busy). Correct semantics. (cc-fixture-askq-wait.txt)
+    - fresh idle (no done-line, banner above) — saved, handled by the scan-up (skip effort chrome -> banner -> IDLE).
+    - busy AND idle WITH the token-counter row — I COULD NOT reproduce locally: my cc tops out far below the >=200k context where that row renders (reading four ~40KB files added ~30k tokens, no counter row appeared).
+  Your %7 (278918 tokens) is a near-limit state I can't cheaply reach. REQUEST: please share the raw %7 busy + %15 idle captures (or just the exact counter-row text) so I pin the token-counter skip regex from real data
+  and add them as fixtures. Until then the skip pattern is defined from the effort-row form + your quoted 'NNNNNN tokens'.
+
+  Shape unchanged (cc anchored content / pi store / codex title). Still research-only, no plan revision. If the counter-row fixture must be nailed before you finalize with the boss, send me the %7/%15 raw text and I'll
+  pin the regex + add the fixtures."
+  echo "MAIL_EXIT=$?")
+  ⎿  === fixture headers check ===
+     ### SAMPLE: cc-fixture-adversarial-idle
+     ### model: nvidia/nemotron-3-super-120b-a12b:free
+     ### ts: 2026-09-08T04:24:04+08:00
+     ### pane_title: [✳ Register.go file]
+     ### ---- capture-pane body ----
+     ...
+     ### SAMPLE: codex-fixture-adversarial-idle
+     ### model: nvidia/nemotron-3-super-120b-a12b:free
+     ### ts: 2026-09-08T04:27:10+08:00
+     ### pane_title: [work-codex]
+     Message sent to fablenote (id: e237a7a26d236fbe)
+     MAIL_EXIT=0
+  ⎿  2 async PreToolUse hooks completed, Async hook PostToolUse completed
+
+● Spec v3 mailed with all 3 requirements addressed and artifacts saved. Holding for fablenote (research only).
+
+  This round:
+  1. Artifacts saved (with standard headers) in /tmp/ser62-samples/: cc adversarial-idle, idle-doneline, fresh-idle, askq-wait, codex adversarial-idle.
+  2. Anchor-rule hole fixed — the new cc rule scans upward from the input-box top border, skipping blank lines + right-aligned usage-metadata chrome rows (token/context counter and the effort indicator ◈ …/effort, which
+     I found is the same class), evaluates only the first content line, then STOPs. Verified on busy (skip counter → status line), idle-after-turn (done-line shield), and fresh idle (skip effort → banner).
+  3. Fixtures + askq degrade path: when the AskUserQuestion dialog replaces the input box, the empty-prompt box isn't found → degrade to IDLE (verified). Flagged honestly that I can't reproduce the ≥200k-context
+     token-counter row locally — requested fablenote's raw %7/%15 captures to pin that skip regex and add the fixture.
+
+  Shape unchanged (cc anchored content / pi store / codex title). Sampling torn down, repo clean. Waiting for fablenote.
+
+✻ Sautéed for 9m 6s · done 4:29 AM
+                                                                                                                                                                                                             603909 tokens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8 │ ca 4.1.0 ███████░░░ 75% 1M
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent

@@ -38,6 +38,32 @@ fi
 export E2E_ORCHESTRATED=1
 export TEST_CLAUDE_CONFIG_DIR
 export E2E_BACKEND="$BACKEND"
+
+# --- Pinned-tool install/verify/PATH gate (SER-62 S2) ---
+# The shared helper defines ensure_pinned_tools / verify_main_untouched / PINNED_PREFIX and sources the
+# pins (CLAUDE_CODE_VERSION / PI_VERSION / CODEX_VERSION) from pinned-tool-versions.env. Factored into a
+# helper so tests/pinned_gate_test.sh can drive ensure_pinned_tools in isolation (overridable
+# PINNED_PREFIX/HOME/npm).
+source "$SCRIPT_DIR/pinned_tools.sh"
+# Cover the driver so no tool self-updates off its pin.
+export DISABLE_AUTOUPDATER=1
+# Records each main install's path+mtime, installs/verifies the three pins into PINNED_PREFIX, and
+# exits 1 (after a `[pinned-versions] ...` stderr line) on any version mismatch that survives install.
+ensure_pinned_tools
+# Put the pinned bin dir first on PATH and pin PI_BIN so every backend resolves the pinned tool.
+export PATH="$PINNED_PREFIX/bin:$PATH"
+export PI_BIN="$PINNED_PREFIX/bin/pi"
+# TC-E5: the pinned bin dir must now win on PATH.
+_e5_claude="$(command -v claude || true)"
+if [ "$_e5_claude" != "$PINNED_PREFIX/bin/claude" ]; then
+  echo "[pinned-versions] claude PATH-assert expected=$PINNED_PREFIX/bin/claude got=$_e5_claude" >&2
+  exit 1
+fi
+if [ "$PI_BIN" != "$PINNED_PREFIX/bin/pi" ]; then
+  echo "[pinned-versions] pi PATH-assert expected=$PINNED_PREFIX/bin/pi got=$PI_BIN" >&2
+  exit 1
+fi
+
 case "$BACKEND" in
   cc) source "$SCRIPT_DIR/cc/cc_common.sh" ;;
   codex) source "$SCRIPT_DIR/codex/codex_common.sh" ;;
@@ -213,6 +239,9 @@ else
     done
   fi
 fi
+
+# Pinned-tool gate: confirm the gate/install never modified the user's main installs.
+verify_main_untouched
 
 # Final report
 echo ""

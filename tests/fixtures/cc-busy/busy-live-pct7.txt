@@ -1,0 +1,63 @@
+  2. ANCHOR RULE HOLE (my %7 again): 'the single line above the input-box top border' FAILS my real busy pane — a right-aligned context-counter row ('278918 tokens') sits BETWEEN the status line and the border, so the
+  one-line anchor reads the counter and returns false-IDLE mid-busy. Your own sterile IDLE frames had that row too ('281674 tokens' in the %15-style captures) — it just never appeared in your busy frames. FIX the
+  rule to: from the input-box top border scan UPWARD, skipping blank lines and the right-aligned token-counter row, and evaluate ONLY the first content line reached — then STOP (never continue into the transcript;
+  that reopens gap-3). Idle-after-turn still hits the done-line first (shield intact).
+
+  3. FIXTURES to add: busy AND idle panes WITH the token-counter row; the askq layout (define border-detection behavior when the question dialog replaces the input box — degrade path must be explicit); fresh idle (no
+  done-line, banner above).
+
+  Update CLASSIFIER-SPEC.md with 1-3 and mail me. Shape going to the boss as: cc=anchored content marker, pi=blessed store, codex=braille title." )
+  ⎿  Running in the background (↓ to manage)
+  ⎿  2 async PreToolUse hooks completed, 2 async PostToolUse hooks completed, Async hook Stop completed, Async hook UserPromptSubmit completed
+
+● Background command "Send four spec gaps to worker for parallel fixing" completed (exit code 0)
+  ⎿  2 async PreToolUse hooks completed, 2 async PostToolUse hooks completed
+  ⎿  Async hook PreToolUse completed, Async hook PostToolUse completed
+
+● 更正我上一条的推荐——请以本条为准拍板。 工人做完对抗测试后拿出了新证据，方案二（cc+codex 迁内容）站不住了，我核实后同意改荐方案三：
+
+  cc = 锚定内容标记，codex = 留标题盲文规则，pi = 留打卡表。
+
+  改荐的三条证据（都过了我的核）：
+
+  1. codex 迁内容有真实卡死风险：如果模型答案正文里恰好出现 "Working (9s • esc to interrupt)" 这样的字样（讨论 codex 本身时完全可能），内容正则会恒判忙——闲态界面是静止的，误判永不自愈，注入队列对那个 pane 永久卡死。而
+     codex 的标题盲文通道跟正文完全隔离、免疫此问题，且它的标题至今仍正常转动（0.153.4 实测）。没必要把免疫的通道换成有病的。
+  2. 每迁一家，批量刷新就多一家的逐 pane capture：TG 忙碌灯走的 3 秒批量 tick，其设计前提是"每 tick 每 socket 只执行一次 tmux 命令"——bot.go:58-62 注释写明这是 2026-08-01 事故的修复（当时 tmux 二进制 page cache
+     中毒，逐 pane 的 exec 全部挂死在 D 态，把 OS 线程耗尽，bot 直接死亡）。内容判定无法批量、必须逐 pane capture，这是对那次事故类的有限重新暴露——只有 cc 别无选择（标题死了），迁得越少暴露越小。
+  3. pi 打卡表、codex 标题在批量 tick 里都是零额外执行，白送的安全。
+
+  代价是三家三套判法（不如统一好看），但两套是现成且被证明工作正常的，只有 cc 是新建——按剃刀，"能用现有的就不新建"恰恰指向方案三。我上一条推方案二是在 codex 误判证据出现之前，特此更正。
+
+  （另：它的锚定规则又被我拆了一处——我自己 pane 的 tokens 计数行会挡在状态行和输入框之间，一行锚定会误判闲；已要求改成"向上跳过空行/计数行取第一条内容行"并补齐对抗样本存档。这些是细节，不影响形态选择。）
+
+  请拍板：方案三，可以吗？
+
+✻ Brewed for 1m 51s · done 4:20 AM · 2 shells still running
+
+● Background command "Re-hang mailbox receive first" completed (exit code 0)
+
+● Bash(tg-cli mailbox receive --self)
+  ⎿  Running in the background (↓ to manage)
+
+● Read agent output bsm43dvvx
+  ⎿  Read 27 lines
+  ⎿  2 async PreToolUse hooks completed, 2 async PostToolUse hooks completed, Async hook Stop completed, Async hook UserPromptSubmit completed
+
+● 正好我此刻就是"带 tokens 计数行的忙态样本"，工人自己的 pane 是闲态样本——当场采集存档给它。
+
+  Bash(cd /tmp/ser62-samples
+  { echo "### SAMPLE: fablenote-live-busy-pct7"; echo "### model: claude-fable-5 (live session, claude CLI 2.1.258)"; echo "### ts: $(date -Is)"; echo "### pane_title: [$(tmux display -p -t %7 '#{pane_title}')]"; echo
+  "### state: BUSY (mid-turn, this very capture ran inside the turn)"; tmux capture-pane -p -t %7; echo "### ---- end ----"; } > fablenote-live-busy-pct7.txt
+  { echo "### SAMPLE: tgcli-live-idle-pct15"; echo "### model: claude-opus-4-8 (live worker session, claude CLI 2.1.258)"; echo "### ts: $(date -Is)"; echo "### pane_title: [$(tmux display -p -t %15
+  '#{pane_title}')]"; echo "### state: IDLE (worker waiting after mailing)"; tmux capture-pane -p -t %15; echo "### ---- end ----"; } > tgcli-live-idle-pct15.txt
+  echo "== my busy capture: bottom content rows =="; grep -v '^ *$' fablenote-live-busy-pct7.txt | tail -7
+  echo "== worker idle capture: bottom content rows =="; grep -v '^ *$' tgcli-live-idle-pct15.txt | tail -6
+  ls -la *fixture* *live* 2>/dev/null | awk '{print $NF, $5}')
+
+· Effecting… (23s · ↓ 940 tokens)
+                                                                                                                                                                                                          377147 tokens
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Fable 5 │ ca 4.1.0 ████░░░░░░ 48% 1M
+  ⏵⏵ bypass permissions on · 2 shells · ← 1 agent

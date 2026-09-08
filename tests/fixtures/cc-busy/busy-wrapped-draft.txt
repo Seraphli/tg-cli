@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.261
+▝▜██████▀  nvidia/nemotron-3-super-120b-a12b:free · API Usage Billing
+  ▝▝ ▝▝    /tmp/ser62-samples/work-cc261
+
+
+❯ Run the bash command: sleep 30; then say done
+
+● Sleeping for 30 seconds then output done
+  ⎿  $ sleep 30; echo done
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✢ Boondoggling… (4s · ↓ 91 tokens · thought for 1s)
+                                                                                                                      tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ This is a very long queued instruction that the boss types into the input box while Claude Code is still busy working on the previous task, and it is deliberately long enough to wrap across at least two or three
+  continuation lines inside the input box so we can prove the box-finding handles wrapped drafts correctly.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

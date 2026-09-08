@@ -53,7 +53,7 @@ start_codex() {
   # Clean stale session state so bot doesn't confuse Codex pane with prior CC session
   rm -f "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
-  $TMUX_TEST new-session -d -s "$E2E_SESSION"
+  $TMUX_TEST new-session -d -s "$E2E_SESSION" -e DISABLE_AUTOUPDATER=1
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" "$(build_codex_launch)"

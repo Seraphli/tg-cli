@@ -1,0 +1,50 @@
+  one hundred sixty six
+  one hundred sixty seven
+  one hundred sixty eight
+  one hundred sixty nine
+  one hundred seventy
+  one hundred seventy one
+  one hundred seventy two
+  one hundred seventy three
+  one hundred seventy four
+  one hundred seventy five
+  one hundred seventy six
+  one hundred seventy seven
+  one hundred seventy eight
+  one hundred seventy nine
+  one hundred eighty
+  one hundred eighty one
+  one hundred eighty two
+  one hundred eighty three
+  one hundred eighty four
+  one hundred eighty five
+  one hundred eighty six
+  one hundred eighty seven
+  one hundred eighty eight
+  one hundred eighty nine
+  one hundred ninety
+  one hundred ninety one
+  one hundred ninety two
+  one hundred ninety three
+  one hundred ninety four
+  one hundred ninety five
+  one hundred ninety six
+  one hundred ninety seven
+  one hundred ninety eight
+  one hundred ninety nine
+  two hundred
+
+✻ Cooked for 32s · done 3:26 AM
+
+❯ Run the bash command: sleep 8; then tell me it is done
+
+  Sleeping for 8 seconds then output done
+  ⎿  $ sleep 8 && echo "done"
+
+✶ Misting… (6s · ↓ 72 tokens · thought for 1s)
+  ⎿  Tip: Use Plan Mode to prepare for a complex request before making changes. Press shift+tab twice to enable.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents

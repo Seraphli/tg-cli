@@ -1,0 +1,50 @@
+  one hundred eighty
+  one hundred eighty one
+  one hundred eighty two
+  one hundred eighty three
+  one hundred eighty four
+  one hundred eighty five
+  one hundred eighty six
+  one hundred eighty seven
+  one hundred eighty eight
+  one hundred eighty nine
+  one hundred ninety
+  one hundred ninety one
+  one hundred ninety two
+  one hundred ninety three
+  one hundred ninety four
+  one hundred ninety five
+  one hundred ninety six
+  one hundred ninety seven
+  one hundred ninety eight
+  one hundred ninety nine
+  two hundred
+
+✻ Cooked for 32s · done 3:26 AM
+
+❯ Run the bash command: sleep 8; then tell me it is done
+
+  Thought for 7s, ran 1 shell command
+
+● done
+
+✻ Brewed for 15s · done 3:27 AM
+
+❯ Use the AskUserQuestion tool to ask me whether I prefer red or blue. Do not do anything else.
+
+  Thought for 2s
+
+● User declined to answer questions
+  ⎿  · Do you prefer red or blue? (Red / Blue)
+
+✻ Worked for 2s · done 3:29 AM
+
+❯ Count from 1 to 200 in words, one per line, slowly
+
+* Catapulting… (3s · thinking)
+  ⎿  Tip: Use /memory to view and manage Claude memory
+                                                                                                                                                                                                           ◈ max · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents

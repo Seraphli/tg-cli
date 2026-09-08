@@ -45,7 +45,7 @@ On first run, enter your Telegram bot token (from [@BotFather](https://t.me/BotF
 ./tg-cli setup
 ```
 
-This registers all Claude Code hooks (Stop, SessionStart, SessionEnd, PermissionRequest, PreToolUse, UserPromptSubmit) in `~/.claude/settings.json`.
+This registers all Claude Code hooks (Stop, SessionStart, SessionEnd, PermissionRequest, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, MessageDisplay) in `~/.claude/settings.json`.
 
 ### 4. (Optional) Setup voice
 
@@ -216,6 +216,60 @@ go test ./...              # Unit tests
 bash tests/e2e.sh          # End-to-end tests
 bash tests/voice_test.sh   # Voice setup tests
 ```
+
+### Adapted tool versions
+
+The E2E backends are pinned to specific released versions:
+
+- Claude Code `2.1.261`
+- pi `0.85.1`
+- codex `0.153.4`
+
+#### Per-backend E2E environment mapping
+
+E2E uses a single parameter, `E2E_MODEL`. For the current baseline:
+
+```bash
+E2E_MODEL=mimo-v2.5-free
+```
+
+Note: `mimo-v2.5-free` is the documented adapted test model (NewAPI, via the oc-proxy channel).
+
+Each backend maps `E2E_MODEL` onto its own wire protocol via these env vars:
+
+**cc (Anthropic messages wire)**
+
+```bash
+unset ANTHROPIC_API_KEY
+ANTHROPIC_BASE_URL=https://newapi.seraphli.eu.cc        # NO /v1
+ANTHROPIC_AUTH_TOKEN=<newapi-token>
+ANTHROPIC_MODEL=$E2E_MODEL
+ANTHROPIC_DEFAULT_OPUS_MODEL=$E2E_MODEL
+ANTHROPIC_DEFAULT_SONNET_MODEL=$E2E_MODEL
+ANTHROPIC_DEFAULT_HAIKU_MODEL=$E2E_MODEL
+CLAUDE_CODE_SUBAGENT_MODEL=$E2E_MODEL
+CLAUDE_CODE_EFFORT_LEVEL=max
+```
+
+**pi (OpenAI chat/completions wire)**
+
+```bash
+PI_E2E_PROVIDER=newapi
+PI_E2E_BASE_URL=https://newapi.seraphli.eu.cc/v1
+PI_E2E_MODEL=$E2E_MODEL
+NEWAPI_E2E_KEY=<newapi-token>
+```
+
+**codex (OpenAI responses wire)**
+
+```bash
+CODEX_BASE_URL=https://newapi.seraphli.eu.cc/v1
+CODEX_MODEL=$E2E_MODEL
+CODEX_API_KEY=<newapi-token>
+wire_api=responses
+```
+
+Base-URL difference: cc has NO `/v1`; pi and codex both append `/v1`.
 
 ### Version
 
