@@ -183,6 +183,60 @@ func TestPaneStateStoreAware(t *testing.T) {
 	}
 }
 
+// TestPaneStateCCBusyTTL covers the Item 1 busy-TTL OR wiring in PaneState's cc branch: CCActive
+// bridges a spinner-less streaming pause when the viewport classifier alone would read idle, and the
+// title=="" guard still wins over a live TTL (kill-safety preserved — a dead pane is never resurrected
+// by a stale TTL entry).
+func TestPaneStateCCBusyTTL(t *testing.T) {
+	ccIdleBody := "✻ Cooked for 5s · done\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	errFakeNoPane := errors.New("no fake pane")
+	origCapture := captureViewport
+	defer func() { captureViewport = origCapture }()
+	captureViewport = func(ctx context.Context, target injector.TmuxTarget) (string, error) {
+		switch target.PaneID {
+		case "%1", "%2":
+			return ccIdleBody, nil // viewport classifier alone reads IDLE for both
+		default:
+			return "", errFakeNoPane
+		}
+	}
+	panes := map[string]injector.PaneInfo{
+		"%1": {Command: "claude", PID: "1001", Title: "✳ ready"}, // cc, viewport idle, TTL live -> busy (OR)
+		"%2": {Command: "claude", PID: "1002", Title: "✳ ready"}, // cc, viewport idle, TTL absent -> idle
+		"%3": {Command: "claude", PID: "1003", Title: ""},        // cc, empty title, TTL live -> idle (guard wins)
+	}
+	children := map[string]string{}
+	store := stores.NewHookRunningStateStore()
+	store.RecordCCActivity("%1")
+	store.RecordCCActivity("%3")
+
+	if _, running := PaneState(context.Background(), "%1", panes, children, store); !running {
+		t.Error("cc viewport idle + CCActive live: PaneState running = false, want true (OR bridges the pause)")
+	}
+	if _, running := PaneState(context.Background(), "%2", panes, children, store); running {
+		t.Error("cc viewport idle + no CCActive: PaneState running = true, want false")
+	}
+	if title, running := PaneState(context.Background(), "%3", panes, children, store); title != "" || running {
+		t.Errorf("cc empty title + CCActive live: PaneState = (%q, %v), want (\"\", false) — title==\"\" guard must win over a live TTL", title, running)
+	}
+}
+
+// TestPaneStateCCBusyTTLNonCCBackendIgnored proves a non-cc backend (pi) never consults CCActive: a
+// live cc-activity TTL entry recorded for a pi pane's target must not flip its verdict — the pi branch
+// stays on storeOrTitleBusy exactly as before.
+func TestPaneStateCCBusyTTLNonCCBackendIgnored(t *testing.T) {
+	panes := map[string]injector.PaneInfo{
+		"%1": {Command: "pi", PID: "2001", Title: "pi session"}, // pi, store unknown -> title path -> idle
+	}
+	children := map[string]string{}
+	store := stores.NewHookRunningStateStore()
+	store.RecordCCActivity("%1") // a live cc TTL entry for the SAME target — must be ignored for pi
+
+	if _, running := PaneState(context.Background(), "%1", panes, children, store); running {
+		t.Error("pi backend consulted CCActive: PaneState running = true, want false (non-cc backends never consult CCActive)")
+	}
+}
+
 // TestParsePSChildren covers the `ps -e -o ppid=,cmd=` parser: a ppid with MULTIPLE children (both
 // present in the accumulated value, joined by newline — the same tokens the old ps --ppid multi-line blob
 // carried), a ppid with one child, a tab-separated / space-padded ppid column, and an absent ppid

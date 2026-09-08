@@ -55,7 +55,7 @@ func extractTarget(target string) string {
 // checkSessionAlive checks if a tmux session still exists; cleans up dead sessions.
 func checkSessionAlive(bs *types.BotState, tmuxTarget string) bool {
 	return helpers.CheckSessionAlive(tmuxTarget, func(t string) {
-		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
+		helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, bs.HookRunning, t)
 	})
 }
 

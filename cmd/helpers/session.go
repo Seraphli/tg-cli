@@ -50,9 +50,11 @@ func CleanDeadSession(
 	pages *stores.PageCacheStore,
 	sessionCounts *stores.SessionCountStore,
 	injectQueue *stores.InjectQueueStore,
+	hookRunning *stores.HookRunningStateStore,
 	tmuxTarget string,
 ) {
 	injectQueue.ClearTarget(tmuxTarget)
+	hookRunning.ClearCCActivity(tmuxTarget)
 	if sid, found := sessionState.FindByTarget(tmuxTarget); found {
 		sessionState.Remove(sid)
 		pages.CleanupSession(sid)
@@ -120,7 +122,7 @@ func IsSessionRunning(hookRunning *stores.HookRunningStateStore, tmuxTarget stri
 	}
 	backend := DetectBackend(tmuxTarget) // LIVE detection, at call time
 	if backend == "cc" {
-		return ccBusyFromContent(context.Background(), tmuxTarget)
+		return ccBusyFromContent(context.Background(), tmuxTarget) || hookRunning.CCActive(tmuxTarget, stores.CCBusyTTL)
 	}
 	return storeOrTitleBusy(hookRunning, backend, tmuxTarget, title)
 }

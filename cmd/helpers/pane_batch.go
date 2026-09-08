@@ -47,7 +47,7 @@ func PaneState(ctx context.Context, tmuxTarget string, panes map[string]injector
 	// hook uses in bs.HookRunning.SetRunning.
 	backend := detectBackend(info.Command, func() string { return children[info.PID] })
 	if backend == "cc" {
-		return info.Title, ccBusyFromContent(ctx, tmuxTarget)
+		return info.Title, ccBusyFromContent(ctx, tmuxTarget) || hookRunning.CCActive(tmuxTarget, stores.CCBusyTTL)
 	}
 	running := storeOrTitleBusy(hookRunning, backend, tmuxTarget, info.Title)
 	return info.Title, running

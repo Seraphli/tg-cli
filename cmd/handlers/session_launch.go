@@ -251,7 +251,9 @@ func ExecuteLaunch(bs *types.BotState, bot *tele.Bot, chatID int64, state *Launc
 		}
 		lower := strings.ToLower(content)
 		if strings.Contains(lower, "trust") {
-			logger.Info(fmt.Sprintf("executeLaunch: trust dialog detected, sending Enter: pane=%s", paneID))
+			logger.Info(fmt.Sprintf("executeLaunch: trust dialog detected, selecting 'Yes, I trust this folder': pane=%s", paneID))
+			injector.SendKeys(target, "Down")
+			time.Sleep(500 * time.Millisecond)
 			injector.SendKeys(target, "Enter")
 		} else if strings.Contains(lower, "yes, continue") || strings.Contains(lower, "continue?") {
 			logger.Info(fmt.Sprintf("executeLaunch: Codex continue dialog detected, sending Enter: pane=%s", paneID))
