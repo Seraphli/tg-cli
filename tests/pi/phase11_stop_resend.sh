@@ -67,6 +67,22 @@ start_pi "e2e-pi-11"
 
 MARKER="ALPHA_MARKER_ONE_TWO_THREE"
 
+# Fetch the initial pi SID before the first f6_new_reset (mirrors phase15:71). f6_new_reset reads $SID as
+# SID_BEFORE, so it MUST be bound before the first call, else `set -u` crashes (phase11 FAIL-1, r1).
+SID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); sys.exit(0)
+pane = sys.argv[1]
+for s in d.get("sessions", []):
+    t = s.get("target", "")
+    if t == pane or t.startswith(pane.split("@")[0] + "@"):
+        print(s.get("id", "")); sys.exit(0)
+print("")
+' "$E2E_PANE" 2>/dev/null || echo "")
+
 # F6-1: one /new same-pane reset before Run A, so Run A starts a fresh conversation (no start_pi warmup noise).
 f6_new_reset "e2e-pi-11"
 
