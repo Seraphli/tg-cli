@@ -167,21 +167,20 @@ set -eo pipefail
 [ "${_ps_ds[1]}" -ne 0 ] && pass "pi Item1: no outcome=direct_send for the text-less run B" \
   || record_fail "pi Item1: outcome=direct_send present for run B — the stale previous-turn text was re-sent"
 
-# Main assert 2: T1 is NOT re-carried as run B's Stop body. Run B is the ONLY run with a tool call, so its
-# Stop is the first Stop AFTER run B's PreToolUse. On the pre-fix binary that Stop payload carries
-# last_assistant_message:"...$MARKER..." (the stale carry); the fix resets it so it is empty. Scoping to run
-# B's own Stop this way is immune to run A's trailing delivery lines that can flush into this log region.
-# R1a (Round 4, note3-ruled): after the Round-4 abort fix, run B (a during-TOOL ESC abort) posts agent_idle,
-# NOT Stop, so this locator now greps the agent_idle payload — which has NO last_assistant_message field. The
-# MARKER-absence check below is therefore TRIVIALLY satisfied for an aborted run and can never fail = a
-# false-green (same class as the phase31 catch). It is INTENTIONALLY left unchanged (not deleted, not
-# weakened): the no-stale-re-send property is actually guarded LIVE by (i) Main assert 1's outcome=direct_send
-# check above (an aborted run posts no Stop -> no FinalizeNoEntry -> no direct_send; a regression that wrongly
-# re-emitted a Stop with the stale body WOULD trip it), and (ii) the new Round-4 pi abort phase (v17), which
-# POSITIVELY asserts no Stop payload for both abort shapes. This comment is the record; see SUMMARY.md round notes.
-RUNB_STOP=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[PreToolUse\]:/{seen=1} seen && /Raw hook payload \[agent_idle\]:/{print; exit}')
+# Main assert 2: T1 is NOT re-carried as run B's terminal (Stop) body. Run B is now a during-THINKING ESC abort
+# (no tool call, so NO run-B PreToolUse), which posts agent_idle, NOT Stop; the locator below finds run B's
+# terminal payload as the FIRST agent_idle in run B's slice (the PreToolUse seen-gate is dropped — a thinking-abort
+# has no PreToolUse to anchor it). On the pre-fix binary a stale Stop body would carry last_assistant_message:
+# "...$MARKER..."; the fix resets it. R1a (Round 4, note3-ruled): agent_idle has NO last_assistant_message field,
+# so the MARKER-absence check below is TRIVIALLY satisfied for an aborted run and can never fail = a false-green
+# (same class as the phase31 catch). The MARKER-absence check is kept (not deleted, not weakened): the
+# no-stale-re-send property is actually guarded LIVE by (i) Main assert 1's outcome=direct_send check above (an
+# aborted run posts no Stop -> no FinalizeNoEntry -> no direct_send; a regression that wrongly re-emitted a Stop
+# with the stale body WOULD trip it), and (ii) the Round-4 pi abort phase (v17), which POSITIVELY asserts no Stop
+# payload for both abort shapes. This comment is the record; see SUMMARY.md round notes.
+RUNB_STOP=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
 echo "  DEBUG: run B Stop payload (first 220 chars): ${RUNB_STOP:0:220}"
-[ -n "$RUNB_STOP" ] || fail "pi Item1: could not locate run B's Stop payload (no Stop after run B PreToolUse)"
+[ -n "$RUNB_STOP" ] || fail "pi Item1: could not locate run B's terminal payload (no agent_idle in run B's slice)"
 set +eo pipefail
 printf '%s\n' "$RUNB_STOP" | grep -q "$MARKER"
 _ps_m=("${PIPESTATUS[@]}")
