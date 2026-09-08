@@ -499,6 +499,7 @@ validate_phase_log() {
     /AskUserQuestion sent: msg_id=/ { last = "SEP"; next }
     /AskUserQuestion responded: msg_id=/ { last = "SEP"; next }   # cross-turn AskQ: an answered AskQ landing between two same-turn bubbles is a valid separator
     /Permission request sent:/ { last = "SEP"; next }
+    /Raw hook payload \[SessionStart\]:/ { last = "SEP"; lasttid = ""; lastmid = ""; next }   # V3 session scoping (boss-approved): a new session (e.g. a /new reset) is a turn boundary. Every /new session restarts at turn_id=t1, so WITHOUT this the validator conflates cross-session t1 pairs (session X t1 msg_id=2 -> SessionStart -> session Y t1 msg_id=1). Resetting the adjacency state here means the first Stream send of the new session is a fresh turn, never flagged against the prior session. The within-session Problem-1 guard stays FULLY sensitive: no SessionStart ever appears between two Stream sends of the SAME session/turn.
     /Stream send: / {
       mid = ""; tid = ""
       if (match($0, /message_id=[^ ]+/)) mid = substr($0, RSTART, RLENGTH)
