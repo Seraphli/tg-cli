@@ -84,6 +84,12 @@ print("False")
 build_pi_launch() {
   local session_dir="${1:-}"
   local -a argv=("$PI_BIN" --provider "$PI_E2E_PROVIDER" --model "$PI_E2E_MODEL")
+  # Optional per-phase pi tool allowlist (--tools). Default empty => no restriction, so all other phases are
+  # unaffected. phase11 sets PI_TOOLS_ALLOWLIST=bash so mimo cannot Read/inspect the fixture (no inspect-first
+  # reflex); the tg-cli extension registers NO tools (only pi.on listeners), so its hooks are unaffected.
+  if [ -n "${PI_TOOLS_ALLOWLIST:-}" ]; then
+    argv+=(--tools "$PI_TOOLS_ALLOWLIST")
+  fi
   if [ -n "$session_dir" ]; then
     argv+=(--session-dir "$session_dir")
   fi
