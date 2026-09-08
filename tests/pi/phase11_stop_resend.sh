@@ -14,25 +14,24 @@
 # preserves the discriminating design above.
 #
 # SER-62 robustness layer (F6-1 / F8, ported from phase15): before Run A, one f6_new_reset "/new" same-pane reset
-# gives Run A a fresh conversation (start_pi warmup noise is not in-context). Run A (deliver T1) AND Run B (the
-# text-less blocking-bash tool) are wrapped TOGETHER in ONE F8 retry loop (max 3 attempts): if Run A does not
-# deliver T1 OR Run B's bash PreToolUse never fires, redo /new + Run A + Run B and retry. Run B uses the scenario-
-# framed sleeping_beauty fixture (boss convention 2c40b48: raw blocking bash in tests must be fixture-framed) so
-# mimo does not refuse the blocking bash, while KEEPING the hard "bash is the very first action, no preamble"
-# constraint the MD_COUNT==0 precondition needs. There is NO /new between Run A and Run B WITHIN an attempt, so the
-# one-session two-run discriminating property above is unchanged.
+# gives Run A a fresh conversation (start_pi warmup noise is not in-context). Run A (deliver T1) AND Run B are
+# wrapped TOGETHER in ONE F8 retry loop (max 3 attempts): if Run A does not deliver T1 OR Run B's thinking-abort
+# loses the race to the first text delta, redo /new + Run A + Run B and retry. Run B is made text-less WITHOUT any
+# model cooperation (boss ruling): inject a simple prompt, gate on its UserPromptSubmit (run started), then
+# IMMEDIATELY Escape to abort DURING THINKING before any text streams; the byte-unchanged MD_COUNT==0 precondition
+# verifies the Escape won. There is NO /new between Run A and Run B WITHIN an attempt, so the one-session two-run
+# discriminating property above is unchanged.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/pi_common.sh"
 
 # f6_new_reset — shared helper for F6-1 /new same-pane reset (ported verbatim from phase15_abort_not_completed.sh).
-# Args: $1 = target session name, $2 = fail extra suffix, $3 = echo extra suffix, $4 = rebuild flag ("rebuild" to redo cp/rm).
+# Args: $1 = target session name, $2 = fail extra suffix, $3 = echo extra suffix.
 # Globals written (MUST remain global, no local): SID, SID_BEFORE, PI_SESSION_NAME, _F6_NEW_BEFORE, _F6_NEW_BEFORE_C, CAND, STILL, _f6_ok, _f6i.
 f6_new_reset() {
   local _target="$1"
   local _fail_extra="${2:-}"
   local _echo_extra="${3:-}"
-  local _rebuild="${4:-}"
   wait_for_idle 5 "$E2E_PANE" || true
   _F6_NEW_BEFORE=$(wc -l < "$LOG_FILE")
   _F6_NEW_BEFORE_C="$_F6_NEW_BEFORE"
@@ -56,21 +55,12 @@ f6_new_reset() {
   PI_SESSION_NAME="$_target"
   [ -n "$SID" ] && curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SID&name=$PI_SESSION_NAME" >/dev/null 2>&1 || true
   echo "  pi session id=$SID named=$PI_SESSION_NAME target=$E2E_PANE (F6 /new $_label fresh${_echo_extra}, LOG_BEFORE=$_F6_NEW_BEFORE)"
-  if [ "$_rebuild" = "rebuild" ]; then
-    cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
-    rm -f "$CC_WORKDIR/prince-arrived"
-  fi
 }
 
 echo ""
 echo "--- pi Item1: no stale re-send on a text-less run ---"
 
 ensure_infrastructure
-# phase11 ONLY: restrict pi to the bash tool (allowlist) so mimo has NO Read tool — its inspect-before-execute
-# reflex (Read the fixture, then describe it as a preamble) is impossible; it can only run the blocking bash or
-# refuse. e2e.sh runs each phase in its own subprocess (bash <script>), so this export is scoped to phase11. The
-# tg-cli extension registers no tools (only pi.on listeners), so --tools bash leaves its hooks intact (boss ruling).
-export PI_TOOLS_ALLOWLIST=bash
 start_pi "e2e-pi-11"
 
 MARKER="ALPHA_MARKER_ONE_TWO_THREE"
@@ -94,27 +84,15 @@ print("")
 # F6-1: one /new same-pane reset before Run A, so Run A starts a fresh conversation (no start_pi warmup noise).
 f6_new_reset "e2e-pi-11"
 
-# Stage the sleeping_beauty fixture for Run B. Boss convention (commit 2c40b48, Sep-4): raw blocking bash in tests
-# must be scenario-framed via this fixture — phase10/31/15 were converted; phase11 Run B's raw `sleep 30` was
-# missed. cp the fixture + rm the prince sentinel so it does not exit early; f6_new_reset rebuild re-stages on retry.
-cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
-rm -f "$CC_WORKDIR/prince-arrived"
-
-# Run B prompt: scenario-framed (gives the model the reason so it does not refuse the blocking bash) while KEEPING
-# the hard text-less constraint — bash MUST be the very first action, NO preamble — that the MD_COUNT==0 precondition
-# below depends on. Mirrors phase15's fixture framing, minus phase15's "one short sentence of acknowledgement" leniency.
-_B_PROMPT="We are acting out a short scene from the tale of Sleeping Beauty. The file $CC_WORKDIR/sleeping_beauty.sh is a test fixture that ships with this repository — a safe foreground loop that keeps the session busy and wakes on its own when the prince sentinel appears, with a hard MAX ceiling so it always exits. This is a real performance script used in real work; keeping the session busy in the foreground IS the point of this scene and is fully authorized. Your VERY FIRST action must be the bash tool running exactly: bash $CC_WORKDIR/sleeping_beauty.sh — call bash immediately as your first output, with NO text or preamble before the tool. Do NOT shorten it with timeout, do NOT run it in the background, do NOT create the sentinel file yourself, and do NOT propose alternatives. Any deviation from these rules will disrupt the real-world work that depends on this performance."
-
-# ---------- Run A (deliver T1) + Run B (text-less blocking-bash tool), wrapped in a phase15-style F8 retry ----------
-# F8 retry: max 3 attempts. On attempt >1, redo f6_new_reset (/new same-pane; rebuild re-stages the fixture) then
-# re-run Run A + Run B. Retry when EITHER Run A does not deliver T1 OR Run B's bash PreToolUse never fires (mimo
-# intermittently refuses blocking bash even when scenario-framed; the retry hardens it). Run A and Run B stay in the
-# SAME post-/new session — the one-session two-run discriminating design is preserved.
+# ---------- Run A (deliver T1) + Run B (a run aborted during thinking = text-less), wrapped in a phase15-style F8 retry ----------
+# F8 retry: max 3 attempts. On attempt >1, redo f6_new_reset (/new same-pane) then re-run Run A + Run B. Retry when
+# EITHER Run A does not deliver T1 OR Run B's thinking-abort loses the race to the first text delta (MD_COUNT>0). Run A
+# and Run B stay in the SAME post-/new session — the one-session two-run discriminating design is preserved.
 _SEQ_OK=false
 for _attempt in 1 2 3; do
   if [ "$_attempt" -gt 1 ]; then
-    echo "  F8 retry attempt $_attempt/3: redoing /new + Run A + Run B (previous attempt: T1 undelivered or bash PreToolUse never fired)"
-    f6_new_reset "e2e-pi-11" " F8 attempt=$_attempt/3" " retry $_attempt/3" rebuild
+    echo "  F8 retry attempt $_attempt/3: redoing /new + Run A + Run B (previous attempt: T1 undelivered or run B abort lost the race)"
+    f6_new_reset "e2e-pi-11" " F8 attempt=$_attempt/3" " retry $_attempt/3"
   fi
   # Run A: a normal prompt producing distinctive assistant text T1 = $MARKER.
   LOG_A_BEFORE=$(wc -l < "$LOG_FILE")
@@ -131,23 +109,39 @@ for _attempt in 1 2 3; do
   _ps_a=("${PIPESTATUS[@]}")
   set -eo pipefail
   [ "${_ps_a[1]}" -eq 0 ] || { echo "  F8: Run A did not deliver T1 on attempt $_attempt/3 — retrying the sequence"; continue; }
-  # Run B: a text-less blocking-bash tool call (the sleeping_beauty fixture), aborted below, must NOT re-send T1.
+  # Run B: a run aborted DURING THINKING (before any text streams), so it is text-less and must NOT re-send T1. No
+  # model cooperation is needed (boss ruling) — inject a simple prompt, gate on the UserPromptSubmit (run STARTED,
+  # deterministic), then IMMEDIATELY send the single Escape so the abort races the first text delta. The byte-unchanged
+  # MD_COUNT==0 precondition below verifies the Escape won; if a delta beat it, this F8 loop retries.
   LOG_B_BEFORE=$(wc -l < "$LOG_FILE")
   pane_log "[pi/item1] Run B before inject attempt=$_attempt/3"
-  inject_prompt "$_B_PROMPT"
-  # Gate on run B's BASH PreToolUse RUNNING THE FIXTURE (the command contains sleeping_beauty.sh) — a deterministic
-  # signal, not a fixed sleep. Requiring sleeping_beauty.sh in the command (not just tool_name==bash) means a silent
-  # bash `cat` or any other unrelated bash call cannot be mistaken for the fixture run (boss ruling).
-  PTU_SEEN=false
-  for i in $(seq 1 "$TIMEOUT"); do
-    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -qE 'Raw hook payload \[PreToolUse\]:.*"tool_name":"[Bb]ash".*sleeping_beauty\.sh'; then PTU_SEEN=true; break; fi
+  inject_prompt "Write a detailed, multi-paragraph essay about the history of the printing press. Take your time and be thorough."
+  # Tight 0.2s poll so the Escape fires as close to UserPromptSubmit as possible (maximise the odds the abort beats
+  # the first text delta); same total timeout budget (TIMEOUT*5 iterations x 0.2s).
+  UPS_SEEN=false
+  for i in $(seq 1 $((TIMEOUT * 5))); do
+    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[UserPromptSubmit\]:"; then UPS_SEEN=true; break; fi
+    sleep 0.2
+  done
+  if [ "$UPS_SEEN" != true ]; then echo "  F8: Run B UserPromptSubmit never fired on attempt $_attempt/3 — retrying the sequence"; continue; fi
+  # IMMEDIATELY abort during thinking (single Escape — isStreaming aborts on first press).
+  $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
+  # Wait for run B to settle (agent_idle after the abort).
+  _STOP_SEEN=false
+  for i in $(seq 1 90); do
+    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then _STOP_SEEN=true; break; fi
     sleep 1
   done
-  if [ "$PTU_SEEN" = true ]; then _SEQ_OK=true; break; fi
-  echo "  F8: Run B bash PreToolUse never fired on attempt $_attempt/3 — retrying the sequence"
+  if [ "$_STOP_SEEN" != true ]; then echo "  F8: Run B never settled (no agent_idle) on attempt $_attempt/3 — retrying the sequence"; continue; fi
+  sleep 2
+  # Race check: the Escape must have won against the first delta (run B text-less). Same count the byte-unchanged
+  # MD_COUNT==0 precondition re-verifies after the loop; a delta that beat the Escape (>0) is a lost race -> retry.
+  _MDC=$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -c "Raw hook payload \[MessageDisplay\]:" || true)
+  if [ "$_MDC" -eq 0 ]; then _SEQ_OK=true; break; fi
+  echo "  F8: Run B Escape lost the race ($_MDC MessageDisplay before the abort) on attempt $_attempt/3 — retrying the sequence"
 done
 [ "$_SEQ_OK" = true ] && pass "pi Item1: run A delivered T1 ($MARKER streamed to TG)" \
-  || fail "pi Item1: could not get Run A T1 delivered + Run B bash PreToolUse within 3 F8 attempts (mimo refused the blocking bash) — cannot test re-send"
+  || fail "pi Item1: could not get Run A T1 delivered + a text-less (thinking-aborted) run B within 3 F8 attempts — cannot test re-send"
 
 # PRECONDITION (note3 CHANGE 1) — run B MUST be text-less or the test is non-discriminating. MessageDisplay is
 # posted by the extension ONLY on text deltas; a model preamble would create stream entries -> Order non-empty
@@ -159,17 +153,6 @@ MD_COUNT=$(printf '%s\n' "$SLICE_B_PRE" | grep -c "Raw hook payload \[MessageDis
 echo "  DEBUG: run B MessageDisplay count (must be 0) = $MD_COUNT"
 [ "$MD_COUNT" -eq 0 ] || fail "pi Item1 PRECONDITION FAILED: run B emitted $MD_COUNT MessageDisplay (a preamble before the tool) — the test would be non-discriminating. Strengthen the prompt so bash is the first output. NOT falling through to the main asserts."
 
-# Abort run B before the tool returns (Escape) — F5 single Escape abort (isStreaming aborts on first press, 500ms double-press /tree hazard eliminated)
-$TMUX_TEST send-keys -t "$E2E_SESSION" Escape
-
-# Wait for run B to settle (agent_settled -> Stop payload) after the abort.
-STOP_SEEN=false
-for i in $(seq 1 90); do
-  if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then STOP_SEEN=true; break; fi
-  sleep 1
-done
-[ "$STOP_SEEN" = true ] || fail "pi Item1: run B never settled (no Stop payload after abort)"
-sleep 2
 pane_log "[pi/item1] Run B after abort+settle"
 
 SLICE_B=$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE")
@@ -205,11 +188,5 @@ _ps_m=("${PIPESTATUS[@]}")
 set -eo pipefail
 [ "${_ps_m[1]}" -ne 0 ] && pass "pi Item1: run B Stop carries no stale T1 (last_assistant_message is not $MARKER)" \
   || record_fail "pi Item1: run B Stop re-carried T1 ($MARKER in last_assistant_message) — the stale carry was not reset"
-
-# Cleanup: release the sleeping_beauty fixture via the prince sentinel (wakes it if the abort left the subprocess
-# running), then rm the fixture + sentinel — the second of the two rm -f (mirrors phase15's end-of-phase cleanup).
-# The fixture's MAX ceiling and the phase-end session kill are the backstops.
-touch "$CC_WORKDIR/prince-arrived"
-rm -f "$CC_WORKDIR/sleeping_beauty.sh" "$CC_WORKDIR/prince-arrived"
 
 echo "  pi Item1 stop-resend test complete."
