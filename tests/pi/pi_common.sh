@@ -84,6 +84,12 @@ print("False")
 build_pi_launch() {
   local session_dir="${1:-}"
   local -a argv=("$PI_BIN" --provider "$PI_E2E_PROVIDER" --model "$PI_E2E_MODEL")
+  # Optional per-phase pi tool allowlist (--tools). Default empty => no restriction, so all other phases are
+  # unaffected. phase11 sets PI_TOOLS_ALLOWLIST=bash so mimo cannot Read/inspect the fixture (no inspect-first
+  # reflex); the tg-cli extension registers NO tools (only pi.on listeners), so its hooks are unaffected.
+  if [ -n "${PI_TOOLS_ALLOWLIST:-}" ]; then
+    argv+=(--tools "$PI_TOOLS_ALLOWLIST")
+  fi
   if [ -n "$session_dir" ]; then
     argv+=(--session-dir "$session_dir")
   fi
@@ -106,7 +112,8 @@ _launch_pi_pane() {
   $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 \
     -e "NEWAPI_E2E_KEY=$NEWAPI_E2E_KEY" \
     -e "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR" \
-    -e "PI_OFFLINE=1"
+    -e "PI_OFFLINE=1" \
+    -e DISABLE_AUTOUPDATER=1
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
   $TMUX_TEST send-keys -t "$E2E_SESSION" "$(build_pi_launch "$session_dir")"

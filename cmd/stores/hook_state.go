@@ -8,18 +8,48 @@ import (
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
+// CCBusyTTL bridges spinner-less streaming pauses between cc MessageDisplay deltas (phase31 TC-b).
+const CCBusyTTL = 4 * time.Second
+
 // HookRunningStateStore tracks whether CC is running based on hook events.
 // PreToolUse sets running; Stop sets idle. More reliable than pane title checks.
 type HookRunningStateStore struct {
-	mu    sync.RWMutex
-	state map[string]bool // tmuxTarget → true=running, false=idle
+	mu         sync.RWMutex
+	state      map[string]bool      // tmuxTarget → true=running, false=idle
+	ccActivity map[string]time.Time // tmuxTarget → last cc MessageDisplay time
 }
 
 // NewHookRunningStateStore creates an empty HookRunningStateStore.
 func NewHookRunningStateStore() *HookRunningStateStore {
 	return &HookRunningStateStore{
-		state: make(map[string]bool),
+		state:      make(map[string]bool),
+		ccActivity: make(map[string]time.Time),
 	}
+}
+
+// RecordCCActivity stamps the current time as the last cc MessageDisplay for the given target.
+func (h *HookRunningStateStore) RecordCCActivity(tmuxTarget string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ccActivity[tmuxTarget] = time.Now()
+}
+
+// CCActive reports whether a cc MessageDisplay was recorded for tmuxTarget within ttl.
+func (h *HookRunningStateStore) CCActive(tmuxTarget string, ttl time.Duration) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	last, ok := h.ccActivity[tmuxTarget]
+	if !ok {
+		return false
+	}
+	return time.Since(last) < ttl
+}
+
+// ClearCCActivity deletes the recorded cc activity for the given target.
+func (h *HookRunningStateStore) ClearCCActivity(tmuxTarget string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.ccActivity, tmuxTarget)
 }
 
 // SetRunning marks the given target as running.

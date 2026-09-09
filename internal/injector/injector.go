@@ -1,6 +1,7 @@
 package injector
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -379,6 +380,32 @@ func SendKeys(target TmuxTarget, keys ...string) error {
 func CapturePane(target TmuxTarget) (string, error) {
 	cmd := tmuxCmd(target, "capture-pane", "-t", target.PaneID, "-p", "-S", "-")
 	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("capture-pane failed: %w", err)
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// captureViewportCmd builds a context-aware `capture-pane` command that mirrors tmuxCmd's socket prefix
+// EXACTLY (-u, optional -L ServerName, optional -S target.Socket) but OMITS the capture-pane scrollback
+// pair `-S -`, so it captures only the visible viewport (no scrollback history). It is a package-level
+// var so a test can stub it to assert construction/cancellation without invoking real tmux.
+var captureViewportCmd = func(ctx context.Context, target TmuxTarget) *exec.Cmd {
+	prefix := []string{"-u"}
+	if ServerName != "" {
+		prefix = append(prefix, "-L", ServerName)
+	}
+	if target.Socket != "" {
+		prefix = append(prefix, "-S", target.Socket)
+	}
+	args := append(prefix, "capture-pane", "-t", target.PaneID, "-p")
+	return exec.CommandContext(ctx, "tmux", args...)
+}
+
+// CaptureViewport captures only the visible viewport of a tmux pane (no scrollback), honoring ctx for
+// cancellation/timeout.
+func CaptureViewport(ctx context.Context, target TmuxTarget) (string, error) {
+	out, err := captureViewportCmd(ctx, target).Output()
 	if err != nil {
 		return "", fmt.Errorf("capture-pane failed: %w", err)
 	}

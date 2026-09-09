@@ -10,10 +10,52 @@
 #
 # ONE pi session, two runs is SUFFICIENT: Rotate empties Order on run B's own prompt, so run B's own stale
 # Stop is FinalizeNoEntry -> direct_send on the pre-fix binary. No multi-session dance is needed; do not
-# rewrite this into one.
+# rewrite this into one. Run A and Run B share the SAME session (no /new between them) — this is what
+# preserves the discriminating design above.
+#
+# SER-62 robustness layer (F6-1 / F8, ported from phase15): before Run A, one f6_new_reset "/new" same-pane reset
+# gives Run A a fresh conversation (start_pi warmup noise is not in-context). Run A (deliver T1) AND Run B are
+# wrapped TOGETHER in ONE F8 retry loop (max 3 attempts): if Run A does not deliver T1 OR Run B's thinking-abort
+# loses the race to the first text delta, redo /new + Run A + Run B and retry. Run B is made text-less WITHOUT any
+# model cooperation (boss ruling): inject a simple prompt, gate on its UserPromptSubmit (run started), then
+# IMMEDIATELY Escape to abort DURING THINKING before any text streams; the byte-unchanged MD_COUNT==0 precondition
+# verifies the Escape won. There is NO /new between Run A and Run B WITHIN an attempt, so the one-session two-run
+# discriminating property above is unchanged.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/pi_common.sh"
+
+# f6_new_reset — shared helper for F6-1 /new same-pane reset (ported verbatim from phase15_abort_not_completed.sh).
+# Args: $1 = target session name, $2 = fail extra suffix, $3 = echo extra suffix.
+# Globals written (MUST remain global, no local): SID, SID_BEFORE, PI_SESSION_NAME, _F6_NEW_BEFORE, _F6_NEW_BEFORE_C, CAND, STILL, _f6_ok, _f6i.
+f6_new_reset() {
+  local _target="$1"
+  local _fail_extra="${2:-}"
+  local _echo_extra="${3:-}"
+  wait_for_idle 5 "$E2E_PANE" || true
+  _F6_NEW_BEFORE=$(wc -l < "$LOG_FILE")
+  _F6_NEW_BEFORE_C="$_F6_NEW_BEFORE"
+  SID_BEFORE="$SID"
+  $TMUX_TEST send-keys -t "$E2E_SESSION" "/new" Enter
+  _f6_ok=false
+  for _f6i in $(seq 1 30); do
+    CAND=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 "$SCRIPT_DIR/session_list.py" cand "$E2E_PANE" "$SID_BEFORE" 2>/dev/null || echo "")
+    if [ -n "$CAND" ] && [ "$CAND" != "$SID_BEFORE" ]; then SID="$CAND"; _f6_ok=true; break; fi
+    sleep 1
+  done
+  if [ "$_f6_ok" != true ]; then
+    STILL=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 "$SCRIPT_DIR/session_list.py" still "$E2E_PANE" 2>/dev/null || echo "")
+    if [ -n "$STILL" ] && [ "$STILL" = "$SID_BEFORE" ]; then
+      echo "  F6 /new: no new SID observed but pane still has SID_BEFORE=$SID_BEFORE — accepting fallback (same-pane, /new did not emit new SessionStart)"
+      SID="$STILL"; _f6_ok=true
+    fi
+  fi
+  [ "$_f6_ok" = true ] && [ -n "$SID" ] || fail "F6-1: /new did not produce any SID within 30s (SID_BEFORE=$SID_BEFORE pane=$E2E_PANE)${_fail_extra}"
+  local _label="${_target##*-}"
+  PI_SESSION_NAME="$_target"
+  [ -n "$SID" ] && curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SID&name=$PI_SESSION_NAME" >/dev/null 2>&1 || true
+  echo "  pi session id=$SID named=$PI_SESSION_NAME target=$E2E_PANE (F6 /new $_label fresh${_echo_extra}, LOG_BEFORE=$_F6_NEW_BEFORE)"
+}
 
 echo ""
 echo "--- pi Item1: no stale re-send on a text-less run ---"
@@ -23,35 +65,83 @@ start_pi "e2e-pi-11"
 
 MARKER="ALPHA_MARKER_ONE_TWO_THREE"
 
-# ---------- Run A: a normal prompt producing distinctive assistant text T1 = $MARKER ----------
-LOG_A_BEFORE=$(wc -l < "$LOG_FILE")
-pane_log "[pi/item1] Run A before inject"
-inject_prompt "Reply with exactly this text and nothing else. Do not use any tools. The text is: $MARKER"
-wait_for_idle "$TIMEOUT" "$E2E_PANE"
-sleep 2
-SLICE_A=$(tail -n +"$((LOG_A_BEFORE + 1))" "$LOG_FILE")
-# T1 was DELIVERED (streamed to TG), not just echoed in the UserPromptSubmit payload. reconstruct_tg_full_text
-# parses the Stream send/edit render lines, so a match here means the assistant reply reached Telegram.
-DELIVERED_A=$(reconstruct_tg_full_text "$SLICE_A")
-set +eo pipefail
-printf '%s' "$DELIVERED_A" | grep -q "$MARKER"
-_ps_a=("${PIPESTATUS[@]}")
-set -eo pipefail
-[ "${_ps_a[1]}" -eq 0 ] && pass "pi Item1: run A delivered T1 ($MARKER streamed to TG)" \
-  || fail "pi Item1: run A did not deliver T1 ($MARKER absent from streamed content) — cannot test re-send"
+# Fetch the initial pi SID before the first f6_new_reset (mirrors phase15:71). f6_new_reset reads $SID as
+# SID_BEFORE, so it MUST be bound before the first call, else `set -u` crashes (phase11 FAIL-1, r1).
+SID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); sys.exit(0)
+pane = sys.argv[1]
+for s in d.get("sessions", []):
+    t = s.get("target", "")
+    if t == pane or t.startswith(pane.split("@")[0] + "@"):
+        print(s.get("id", "")); sys.exit(0)
+print("")
+' "$E2E_PANE" 2>/dev/null || echo "")
 
-# ---------- Run B: a text-less tool call, aborted, must NOT re-send T1 ----------
-LOG_B_BEFORE=$(wc -l < "$LOG_FILE")
-pane_log "[pi/item1] Run B before inject"
-inject_prompt "Your VERY FIRST action must be the bash tool running exactly this command: sleep 30. Do NOT write any text before calling the tool — call bash immediately as your first output, with no preamble."
+# F6-1: one /new same-pane reset before Run A, so Run A starts a fresh conversation (no start_pi warmup noise).
+f6_new_reset "e2e-pi-11"
 
-# Gate on run B's PreToolUse (the bash call started) — a deterministic signal, not a fixed sleep.
-PTU_SEEN=false
-for i in $(seq 1 "$TIMEOUT"); do
-  if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[PreToolUse\]:"; then PTU_SEEN=true; break; fi
-  sleep 1
+# ---------- Run A (deliver T1) + Run B (a run aborted during thinking = text-less), wrapped in a phase15-style F8 retry ----------
+# F8 retry: max 3 attempts. On attempt >1, redo f6_new_reset (/new same-pane) then re-run Run A + Run B. Retry when
+# EITHER Run A does not deliver T1 OR Run B's thinking-abort loses the race to the first text delta (MD_COUNT>0). Run A
+# and Run B stay in the SAME post-/new session — the one-session two-run discriminating design is preserved.
+_SEQ_OK=false
+for _attempt in 1 2 3; do
+  if [ "$_attempt" -gt 1 ]; then
+    echo "  F8 retry attempt $_attempt/3: redoing /new + Run A + Run B (previous attempt: T1 undelivered or run B abort lost the race)"
+    f6_new_reset "e2e-pi-11" " F8 attempt=$_attempt/3" " retry $_attempt/3"
+  fi
+  # Run A: a normal prompt producing distinctive assistant text T1 = $MARKER.
+  LOG_A_BEFORE=$(wc -l < "$LOG_FILE")
+  pane_log "[pi/item1] Run A before inject attempt=$_attempt/3"
+  inject_prompt "Reply with exactly this text and nothing else. Do not use any tools. The text is: $MARKER"
+  wait_for_idle "$TIMEOUT" "$E2E_PANE"
+  sleep 2
+  SLICE_A=$(tail -n +"$((LOG_A_BEFORE + 1))" "$LOG_FILE")
+  # T1 was DELIVERED (streamed to TG), not just echoed in the UserPromptSubmit payload. reconstruct_tg_full_text
+  # parses the Stream send/edit render lines, so a match here means the assistant reply reached Telegram.
+  DELIVERED_A=$(reconstruct_tg_full_text "$SLICE_A")
+  set +eo pipefail
+  printf '%s' "$DELIVERED_A" | grep -q "$MARKER"
+  _ps_a=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  [ "${_ps_a[1]}" -eq 0 ] || { echo "  F8: Run A did not deliver T1 on attempt $_attempt/3 — retrying the sequence"; continue; }
+  # Run B: a run aborted DURING THINKING (before any text streams), so it is text-less and must NOT re-send T1. No
+  # model cooperation is needed (boss ruling) — inject a simple prompt, gate on the UserPromptSubmit (run STARTED,
+  # deterministic), then IMMEDIATELY send the single Escape so the abort races the first text delta. The byte-unchanged
+  # MD_COUNT==0 precondition below verifies the Escape won; if a delta beat it, this F8 loop retries.
+  LOG_B_BEFORE=$(wc -l < "$LOG_FILE")
+  pane_log "[pi/item1] Run B before inject attempt=$_attempt/3"
+  inject_prompt "Write a detailed, multi-paragraph essay about the history of the printing press. Take your time and be thorough."
+  # Tight 0.2s poll so the Escape fires as close to UserPromptSubmit as possible (maximise the odds the abort beats
+  # the first text delta); same total timeout budget (TIMEOUT*5 iterations x 0.2s).
+  UPS_SEEN=false
+  for i in $(seq 1 $((TIMEOUT * 5))); do
+    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[UserPromptSubmit\]:"; then UPS_SEEN=true; break; fi
+    sleep 0.2
+  done
+  if [ "$UPS_SEEN" != true ]; then echo "  F8: Run B UserPromptSubmit never fired on attempt $_attempt/3 — retrying the sequence"; continue; fi
+  # IMMEDIATELY abort during thinking (single Escape — isStreaming aborts on first press).
+  $TMUX_TEST send-keys -t "$E2E_SESSION" Escape
+  # Wait for run B to settle (agent_idle after the abort).
+  _STOP_SEEN=false
+  for i in $(seq 1 90); do
+    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then _STOP_SEEN=true; break; fi
+    sleep 1
+  done
+  if [ "$_STOP_SEEN" != true ]; then echo "  F8: Run B never settled (no agent_idle) on attempt $_attempt/3 — retrying the sequence"; continue; fi
+  sleep 2
+  # Race check: the Escape must have won against the first delta (run B text-less). Same count the byte-unchanged
+  # MD_COUNT==0 precondition re-verifies after the loop; a delta that beat the Escape (>0) is a lost race -> retry.
+  _MDC=$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -c "Raw hook payload \[MessageDisplay\]:" || true)
+  if [ "$_MDC" -eq 0 ]; then _SEQ_OK=true; break; fi
+  echo "  F8: Run B Escape lost the race ($_MDC MessageDisplay before the abort) on attempt $_attempt/3 — retrying the sequence"
 done
-[ "$PTU_SEEN" = true ] || fail "pi Item1: run B PreToolUse never fired (model did not call the tool) — cannot test"
+[ "$_SEQ_OK" = true ] && pass "pi Item1: run A delivered T1 ($MARKER streamed to TG)" \
+  || fail "pi Item1: could not get Run A T1 delivered + a text-less (thinking-aborted) run B within 3 F8 attempts — cannot test re-send"
 
 # PRECONDITION (note3 CHANGE 1) — run B MUST be text-less or the test is non-discriminating. MessageDisplay is
 # posted by the extension ONLY on text deltas; a model preamble would create stream entries -> Order non-empty
@@ -63,17 +153,6 @@ MD_COUNT=$(printf '%s\n' "$SLICE_B_PRE" | grep -c "Raw hook payload \[MessageDis
 echo "  DEBUG: run B MessageDisplay count (must be 0) = $MD_COUNT"
 [ "$MD_COUNT" -eq 0 ] || fail "pi Item1 PRECONDITION FAILED: run B emitted $MD_COUNT MessageDisplay (a preamble before the tool) — the test would be non-discriminating. Strengthen the prompt so bash is the first output. NOT falling through to the main asserts."
 
-# Abort run B before the tool returns (Escape) — F5 single Escape abort (isStreaming aborts on first press, 500ms double-press /tree hazard eliminated)
-$TMUX_TEST send-keys -t "$E2E_SESSION" Escape
-
-# Wait for run B to settle (agent_settled -> Stop payload) after the abort.
-STOP_SEEN=false
-for i in $(seq 1 90); do
-  if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then STOP_SEEN=true; break; fi
-  sleep 1
-done
-[ "$STOP_SEEN" = true ] || fail "pi Item1: run B never settled (no Stop payload after abort)"
-sleep 2
 pane_log "[pi/item1] Run B after abort+settle"
 
 SLICE_B=$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE")
@@ -88,21 +167,20 @@ set -eo pipefail
 [ "${_ps_ds[1]}" -ne 0 ] && pass "pi Item1: no outcome=direct_send for the text-less run B" \
   || record_fail "pi Item1: outcome=direct_send present for run B — the stale previous-turn text was re-sent"
 
-# Main assert 2: T1 is NOT re-carried as run B's Stop body. Run B is the ONLY run with a tool call, so its
-# Stop is the first Stop AFTER run B's PreToolUse. On the pre-fix binary that Stop payload carries
-# last_assistant_message:"...$MARKER..." (the stale carry); the fix resets it so it is empty. Scoping to run
-# B's own Stop this way is immune to run A's trailing delivery lines that can flush into this log region.
-# R1a (Round 4, note3-ruled): after the Round-4 abort fix, run B (a during-TOOL ESC abort) posts agent_idle,
-# NOT Stop, so this locator now greps the agent_idle payload — which has NO last_assistant_message field. The
-# MARKER-absence check below is therefore TRIVIALLY satisfied for an aborted run and can never fail = a
-# false-green (same class as the phase31 catch). It is INTENTIONALLY left unchanged (not deleted, not
-# weakened): the no-stale-re-send property is actually guarded LIVE by (i) Main assert 1's outcome=direct_send
-# check above (an aborted run posts no Stop -> no FinalizeNoEntry -> no direct_send; a regression that wrongly
-# re-emitted a Stop with the stale body WOULD trip it), and (ii) the new Round-4 pi abort phase (v17), which
-# POSITIVELY asserts no Stop payload for both abort shapes. This comment is the record; see SUMMARY.md round notes.
-RUNB_STOP=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[PreToolUse\]:/{seen=1} seen && /Raw hook payload \[agent_idle\]:/{print; exit}')
+# Main assert 2: T1 is NOT re-carried as run B's terminal (Stop) body. Run B is now a during-THINKING ESC abort
+# (no tool call, so NO run-B PreToolUse), which posts agent_idle, NOT Stop; the locator below finds run B's
+# terminal payload as the FIRST agent_idle in run B's slice (the PreToolUse seen-gate is dropped — a thinking-abort
+# has no PreToolUse to anchor it). On the pre-fix binary a stale Stop body would carry last_assistant_message:
+# "...$MARKER..."; the fix resets it. R1a (Round 4, note3-ruled): agent_idle has NO last_assistant_message field,
+# so the MARKER-absence check below is TRIVIALLY satisfied for an aborted run and can never fail = a false-green
+# (same class as the phase31 catch). The MARKER-absence check is kept (not deleted, not weakened): the
+# no-stale-re-send property is actually guarded LIVE by (i) Main assert 1's outcome=direct_send check above (an
+# aborted run posts no Stop -> no FinalizeNoEntry -> no direct_send; a regression that wrongly re-emitted a Stop
+# with the stale body WOULD trip it), and (ii) the Round-4 pi abort phase (v17), which POSITIVELY asserts no Stop
+# payload for both abort shapes. This comment is the record; see SUMMARY.md round notes.
+RUNB_STOP=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
 echo "  DEBUG: run B Stop payload (first 220 chars): ${RUNB_STOP:0:220}"
-[ -n "$RUNB_STOP" ] || fail "pi Item1: could not locate run B's Stop payload (no Stop after run B PreToolUse)"
+[ -n "$RUNB_STOP" ] || fail "pi Item1: could not locate run B's terminal payload (no agent_idle in run B's slice)"
 set +eo pipefail
 printf '%s\n' "$RUNB_STOP" | grep -q "$MARKER"
 _ps_m=("${PIPESTATUS[@]}")

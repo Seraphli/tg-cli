@@ -37,24 +37,20 @@ fi
 # Step 1: Inject a bash sleep command to keep CC busy
 inject_prompt "Use the Bash tool to run this exact command: sleep 20. Do not print any text."
 
-# Wait for CC to become busy
+# Wait for CC to become busy — polls the product /session/idle API (scoped to $E2E_PANE) via
+# check_session_idle, mirroring phase31. Pinned CC 2.1.261 leaves the pane title stuck at the idle
+# marker '✳' even while busy, so the title-based oracle is dead; the idle API is the correct source.
 echo "  Waiting for CC to start processing..."
 ELAPSED=0
 CC_BUSY=false
 while [ $ELAPSED -lt 30 ]; do
-  PANE_TITLE=$($TMUX_TEST display-message -p -t "${E2E_PANE%@*}" '#{pane_title}' 2>/dev/null || echo "")
-  # CC is busy if pane title does NOT start with ✳
-  echo "  DEBUG: PANE_TITLE (${#PANE_TITLE} chars): $PANE_TITLE"
-  set +eo pipefail
-  echo "$PANE_TITLE" | grep -q '^✳'
-  _ps=("${PIPESTATUS[@]}")
-  set -eo pipefail
-  if [ -n "$PANE_TITLE" ] && [ "${_ps[1]}" -ne 0 ]; then
+  IDLE_STATE=$(check_session_idle "$E2E_PANE")
+  echo "  t=$ELAPSED: idle_state=$IDLE_STATE"
+  if [ "$IDLE_STATE" = "busy" ]; then
     CC_BUSY=true
-    echo "  CC is busy at t=$ELAPSED: pane_title=\"$PANE_TITLE\""
+    echo "  CC is busy at t=$ELAPSED: idle_state=busy"
     break
   fi
-  echo "  t=$ELAPSED: pane_title=\"$PANE_TITLE\""
   sleep 1
   ELAPSED=$((ELAPSED + 1))
 done
@@ -413,18 +409,16 @@ PTU_MARKER="ptu_flush_marker_$RANDOM"
 # MD-final, which would make the "MD-final trigger armed routing window" assertion FAIL after round 10.
 inject_prompt "Do these steps: first print a single line that says starting_ptu_test, then use the Bash tool to run this exact command: sleep 15, then print a single line that says ptu_test_done."
 
+# Wait for CC to become busy — same /session/idle API oracle as above (pane-title marker is dead
+# on pinned CC 2.1.261).
 echo "  Waiting for CC to start processing..."
 ELAPSED=0
 CC_BUSY_C=false
 while [ $ELAPSED -lt 30 ]; do
-  PANE_TITLE=$($TMUX_TEST display-message -p -t "${E2E_PANE%@*}" '#{pane_title}' 2>/dev/null || echo "")
-  set +eo pipefail
-  echo "$PANE_TITLE" | grep -q '^✳'
-  _ps=("${PIPESTATUS[@]}")
-  set -eo pipefail
-  if [ -n "$PANE_TITLE" ] && [ "${_ps[1]}" -ne 0 ]; then
+  IDLE_STATE=$(check_session_idle "$E2E_PANE")
+  if [ "$IDLE_STATE" = "busy" ]; then
     CC_BUSY_C=true
-    echo "  CC is busy at t=$ELAPSED: pane_title=\"$PANE_TITLE\""
+    echo "  CC is busy at t=$ELAPSED: idle_state=busy"
     break
   fi
   sleep 1

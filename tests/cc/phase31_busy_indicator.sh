@@ -91,6 +91,10 @@ echo ""
 echo "  TC-b: re-float on outbound send (msg_id ordering)"
 
 LOG_BEFORE_TCB=$(wc -l < "$LOG_FILE")
+# #3 (codexcheck) — snapshot the SEPARATE typing.log ($TYPING_LOG_FILE, written by the 3s typing tick,
+# cmd/bot.go:96) before this busy window so the typing-tick assertion below only reads lines produced
+# during TC-b's guaranteed-long fairy sleep.
+TYPING_BEFORE_TCB=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[busy] TC-b BEFORE inject"
 # FIX 3 (r9, boss decision: KEEP TC-b): pure bedtime-fairy scenario, announce-before-tool. This replaces
 # the earlier "This is an automated end-to-end test of a Telegram bot busy indicator..." framing that
@@ -119,6 +123,33 @@ if ! wait_for_log_pattern "$LOG_BEFORE_TCB" "busy status sent chat=" 30 "TC-b in
   fail "TC-b: initial busy status send not logged"
 fi
 pass "TC-b: initial busy status sent"
+
+# #3 (codexcheck) — phase31's bot.log markers (busy status sent/re-floated/deleted) prove the 1s
+# runBusyTick->IsSessionRunning path; THIS assertion proves the 3s typing-tick PaneState path, which
+# phase31 otherwise never exercises. The session is now confirmed busy and the 30s fairy sleep guarantees
+# several 3s typing ticks land. Poll $TYPING_LOG_FILE (NOT $LOG_FILE — wait_for_log_pattern is hardcoded to
+# $LOG_FILE, hence this inline poll) for up to 20s for a typing tick that read THIS session busy.
+# TARGET-SCOPING: scope the grep to this phase's cc session tmux target ($E2E_PANE, set by
+# start_claude "e2e-cc-31a" and still active — TC-b never stopped it); it has the same pane@socket form the
+# typing tick logs as info.TmuxTarget, and re.escape makes the pane@socket literal regex-safe. The fresh
+# TYPING_BEFORE_TCB offset bounds the window to this busy period.
+ESC_TARGET_TCB=$(printf '%s' "$E2E_PANE" | python3 -c "import sys,re; print(re.escape(sys.stdin.read()))")
+_tt_elapsed=0
+_tt_found=false
+while [ $_tt_elapsed -lt 20 ]; do
+  if tail -n +"$((TYPING_BEFORE_TCB + 1))" "$TYPING_LOG_FILE" 2>/dev/null \
+      | grep -qE "target=$ESC_TARGET_TCB .*paneRunning=true sending=true" 2>/dev/null; then
+    _tt_found=true
+    break
+  fi
+  sleep 1
+  _tt_elapsed=$((_tt_elapsed + 1))
+done
+if [ "$_tt_found" = true ]; then
+  pass "TC-b typing-tick: PaneState read the cc session busy via the content classifier (typing.log paneRunning=true)"
+else
+  fail "TC-b typing-tick: no paneRunning=true in typing.log within 20s (PaneState/3s-tick path did not read cc busy)"
+fi
 
 # Now wait for a genuine re-float (a real outbound send landing after the status).
 if ! wait_for_log_pattern "$LOG_BEFORE_TCB" "busy status re-floated" 300 "TC-b refloat"; then

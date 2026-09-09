@@ -111,8 +111,16 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.Source == "resume" && p.TranscriptPath != "" {
 					body = helpers.ReadLastAssistantText(p.TranscriptPath)
 				}
-				cb.SendEventNotification(bs, chat, chatID, p.SessionID, "SessionStart", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
-				logger.Info(fmt.Sprintf("Notification sent to chat %s: SessionStart [%s] tmux=%s", chatID, p.Project, p.TmuxTarget))
+				// §I3: SessionStart is the ~20-min registration blocker under a TG flood — route the send onto
+				// the Message FIFO (DispatchAsync) instead of sending inline on the Hook FIFO. The enqueue onto a
+				// fresh/empty per-session queue is instant, so registration below proceeds regardless of flood.
+				ssChat := chat
+				ssChatID := chatID
+				ssBody := body
+				bs.MessageQueue.DispatchAsync(p.SessionID, "msg:sessionstart-notify", func() error {
+					cb.SendEventNotification(bs, ssChat, ssChatID, p.SessionID, "SessionStart", p.Project, cwdForRoute, p.TmuxTarget, ssBody, "", hookAgentName, hookTopicID)
+					return nil
+				})
 				// Migrate route BEFORE Add() — Add() removes stale same-pane sessions
 				if p.TmuxTarget != "" && p.SessionID != "" {
 					creds, credErr := config.LoadCredentials()
@@ -144,6 +152,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					if bs.SessionState.FindInfoByID(p.SessionID) == nil {
 						break
 					}
+				}
+				if p.TmuxTarget != "" {
+					bs.HookRunning.ClearCCActivity(p.TmuxTarget)
 				}
 				if chat != nil {
 					text := notify.BuildNotificationText(notify.NotificationData{
@@ -275,6 +286,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 			case "Stop":
 				if p.TmuxTarget != "" {
 					bs.HookRunning.SetIdle(p.TmuxTarget)
+					bs.HookRunning.ClearCCActivity(p.TmuxTarget)
 					cb.TypingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 					bs.StopCooldown.Record(p.TmuxTarget)
 				}
@@ -467,10 +479,23 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if chat != nil {
 					switch p.StopReason {
 					case "aborted":
-						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentInterrupted", p.Project, cwdForRoute, p.TmuxTarget, "⏹ pi run interrupted", "", hookAgentName, hookTopicID)
+						// §I3: route the AgentInterrupted send onto the Message FIFO instead of inline on the Hook FIFO.
+						aiChat := chat
+						aiChatID := chatID
+						bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-interrupted-notify", func() error {
+							cb.SendEventNotification(bs, aiChat, aiChatID, p.SessionID, "AgentInterrupted", p.Project, cwdForRoute, p.TmuxTarget, "⏹ pi run interrupted", "", hookAgentName, hookTopicID)
+							return nil
+						})
 					case "error":
 						errBody := "⚠️ pi run error\n\n" + p.ErrorMessage
-						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, errBody, "", hookAgentName, hookTopicID)
+						// §I3: route the AgentError send onto the Message FIFO instead of inline on the Hook FIFO.
+						aeChat := chat
+						aeChatID := chatID
+						aeBody := errBody
+						bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-error-notify", func() error {
+							cb.SendEventNotification(bs, aeChat, aeChatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, aeBody, "", hookAgentName, hookTopicID)
+							return nil
+						})
 					}
 				}
 			case "agent_retry":
@@ -916,6 +941,12 @@ func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPaylo
 	logger.Debug(fmt.Sprintf("Raw hook payload [MessageDisplay]: %s", string(raw)))
 	if p.SessionID == "" || p.MessageID == "" {
 		return // final-with-empty-delta IS still recorded
+	}
+	// Item 1 (busy TTL): stamp cc activity on every MD (delta + final) so the busy-OR read paths
+	// (IsSessionRunning/PaneState) can bridge spinner-less streaming pauses. pi also emits
+	// MessageDisplay (different backend tag), so this is gated on backend==cc to avoid a stray entry.
+	if p.Backend == "cc" && p.TmuxTarget != "" {
+		bs.HookRunning.RecordCCActivity(p.TmuxTarget)
 	}
 	// Round 8 observability: if a same-prompt MessageDisplay-final lands shortly AFTER a tool
 	// notification was sent (no pre-tool text was flushed first), log it as a residual inversion.

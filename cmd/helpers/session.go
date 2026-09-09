@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -49,9 +50,11 @@ func CleanDeadSession(
 	pages *stores.PageCacheStore,
 	sessionCounts *stores.SessionCountStore,
 	injectQueue *stores.InjectQueueStore,
+	hookRunning *stores.HookRunningStateStore,
 	tmuxTarget string,
 ) {
 	injectQueue.ClearTarget(tmuxTarget)
+	hookRunning.ClearCCActivity(tmuxTarget)
 	if sid, found := sessionState.FindByTarget(tmuxTarget); found {
 		sessionState.Remove(sid)
 		pages.CleanupSession(sid)
@@ -118,6 +121,9 @@ func IsSessionRunning(hookRunning *stores.HookRunningStateStore, tmuxTarget stri
 		return false // dead/closed pane -> idle, BEFORE the store
 	}
 	backend := DetectBackend(tmuxTarget) // LIVE detection, at call time
+	if backend == "cc" {
+		return ccBusyFromContent(context.Background(), tmuxTarget) || hookRunning.CCActive(tmuxTarget, stores.CCBusyTTL)
+	}
 	return storeOrTitleBusy(hookRunning, backend, tmuxTarget, title)
 }
 
@@ -143,11 +149,13 @@ func storeOrTitleBusy(hookRunning *stores.HookRunningStateStore, backend, target
 	return TitleIsBusy(backend, title)
 }
 
-// TitleIsBusy is the single busy classifier for every pane-title decision — the live path
-// (IsSessionRunning), the batched path (PaneState), and the /session/idle start_codex readiness gate all
-// route through here. It trims first: tmux #{pane_title} can carry surrounding whitespace and BOTH rules
-// are PREFIX rules, so leading whitespace would silently defeat them. cc is busy unless the title starts
-// with the "✳" idle marker; codex is busy when the title starts with a braille spinner frame
+// TitleIsBusy is the pane-title busy classifier. cc no longer routes through here on the live path
+// (IsSessionRunning) or the batched path (PaneState) — both now delegate cc classification to the content
+// classifier ccBusyFromContent (viewport box+spinner scan). The cc arm below is RETAINED solely for the
+// /session/idle start_codex readiness contract and the unit tests; codex (braille) and the pi run-state
+// store path are unchanged. It trims first: tmux #{pane_title} can carry surrounding whitespace and BOTH
+// rules are PREFIX rules, so leading whitespace would silently defeat them. cc is busy unless the title
+// starts with the "✳" idle marker; codex is busy when the title starts with a braille spinner frame
 // (U+2800–U+28FF, e.g. "⠙ project") and idle when it shows just the (possibly truncated) directory name —
 // the braille-prefix test is robust to title truncation, unlike comparing against basename(cwd).
 func TitleIsBusy(backend, title string) bool {

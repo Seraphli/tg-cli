@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.261
+▝▜██████▀  nvidia/nemotron-3-super-120b-a12b:free · API Usage Billing
+  ▝▝ ▝▝    /tmp/ser62-samples/work-cc261
+
+
+❯ Reply with exactly one word: hi
+
+  Thought for 5s
+
+● hi
+
+✻ Baked for 5s · done 5:03 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                      tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ This is a very long queued instruction that the boss types into the input box, deliberately long enough to wrap across at least two or three continuation lines inside the input box so we prove wrapped-draft
+  box-finding at idle too.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

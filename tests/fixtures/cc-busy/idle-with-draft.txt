@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.261
+▝▜██████▀  nvidia/nemotron-3-super-120b-a12b:free · API Usage Billing
+  ▝▝ ▝▝    /tmp/ser62-samples/work-cc261
+
+
+❯ Run the bash command: sleep 25; then say done
+
+● I'll run the sleep command for 25 seconds and then say "done".
+
+  Thought for 1s, ran 1 shell command
+
+● done
+
+✻ Cooked for 30s · done 4:41 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ this is a draft typed while idle waiting
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

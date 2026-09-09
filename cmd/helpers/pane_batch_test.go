@@ -1,6 +1,8 @@
 package helpers
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -12,16 +14,16 @@ import (
 func TestPaneState(t *testing.T) {
 	// Pre-fetched pane map (as injector.ListPanesBatch returns, keyed by FormatTarget).
 	panes := map[string]injector.PaneInfo{
-		"%1":  {Command: "claude", PID: "1001", Title: "✳ Hell again"}, // CC idle: "✳" prefix
-		"%2":  {Command: "claude", PID: "1002", Title: "· Working"},    // CC busy: no "✳" prefix
-		"%3":  {Command: "codex", PID: "1003", Title: "⠙ project"},     // codex busy: braille prefix
-		"%4":  {Command: "codex", PID: "1004", Title: "project"},       // codex idle: no braille prefix
+		"%1":  {Command: "claude", PID: "1001", Title: "✳ Hell again"}, // cc: classified from CONTENT (idle body)
+		"%2":  {Command: "claude", PID: "1002", Title: "· Working"},    // cc: classified from CONTENT (busy body)
+		"%3":  {Command: "codex", PID: "1003", Title: "⠙ project"},     // codex busy: braille prefix (title)
+		"%4":  {Command: "codex", PID: "1004", Title: "project"},       // codex idle: no braille prefix (title)
 		"%5":  {Command: "zsh", PID: "1005", Title: "shell"},           // unknown backend
-		"%6":  {Command: "claude", PID: "1006", Title: ""},             // present but empty title
-		"%7":  {Command: "claude", PID: "1007", Title: "  ✳ Job  "},    // CC idle, surrounding whitespace
-		"%8":  {Command: "node", PID: "1008", Title: "⠙ project"},      // node running codex, busy braille
-		"%9":  {Command: "node", PID: "1009", Title: "✳ ready"},        // node running cc, idle "✳"
-		"%10": {Command: "node", PID: "1010", Title: ""},               // node, empty title
+		"%6":  {Command: "claude", PID: "1006", Title: ""},             // present but empty title (short-circuit)
+		"%7":  {Command: "claude", PID: "1007", Title: "  ✳ Job  "},    // cc: classified from CONTENT (idle body)
+		"%8":  {Command: "node", PID: "1008", Title: "⠙ project"},      // node running codex, busy braille (title)
+		"%9":  {Command: "node", PID: "1009", Title: "✳ ready"},        // node running cc, classified from CONTENT
+		"%10": {Command: "node", PID: "1010", Title: ""},               // node, empty title (short-circuit)
 	}
 	// Pre-fetched children map (as ResolvePaneChildren returns): shell pid -> child cli. Only "node" panes
 	// consult it; claude/codex/zsh panes classify without it. 1010 is absent (empty-title short-circuit).
@@ -29,25 +31,43 @@ func TestPaneState(t *testing.T) {
 		"1008": "/usr/bin/node /home/u/.local/bin/codex --flag",
 		"1009": "/usr/bin/node /home/u/.local/bin/claude",
 	}
+	// cc panes now derive their verdict from the LIVE pane CONTENT (ccBusyFromContent), not the title/store.
+	// Stub the capture seam so cc panes classify from a supplied body; keyed by PaneID. Rules are 60 ─ (U+2500).
+	ccBusyBody := "✻ Kneading…\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	ccIdleBody := "✻ Cooked for 5s · done\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	errFakeNoPane := errors.New("no fake pane")
+	origCapture := captureViewport
+	defer func() { captureViewport = origCapture }()
+	captureViewport = func(ctx context.Context, target injector.TmuxTarget) (string, error) {
+		switch target.PaneID {
+		case "%2":
+			return ccBusyBody, nil
+		case "%1", "%7", "%9":
+			return ccIdleBody, nil
+		default:
+			return "", errFakeNoPane
+		}
+	}
 	cases := []struct {
 		name        string
 		target      string
 		wantTitle   string
 		wantRunning bool
 	}{
-		{"cc idle keeps title but not running", "%1", "✳ Hell again", false},
-		{"cc busy is running", "%2", "· Working", true},
+		// cc verdict comes from CONTENT (ccIdleBody -> idle); the RETURNED title is still info.Title unchanged.
+		{"cc idle from content keeps title", "%1", "✳ Hell again", false},
+		{"cc busy from content is running", "%2", "· Working", true},
 		{"codex busy is running", "%3", "⠙ project", true},
 		{"codex idle not running", "%4", "project", false},
 		{"unknown backend not running", "%5", "shell", false},
 		{"present empty title not running", "%6", "", false},
-		// A raw title with surrounding whitespace must classify idle (TitleIsBusy trims), and the
-		// RETURNED title must be the untrimmed original — PaneState must not normalize.
-		{"cc idle surrounding whitespace, title untrimmed", "%7", "  ✳ Job  ", false},
+		// cc verdict comes from CONTENT (ccIdleBody -> idle); the RETURNED title is the untrimmed original —
+		// PaneState must not normalize.
+		{"cc idle from content, title untrimmed", "%7", "  ✳ Job  ", false},
 		// node panes resolve their real backend from the children map (the batched replacement for
-		// `ps --ppid`): 1008 -> codex (busy braille), 1009 -> cc (idle "✳").
+		// `ps --ppid`): 1008 -> codex (busy braille title), 1009 -> cc (verdict from CONTENT, not the title).
 		{"node->codex busy classified via children map", "%8", "⠙ project", true},
-		{"node->cc idle classified via children map", "%9", "✳ ready", false},
+		{"node->cc idle classified via content", "%9", "✳ ready", false},
 		{"node empty title short-circuits", "%10", "", false},
 		// A pane_id queried but absent from the map → empty title, not running (the old GetPaneTitle
 		// error path). This is the branch that lets flushInjectQueue run for a pane that is gone.
@@ -56,7 +76,7 @@ func TestPaneState(t *testing.T) {
 	// No pi panes here, so the run-state store is never consulted; a fresh empty store is enough.
 	store := stores.NewHookRunningStateStore()
 	for _, c := range cases {
-		title, running := PaneState(c.target, panes, children, store)
+		title, running := PaneState(context.Background(), c.target, panes, children, store)
 		if title != c.wantTitle || running != c.wantRunning {
 			t.Errorf("%s: PaneState(%q) = (%q, %v), want (%q, %v)", c.name, c.target, title, running, c.wantTitle, c.wantRunning)
 		}
@@ -80,7 +100,7 @@ func TestPaneStateUsesChildrenMapNotLivePs(t *testing.T) {
 		"%8": {Command: "node", PID: "1008", Title: "⠙ project"},
 	}
 	children := map[string]string{"1008": "/usr/bin/node /home/u/.local/bin/codex"}
-	title, running := PaneState("%8", panes, children, stores.NewHookRunningStateStore())
+	title, running := PaneState(context.Background(), "%8", panes, children, stores.NewHookRunningStateStore())
 	if title != "⠙ project" || !running {
 		t.Errorf("PaneState(node, codex child) = (%q, %v), want (%q, true)", title, running, "⠙ project")
 	}
@@ -91,7 +111,7 @@ func TestPaneStateUsesChildrenMapNotLivePs(t *testing.T) {
 
 // TestPaneStateStoreAware covers the store-aware busy routing PaneState now uses (storeOrTitleBusy). A
 // running pi session — which TitleIsBusy cannot classify (it only handles cc/codex) — must read busy from
-// the in-memory run-state store; cc panes must still classify from the title and IGNORE the store; and a
+// the in-memory run-state store; cc panes classify from the LIVE pane content and IGNORE the store; and a
 // pi pane whose process died (current command no longer "pi") must self-heal to idle because detectBackend
 // returns "" and the store is bypassed. It also proves the store-aware path never falls back to the live
 // per-target ps resolver (psCliCommandForPID stays at zero invocations — the f29 no-live-exec invariant).
@@ -107,17 +127,34 @@ func TestPaneStateStoreAware(t *testing.T) {
 		"%1": {Command: "pi", PID: "2001", Title: "pi session"},    // pi, store set RUNNING -> busy from store
 		"%2": {Command: "pi", PID: "2002", Title: "pi session"},    // pi, store unknown -> title path -> idle
 		"%3": {Command: "pi", PID: "2003", Title: "pi session"},    // pi, store set IDLE -> idle from store
-		"%4": {Command: "claude", PID: "2004", Title: "· Working"}, // cc busy title + store RUNNING -> title wins
-		"%5": {Command: "claude", PID: "2005", Title: "✳ ready"},   // cc idle title + store RUNNING -> store ignored
+		"%4": {Command: "claude", PID: "2004", Title: "· Working"}, // cc: classified from CONTENT (busy body); store ignored
+		"%5": {Command: "claude", PID: "2005", Title: "✳ ready"},   // cc: classified from CONTENT (idle body); store ignored
 		"%6": {Command: "bash", PID: "2006", Title: "· Working"},   // dead pi (command != "pi") + store RUNNING -> idle
 	}
 	children := map[string]string{}
+	// cc panes derive their verdict from the LIVE pane CONTENT (ccBusyFromContent), not the store/title. Stub
+	// the capture seam so cc panes classify from a supplied body; keyed by PaneID. Rules are 60 ─ (U+2500).
+	ccBusyBody := "✻ Kneading…\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	ccIdleBody := "✻ Cooked for 5s · done\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	errFakeNoPane := errors.New("no fake pane")
+	origCapture := captureViewport
+	defer func() { captureViewport = origCapture }()
+	captureViewport = func(ctx context.Context, target injector.TmuxTarget) (string, error) {
+		switch target.PaneID {
+		case "%4":
+			return ccBusyBody, nil
+		case "%5":
+			return ccIdleBody, nil
+		default:
+			return "", errFakeNoPane
+		}
+	}
 	store := stores.NewHookRunningStateStore()
 	store.SetRunning("%1") // pi running
 	// "%2" intentionally left unknown (never set) — store returns known=false, falls to the title path.
 	store.SetIdle("%3")    // pi explicitly idle
-	store.SetRunning("%4") // cc: store says running, but cc must classify from the title
-	store.SetRunning("%5") // cc: store says running, but an idle "✳" title must win (store ignored for cc)
+	store.SetRunning("%4") // cc: store says running, but cc must classify from CONTENT
+	store.SetRunning("%5") // cc: store says running, but an idle CONTENT body must win (store ignored for cc)
 	store.SetRunning("%6") // dead pi: store still says running, but backend "" bypasses the store
 	cases := []struct {
 		name        string
@@ -129,20 +166,74 @@ func TestPaneStateStoreAware(t *testing.T) {
 		{"pi running from store", "%1", "pi session", true},
 		{"pi unknown in store not running", "%2", "pi session", false},
 		{"pi idle from store not running", "%3", "pi session", false},
-		// Rider 3a: cc classifies from the title, never the store.
-		{"cc busy title is running (store ignored)", "%4", "· Working", true},
-		{"cc idle title not running even though store says running", "%5", "✳ ready", false},
+		// Rider 3a: cc classifies from CONTENT, never the store.
+		{"cc busy from content is running (store ignored)", "%4", "· Working", true},
+		{"cc idle from content not running even though store says running", "%5", "✳ ready", false},
 		// Rider 3b: a pi process that died shows a non-"pi" command -> detectBackend "" -> store bypassed.
 		{"dead pi self-heals to idle despite store running", "%6", "· Working", false},
 	}
 	for _, c := range cases {
-		title, running := PaneState(c.target, panes, children, store)
+		title, running := PaneState(context.Background(), c.target, panes, children, store)
 		if title != c.wantTitle || running != c.wantRunning {
 			t.Errorf("%s: PaneState(%q) = (%q, %v), want (%q, %v)", c.name, c.target, title, running, c.wantTitle, c.wantRunning)
 		}
 	}
 	if psCalled {
 		t.Errorf("live ps resolver invoked during store-aware PaneState; want zero live per-target ps (f29 no-live-exec invariant)")
+	}
+}
+
+// TestPaneStateCCBusyTTL covers the Item 1 busy-TTL OR wiring in PaneState's cc branch: CCActive
+// bridges a spinner-less streaming pause when the viewport classifier alone would read idle, and the
+// title=="" guard still wins over a live TTL (kill-safety preserved — a dead pane is never resurrected
+// by a stale TTL entry).
+func TestPaneStateCCBusyTTL(t *testing.T) {
+	ccIdleBody := "✻ Cooked for 5s · done\n" + strings.Repeat("─", 60) + "\n❯ \n" + strings.Repeat("─", 60) + "\n"
+	errFakeNoPane := errors.New("no fake pane")
+	origCapture := captureViewport
+	defer func() { captureViewport = origCapture }()
+	captureViewport = func(ctx context.Context, target injector.TmuxTarget) (string, error) {
+		switch target.PaneID {
+		case "%1", "%2":
+			return ccIdleBody, nil // viewport classifier alone reads IDLE for both
+		default:
+			return "", errFakeNoPane
+		}
+	}
+	panes := map[string]injector.PaneInfo{
+		"%1": {Command: "claude", PID: "1001", Title: "✳ ready"}, // cc, viewport idle, TTL live -> busy (OR)
+		"%2": {Command: "claude", PID: "1002", Title: "✳ ready"}, // cc, viewport idle, TTL absent -> idle
+		"%3": {Command: "claude", PID: "1003", Title: ""},        // cc, empty title, TTL live -> idle (guard wins)
+	}
+	children := map[string]string{}
+	store := stores.NewHookRunningStateStore()
+	store.RecordCCActivity("%1")
+	store.RecordCCActivity("%3")
+
+	if _, running := PaneState(context.Background(), "%1", panes, children, store); !running {
+		t.Error("cc viewport idle + CCActive live: PaneState running = false, want true (OR bridges the pause)")
+	}
+	if _, running := PaneState(context.Background(), "%2", panes, children, store); running {
+		t.Error("cc viewport idle + no CCActive: PaneState running = true, want false")
+	}
+	if title, running := PaneState(context.Background(), "%3", panes, children, store); title != "" || running {
+		t.Errorf("cc empty title + CCActive live: PaneState = (%q, %v), want (\"\", false) — title==\"\" guard must win over a live TTL", title, running)
+	}
+}
+
+// TestPaneStateCCBusyTTLNonCCBackendIgnored proves a non-cc backend (pi) never consults CCActive: a
+// live cc-activity TTL entry recorded for a pi pane's target must not flip its verdict — the pi branch
+// stays on storeOrTitleBusy exactly as before.
+func TestPaneStateCCBusyTTLNonCCBackendIgnored(t *testing.T) {
+	panes := map[string]injector.PaneInfo{
+		"%1": {Command: "pi", PID: "2001", Title: "pi session"}, // pi, store unknown -> title path -> idle
+	}
+	children := map[string]string{}
+	store := stores.NewHookRunningStateStore()
+	store.RecordCCActivity("%1") // a live cc TTL entry for the SAME target — must be ignored for pi
+
+	if _, running := PaneState(context.Background(), "%1", panes, children, store); running {
+		t.Error("pi backend consulted CCActive: PaneState running = true, want false (non-cc backends never consult CCActive)")
 	}
 }
 

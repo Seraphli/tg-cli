@@ -26,7 +26,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 		// Pre-check session liveness before processing the response
 		if snapOk && snap.TmuxTarget != "" {
 			if !helpers.CheckSessionAlive(snap.TmuxTarget, func(t string) {
-				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
+				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, bs.HookRunning, t)
 			}) {
 				http.Error(w, "session disconnected", 410)
 				return
@@ -154,7 +154,7 @@ func registerTool(mux *http.ServeMux, bs *types.BotState) {
 				return
 			}
 			if !helpers.CheckSessionAlive(target, func(t string) {
-				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, t)
+				helpers.CleanDeadSession(bs.SessionState, bs.Pages, bs.SessionCounts, bs.InjectQueue, bs.HookRunning, t)
 			}) {
 				http.Error(w, "session disconnected", 410)
 				return
