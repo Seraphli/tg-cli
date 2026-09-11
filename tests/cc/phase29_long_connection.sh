@@ -344,6 +344,11 @@ pane_log "[tc4] AFTER hook connected detected"
 if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
   pass "TC4: hook connected for PermissionRequest (msg_id=$TC4_MSG_ID uuid=$TC4_UUID)"
 
+  # Snapshot the log offset BEFORE the restart is initiated: 'hook reattached (restart)' logs ~1s after the
+  # new daemon starts, so a snapshot taken after wait_for_bot_ready would start the reattach-grep window PAST
+  # that line and burn the full timeout.
+  LOG_AFTER_RESTART=$(wc -l < "$LOG_FILE")
+
   # Restart the bot while hook is connected — simulate upgrade window
   # so the hook holds + reconnects instead of exiting (cmd/hook.go:267-273 gates on UpgradeFlagActive)
   UPGRADE_FLAG="$TEST_CONFIG_DIR/upgrading"
@@ -365,7 +370,6 @@ if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
   # Wait for hook to reattach (hook reattached or hook reattached (restart))
   ELAPSED=0
   TC4_REATTACHED=false
-  LOG_AFTER_RESTART=$(wc -l < "$LOG_FILE")
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
     if tail -n +"$((LOG_AFTER_RESTART + 1))" "$LOG_FILE" | grep -E "hook reattached" > /dev/null 2>&1; then
       TC4_REATTACHED=true
@@ -393,8 +397,29 @@ if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
     pass_opt "TC4: /permission/decide returned: $DECIDE_RESP (may resolve via alternate path after restart)"
   fi
 
-  # Wait for CC to complete — accept Stream relabel ✅ OR the dump-at-Stop delivery path
-  # (: Stop [ / Stop terminal: outcome=direct_send), which are mutually exclusive per turn.
+  # HARD assert (TC4 subject): the original button, pressed after the restart, actually resolved the pending
+  # permission and the approved command ran → a PostToolUse carrying the tc29_restart_test command appears after
+  # the decide. This is the definitive proof that "restart does not lose the pending permission".
+  ELAPSED=0
+  TC4_EXEC=false
+  while [ $ELAPSED -lt "$TIMEOUT" ]; do
+    if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep "PostToolUse" | grep -F "tc29_restart_test" > /dev/null 2>&1; then
+      TC4_EXEC=true
+      break
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+  done
+  pane_log "[tc4] AFTER exec-assert wait"
+  if [ "$TC4_EXEC" = "true" ]; then
+    pass "TC4: approved command executed after restart (PostToolUse tc29_restart_test)"
+  else
+    fail "TC4: approved command did NOT execute after restart (no PostToolUse tc29_restart_test within ${TIMEOUT}s)"
+  fi
+
+  # Optional signal — accept Stream relabel ✅ OR the dump-at-Stop delivery path (: Stop [ /
+  # Stop terminal: outcome=direct_send). DEMOTED to WARN: post-approval model behavior (mimo may re-issue the
+  # command and hang on a fresh unanswered prompt) is outside TC4's subject, so a timeout here must NOT fail.
   ELAPSED=0
   TC4_STOP=false
   while [ $ELAPSED -lt "$TIMEOUT" ]; do
@@ -411,7 +436,7 @@ if [ "$TC4_FOUND" = "true" ] && [ -n "$TC4_MSG_ID" ]; then
   if [ "$TC4_STOP" = "true" ]; then
     pass "TC4: Stream relabel ✅ received (CC turn complete after restart + resolve)"
   else
-    fail "TC4: Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s after restart"
+    pass_opt "TC4: Stream relabel / Stop-delivery not observed within ${TIMEOUT}s after restart (optional; post-approval model behavior)"
   fi
 else
   fail "TC4: hook connected not logged within ${TIMEOUT}s"

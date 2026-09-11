@@ -3,10 +3,10 @@ Read a couple of files to confirm the surrounding context.
 The update looks straightforward; applying it now.
 Done. Moving on to the next step in the task.
 Re-checking the nearby lines once more.
-✻ Sautéed for 9m 6s · done 4:29 AM
-                                                                                                                                                                                                             603909 tokens
+* Flambéing… (11s · ↓ 36 tokens · thought for 1s)
+
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ 
+❯ [Pasted text #1 +7 lines]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  claude-code │ ca 4.1.0 ███████░░░ 75% 1M
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+  paste again to expand
+                                                                                                                                                                                                           ◈ max · /effort

@@ -356,48 +356,88 @@ check_typing_continuity() {
     fail "[$label] Typing: missing state timestamps (T1=${t1_ts:-none} T2=${t2_ts:-none})"
     return
   fi
-  local t1_epoch t2_epoch duration
+  local t1_epoch t2_epoch
   t1_epoch=$(date -d "$t1_ts" +%s 2>/dev/null || echo 0)
   t2_epoch=$(date -d "$t2_ts" +%s 2>/dev/null || echo 0)
-  duration=$((t2_epoch - t1_epoch))
-  # Count typing SEND ATTEMPTS (ticker fired) between T1 and T2. The tick line is logged before
-  # the HTTP sendChatAction call, so a transient network send failure does NOT create a gap — only
-  # a missed attempt would. 3s ticker, so the expected count math below (duration/3 - 2) is unchanged.
+  # Busy segments from the BOT log busy-status lifecycle within [T1,T2]. WHY: a mimo dump-at-Stop chunk
+  # gap makes a mid-turn IDLE island where the 3s typing ticker BY DESIGN does not send; asserting typing
+  # gaps across islands asserts against the design. A busy segment = the route was busy: START at
+  # "busy status sent", continues through edited/re-floated, END at "busy status grace start" (the bot idle
+  # signal; fallback "deleted"); a later "sent" opens a new segment. Segments come from bot.log only, so
+  # typing.log gains no new coupling. E2E per-run isolation => one active CC route per phase, so every
+  # in-window busy-status line belongs to this turn's route (no route arg threaded through the callers).
+  local seg_starts=() seg_ends=() busy_seconds=0 cur_start=""
+  while IFS= read -r bl; do
+    if [ -z "$bl" ]; then continue; fi
+    local bts bepoch
+    bts=$(echo "$bl" | grep -oP '^\[\K[^]]+' || true)
+    if [ -z "$bts" ]; then continue; fi
+    bepoch=$(date -d "$bts" +%s 2>/dev/null || echo "")
+    if [ -z "$bepoch" ]; then continue; fi
+    if [ "$bepoch" -lt "$t1_epoch" ] || [ "$bepoch" -gt "$t2_epoch" ]; then continue; fi
+    if echo "$bl" | grep -q "busy status sent"; then
+      if [ -z "$cur_start" ]; then cur_start="$bepoch"; fi
+    elif echo "$bl" | grep -qE "busy status (grace start|deleted)"; then
+      if [ -n "$cur_start" ]; then
+        seg_starts+=("$cur_start"); seg_ends+=("$bepoch")
+        busy_seconds=$((busy_seconds + bepoch - cur_start)); cur_start=""
+      fi
+    fi
+  done <<< "$(grep -E 'busy status (sent|edited|re-floated|grace start|deleted)' "$LOG_FILE" 2>/dev/null || true)"
+  # A segment still open at end_event (no grace start/deleted before T2) closes at T2.
+  if [ -n "$cur_start" ]; then
+    seg_starts+=("$cur_start"); seg_ends+=("$t2_epoch")
+    busy_seconds=$((busy_seconds + t2_epoch - cur_start))
+  fi
+  local nseg=${#seg_starts[@]}
+  if [ "$nseg" -eq 0 ]; then
+    fail "[$label] Typing continuity: no busy segment found in [T1,T2] — busy detection never engaged"
+    return
+  fi
+  # Typing SEND ATTEMPTS (sending=true; parsing UNCHANGED). The tick line is logged before the HTTP
+  # sendChatAction call, so a transient send failure does not create a gap — only a missed attempt would.
+  # Count + max-gap are scoped INSIDE busy segments; gaps spanning segment boundaries (the by-design idle
+  # islands) are not asserted.
   local typing_timestamps
   typing_timestamps=$(echo "$new_entries" | grep 'tick:.*sending=true' | grep -oP '^\[\K[^]]+' || true)
-  local count=0 max_gap=0 prev_epoch=""
+  local count=0 max_gap=0 i
+  local seg_prev=()
+  for ((i = 0; i < nseg; i++)); do seg_prev[$i]=""; done
   if [ -n "$typing_timestamps" ]; then
     while IFS= read -r ts; do
       local epoch
       epoch=$(date -d "$ts" +%s 2>/dev/null || echo "")
       if [ -z "$epoch" ]; then continue; fi
-      if [ "$epoch" -ge "$t1_epoch" ] && [ "$epoch" -le "$t2_epoch" ]; then
-        count=$((count + 1))
-        if [ -n "$prev_epoch" ]; then
-          local gap=$((epoch - prev_epoch))
-          if [ "$gap" -gt "$max_gap" ]; then max_gap=$gap; fi
+      for ((i = 0; i < nseg; i++)); do
+        if [ "$epoch" -ge "${seg_starts[$i]}" ] && [ "$epoch" -le "${seg_ends[$i]}" ]; then
+          count=$((count + 1))
+          if [ -n "${seg_prev[$i]}" ]; then
+            local gap=$((epoch - seg_prev[i]))
+            if [ "$gap" -gt "$max_gap" ]; then max_gap=$gap; fi
+          fi
+          seg_prev[$i]="$epoch"
+          break
         fi
-        prev_epoch="$epoch"
-      fi
+      done
     done <<< "$typing_timestamps"
   fi
-  # Expected count: duration/3 with margin of 2
+  # Expected count: accumulated busy seconds / 3 with margin of 2 (same slack), replacing whole-duration.
   local expected=1
-  if [ "$duration" -gt 0 ]; then
-    expected=$((duration / 3 - 2))
+  if [ "$busy_seconds" -gt 0 ]; then
+    expected=$((busy_seconds / 3 - 2))
     if [ "$expected" -lt 1 ]; then expected=1; fi
   fi
   if [ "$count" -ge "$expected" ]; then
-    pass "[$label] Typing continuity: $count actions in ${duration}s (expected >= $expected)"
+    pass "[$label] Typing continuity: $count actions in ${busy_seconds}s busy across $nseg segment(s) (expected >= $expected)"
   else
-    fail "[$label] Typing continuity: $count actions in ${duration}s (expected >= $expected)"
+    fail "[$label] Typing continuity: $count actions in ${busy_seconds}s busy across $nseg segment(s) (expected >= $expected)"
   fi
-  # Max gap check (only meaningful with >= 2 entries)
+  # Max gap check within segments (only meaningful with >= 2 in-segment entries).
   if [ "$count" -ge 2 ]; then
     if [ "$max_gap" -le 5 ]; then
-      pass "[$label] Typing gap: max ${max_gap}s (<= 5s)"
+      pass "[$label] Typing gap: max ${max_gap}s intra-segment (<= 5s)"
     else
-      fail "[$label] Typing gap: max ${max_gap}s (> 5s)"
+      fail "[$label] Typing gap: max ${max_gap}s intra-segment (> 5s)"
     fi
   fi
 }

@@ -157,10 +157,13 @@ if ! wait_for_log_pattern "$LOG_BEFORE_TCB" "busy status re-floated" 300 "TC-b r
 fi
 pass "TC-b: busy status re-floated"
 
-# Route-scoped trigger extraction (Fix A f1 rev 4). The bot log is global but Telegram
-# msg_id ordering is per-chat, so scope every selector by route. Capture CHAT+TOPIC from
-# the initial "busy status sent" marker; the trigger is the last NON-status-owned "TG send"
-# in that chat, scoped after the started marker. Status boundaries match the FULL route.
+# Route-scoped trigger extraction (Fix A f1 rev 4; T9: widened scan window). The bot log is global but
+# Telegram msg_id ordering is per-chat, so scope every selector by route. Capture CHAT+TOPIC from
+# the initial "busy status sent" marker; the trigger is the last NON-status-owned "TG send" in that chat,
+# scoped across the whole TC-b window (from LOG_BEFORE_TCB) up to the first re-float, excluding status-owned
+# ids. Scanning from the window start (not only after the "busy status sent" marker) is required because a
+# dump-at-Stop model can log the triggering send in the same second as, and one line before, the status
+# marker (see the round RCA); the OWNED exclusion still keeps status/re-float sends out. Boundaries match the FULL route.
 WIN=$(tail -n +"$((LOG_BEFORE_TCB + 1))" "$LOG_FILE")
 CHAT=$(echo "$WIN"  | grep -oP 'busy status sent chat=\K-?[0-9]+' | head -1 || true)
 TOPIC=$(echo "$WIN" | grep -oP 'busy status sent chat=-?[0-9]+ topic=\K[0-9]+' | head -1 || true)
@@ -172,8 +175,7 @@ REFLOAT_NEW_ID=$(echo "$WIN" | grep -oP "busy status re-floated chat=$CHAT topic
 OWNED=$(echo "$WIN" | grep -oP "busy status sent chat=$CHAT topic=[0-9]+ msg_id=\K[0-9]+|busy status re-floated chat=$CHAT topic=[0-9]+ new_msg_id=\K[0-9]+" | sort -u)
 TRIGGER_MSG_ID=$(echo "$WIN" | awk -v owned="$OWNED" -v chat="$CHAT" -v topic="$TOPIC" '
   BEGIN { n=split(owned,a,"\n"); for(i=1;i<=n;i++) own[a[i]]=1 }
-  index($0, "busy status sent chat=" chat " topic=" topic " ") { started=1; next }
-  started && index($0, "TG send: chat=" chat " ") { if (match($0,/msg_id=[0-9]+/)) { id=substr($0,RSTART+7,RLENGTH-7); if (!(id in own)) last=id } }
+  index($0, "TG send: chat=" chat " ") { if (match($0,/msg_id=[0-9]+/)) { id=substr($0,RSTART+7,RLENGTH-7); if (!(id in own)) last=id } }
   index($0, "busy status re-floated chat=" chat " topic=" topic " ") { print last; exit }')
 if [ -z "$REFLOAT_NEW_ID" ] || [ -z "$TRIGGER_MSG_ID" ]; then
   fail "TC-b: no genuine route-scoped trigger/refloat (chat=$CHAT refloat=$REFLOAT_NEW_ID trigger=$TRIGGER_MSG_ID)"
