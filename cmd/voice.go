@@ -25,7 +25,40 @@ var VoiceCmd = &cobra.Command{
 func runVoice(cmd *cobra.Command, args []string) {
 	scanner := bufio.NewScanner(os.Stdin)
 
-	// Step 1: Detect ffmpeg
+	// Step 1: Engine selection
+	appCfgForEngine, _ := config.LoadAppConfig()
+	currentEngine := appCfgForEngine.VoiceEngine
+	if currentEngine == "" {
+		currentEngine = "whisper"
+	}
+	fmt.Println("Select voice engine:")
+	if currentEngine == "whisper" {
+		fmt.Println("  1. whisper (whisper.cpp, local inference) [current]")
+	} else {
+		fmt.Println("  1. whisper (whisper.cpp, local inference)")
+	}
+	if currentEngine == "sensevoice" {
+		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual) [current]")
+	} else {
+		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual)")
+	}
+	if currentEngine == "api" {
+		fmt.Println("  3. api (OpenAI-compatible transcription API) [current]")
+	} else {
+		fmt.Println("  3. api (OpenAI-compatible transcription API)")
+	}
+	fmt.Print("Engine choice (1-3, default 1): ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	engineChoice := strings.TrimSpace(scanner.Text())
+	if engineChoice == "3" {
+		runVoiceAPI(scanner)
+		return
+	}
+
+	// Step 2: Detect ffmpeg (whisper/sensevoice only — the api engine uploads raw audio)
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		fmt.Println("ffmpeg not found. Please install ffmpeg first:")
@@ -50,29 +83,6 @@ func runVoice(cmd *cobra.Command, args []string) {
 	}
 	fmt.Printf("ffmpeg found: %s\n\n", ffmpegPath)
 
-	// Step 2: Engine selection
-	appCfgForEngine, _ := config.LoadAppConfig()
-	currentEngine := appCfgForEngine.VoiceEngine
-	if currentEngine == "" {
-		currentEngine = "whisper"
-	}
-	fmt.Println("Select voice engine:")
-	if currentEngine == "whisper" {
-		fmt.Println("  1. whisper (whisper.cpp, local inference) [current]")
-	} else {
-		fmt.Println("  1. whisper (whisper.cpp, local inference)")
-	}
-	if currentEngine == "sensevoice" {
-		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual) [current]")
-	} else {
-		fmt.Println("  2. sensevoice (sherpa-onnx SenseVoice, faster multilingual)")
-	}
-	fmt.Print("Engine choice (1-2, default 1): ")
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr, "Failed to read input")
-		os.Exit(1)
-	}
-	engineChoice := strings.TrimSpace(scanner.Text())
 	if engineChoice == "2" {
 		runVoiceSherpa(scanner, ffmpegPath)
 		return
@@ -349,6 +359,69 @@ func runVoiceSherpa(scanner *bufio.Scanner, ffmpegPath string) {
 	} else {
 		fmt.Println("  Language: auto-detect")
 	}
+}
+
+// runVoiceAPI handles setup for the OpenAI-compatible transcription API engine.
+// No ffmpeg dependency — the api engine uploads the raw audio file as-is.
+func runVoiceAPI(scanner *bufio.Scanner) {
+	appCfg, _ := config.LoadAppConfig()
+
+	// Step 1: Base URL
+	if appCfg.VoiceAPIBaseURL != "" {
+		fmt.Printf("Current base URL: %s\n", appCfg.VoiceAPIBaseURL)
+	}
+	fmt.Print("Enter API base URL (e.g., https://api.openai.com): ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	baseURL := strings.TrimSpace(scanner.Text())
+	if baseURL == "" {
+		fmt.Fprintln(os.Stderr, "Base URL is required")
+		os.Exit(1)
+	}
+
+	// Step 2: API key
+	fmt.Print("Enter API key: ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	apiKey := strings.TrimSpace(scanner.Text())
+	if apiKey == "" {
+		fmt.Fprintln(os.Stderr, "API key is required")
+		os.Exit(1)
+	}
+
+	// Step 3: Model
+	if appCfg.VoiceAPIModel != "" {
+		fmt.Printf("Current model: %s\n", appCfg.VoiceAPIModel)
+	}
+	fmt.Print("Enter model (e.g., whisper-1): ")
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "Failed to read input")
+		os.Exit(1)
+	}
+	model := strings.TrimSpace(scanner.Text())
+	if model == "" {
+		fmt.Fprintln(os.Stderr, "Model is required")
+		os.Exit(1)
+	}
+
+	// Step 4: Save config (preserve existing config fields)
+	cfg := appCfg
+	cfg.VoiceEngine = "api"
+	cfg.VoiceAPIBaseURL = baseURL
+	cfg.VoiceAPIKey = apiKey
+	cfg.VoiceAPIModel = model
+	if err := config.SaveAppConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("\nAPI voice engine setup complete!")
+	fmt.Printf("  Base URL: %s\n", baseURL)
+	fmt.Printf("  Model: %s\n", model)
 }
 
 func expandHome(path string) string {

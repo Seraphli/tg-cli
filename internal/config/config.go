@@ -133,6 +133,9 @@ type AppConfig struct {
 	SherpaOnnxPath      string   `json:"sherpaOnnxPath"`
 	SenseVoiceModelPath string   `json:"senseVoiceModelPath"`
 	VoiceRetainCount    int      `json:"voiceRetainCount,omitempty"`
+	VoiceAPIBaseURL     string   `json:"voiceApiBaseUrl,omitempty"`
+	VoiceAPIKey         string   `json:"voiceApiKey,omitempty"`
+	VoiceAPIModel       string   `json:"voiceApiModel,omitempty"`
 	CWDSource           string   `json:"cwdSource,omitempty"`
 	PaginationMaxRunes  int      `json:"paginationMaxRunes,omitempty"`
 	ToolLineMaxRunes    int      `json:"toolLineMaxRunes,omitempty"`

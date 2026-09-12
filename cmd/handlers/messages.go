@@ -109,26 +109,141 @@ func resolveGroupTarget(bs *types.BotState, chatID int64, topicID int) (string, 
 	return targets[0], target, nil
 }
 
-// transcribeVoice downloads and transcribes a voice message.
-func transcribeVoice(bot *tele.Bot, fileID string) (string, error) {
+// downloadAudio, transcribeFn and transcribeWithEngineFn are package-level vars so handler tests can
+// inject mocks (A3).
+var downloadAudio = func(bot *tele.Bot, fileID, ext string) (string, error) {
 	file, err := bot.FileByID(fileID)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Voice file lookup failed: %v", err))
-		return "", fmt.Errorf("failed to get voice file: %w", err)
+		logger.Error(fmt.Sprintf("Audio file lookup failed: %v", err))
+		return "", fmt.Errorf("failed to get audio file: %w", err)
 	}
-	tmpFile := filepath.Join(os.TempDir(), "tg-cli-voice-"+fileID+".ogg")
-	defer os.Remove(tmpFile)
+	tmpFile := filepath.Join(os.TempDir(), "tg-cli-voice-"+fileID+"."+ext)
 	if err := bot.Download(&file, tmpFile); err != nil {
-		logger.Error(fmt.Sprintf("Voice download failed: %v", err))
-		return "", fmt.Errorf("failed to download voice: %w", err)
+		logger.Error(fmt.Sprintf("Audio download failed: %v", err))
+		return "", fmt.Errorf("failed to download audio: %w", err)
 	}
-	text, engine, err := voice.Transcribe(tmpFile)
+	return tmpFile, nil
+}
+
+var transcribeFn = voice.Transcribe
+var transcribeWithEngineFn = voice.TranscribeWithEngine
+
+// processUserInputFn is a package-level var (A3-style seam) so tests can mock the handoff from a
+// successful transcription to the shared input-processing path without exercising its full logic.
+var processUserInputFn = processUserInput
+
+// engineLabel returns the human-facing engine name used in retry-button labels and vretry outcome edits.
+func engineLabel(engine string) string {
+	switch engine {
+	case "api":
+		return "API"
+	case "sensevoice":
+		return "SenseVoice"
+	default:
+		return "Whisper"
+	}
+}
+
+// configuredRetryEngines lists every fully-configured transcription engine, in a stable (api, whisper,
+// sensevoice) order, that a failure reply should offer a retry button for. Per the boss ruling every
+// configured engine — INCLUDING the one that just failed — is retryable (a transient API failure still
+// deserves an API retry), so the failed engine is not excluded. Empty slice when nothing is configured.
+func configuredRetryEngines(cfg config.AppConfig) []string {
+	var engines []string
+	if cfg.VoiceAPIBaseURL != "" {
+		engines = append(engines, "api")
+	}
+	if cfg.WhisperPath != "" && cfg.ModelPath != "" {
+		engines = append(engines, "whisper")
+	}
+	if cfg.SherpaOnnxPath != "" && cfg.SenseVoiceModelPath != "" {
+		engines = append(engines, "sensevoice")
+	}
+	return engines
+}
+
+// buildRetryButtons builds one "🔁 Retry with <engine>" inline button per configured engine (each on its
+// own row), the payload capturing the original routing (reply target msg ID + thread ID) at failure time.
+// Returns nil when engines is empty.
+func buildRetryButtons(engines []string, replyToID, threadID int) *tele.ReplyMarkup {
+	if len(engines) == 0 {
+		return nil
+	}
+	menu := &tele.ReplyMarkup{}
+	rows := make([]tele.Row, 0, len(engines))
+	for _, engine := range engines {
+		btn := menu.Data("🔁 Retry with "+engineLabel(engine), "vretry", engine+"|"+strconv.Itoa(replyToID)+"|"+strconv.Itoa(threadID))
+		rows = append(rows, menu.Row(btn))
+	}
+	menu.Inline(rows...)
+	return menu
+}
+
+// sendTranscriptionFailure replies to c with the transcription error, carrying one retry button per
+// fully-configured engine (including the engine that just failed) — NO silent fallback happens
+// automatically. When no engine is configured at all, the reply carries no button and states so.
+func sendTranscriptionFailure(c tele.Context, cfg config.AppConfig, err error) error {
+	engines := configuredRetryEngines(cfg)
+	if len(engines) == 0 {
+		return c.Reply(fmt.Sprintf("❌ %v (no transcription engine configured to retry with)", err))
+	}
+	replyToID := 0
+	if c.Message().ReplyTo != nil {
+		replyToID = c.Message().ReplyTo.ID
+	}
+	return c.Reply(fmt.Sprintf("❌ %v", err), buildRetryButtons(engines, replyToID, c.Message().ThreadID))
+}
+
+// handleAudioTranscription downloads and transcribes an audio/voice message by fileID, then routes the
+// resulting text through processUserInput. forcedEngine, when set, transcribes with that specific
+// engine (used by the "vretry" callback); empty uses the configured engine. Any failure (download error,
+// transcription error, or empty text) replies with the error and, when possible, a retry button.
+// handleAudioTranscription downloads and transcribes the audio, routing the text on success and replying
+// with a retry button on failure. It returns transcribed=true only when transcription produced text that
+// was handed off for delivery; on any failure (download/transcribe/empty) transcribed=false and the error
+// reply has already been sent. The returned error is the reply/delivery send error (nil when that send
+// succeeded) — callers that only propagate handler errors can ignore transcribed.
+func handleAudioTranscription(bs *types.BotState, c tele.Context, bot *tele.Bot, fileID, ext, voicePrefix, forcedEngine string) (bool, error) {
+	cfg, _ := config.LoadAppConfig()
+	path, err := downloadAudio(bot, fileID, ext)
 	if err != nil {
-		logger.Error(fmt.Sprintf("Voice transcription failed: %v", err))
-		return "", fmt.Errorf("transcription failed: %w", err)
+		return false, sendTranscriptionFailure(c, cfg, err)
 	}
-	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s text=%s", engine, text))
-	return text, nil
+	defer os.Remove(path)
+	var text, engine string
+	start := time.Now()
+	if forcedEngine == "" {
+		text, engine, err = transcribeFn(path)
+	} else {
+		text, engine, err = transcribeWithEngineFn(path, forcedEngine)
+	}
+	duration := time.Since(start)
+	if err != nil {
+		logger.Error(fmt.Sprintf("Audio transcription failed: %v", err))
+		return false, sendTranscriptionFailure(c, cfg, err)
+	}
+	if text == "" {
+		logger.Error("Audio transcription failed: empty text")
+		return false, sendTranscriptionFailure(c, cfg, fmt.Errorf("transcription produced empty text"))
+	}
+	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s duration=%s text=%s", engine, duration.Round(time.Millisecond), text))
+	return true, processUserInputFn(bs, c, bot, text, true, voicePrefix)
+}
+
+// isAudioDocument reports whether doc is an audio file, by MIME prefix or filename extension. Used to
+// route OnDocument audio files (group chats only) through transcription instead of plain file-inject.
+func isAudioDocument(doc *tele.Document) bool {
+	if doc == nil {
+		return false
+	}
+	if strings.HasPrefix(doc.MIME, "audio/") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(doc.FileName), ".")) {
+	case "mp3", "m4a", "ogg", "oga", "wav", "flac", "opus", "aac", "wma", "webm", "amr", "3gp":
+		return true
+	}
+	return false
 }
 
 // downloadTGFile downloads a Telegram file to /tmp/tg-cli/uploads/.
@@ -728,25 +843,27 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 				return nil
 			}
-			text, err := transcribeVoice(bot, c.Message().Voice.FileID)
-			if err != nil {
-				logger.Error(fmt.Sprintf("Group voice transcription failed: err=%v", err))
-				return c.Reply(fmt.Sprintf("❌ %v", err))
-			}
-			if text == "" {
-				logger.Error("Group voice transcription failed: empty text")
-				return c.Reply("❌ Transcription produced empty text.")
-			}
-			return processUserInput(bs, c, bot, text, true, voicePrefix)
+			_, err := handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "")
+			return err
 		}
-		text, err := transcribeVoice(bot, c.Message().Voice.FileID)
-		if err != nil {
-			return c.Reply(fmt.Sprintf("❌ %v", err))
+		_, err := handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "")
+		return err
+	})
+
+	// OnAudio: transcribe audio files (tele.Audio, distinct from voice notes) in group/supergroup chats
+	// only — private-chat audio stays dropped (unhandled), per boss scope.
+	bot.Handle(tele.OnAudio, func(c tele.Context) error {
+		userID := strconv.FormatInt(c.Sender().ID, 10)
+		chatID := strconv.FormatInt(c.Chat().ID, 10)
+		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
+			return c.Reply("Not paired. Use /bot_pair first.")
 		}
-		if text == "" {
-			return c.Reply("❌ Transcription produced empty text.")
+		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
+			return nil
 		}
-		return processUserInput(bs, c, bot, text, true, voicePrefix)
+		audio := c.Message().Audio
+		_, err := handleAudioTranscription(bs, c, bot, audio.FileID, audioExt(audio.FileName, audio.MIME), voicePrefix, "")
+		return err
 	})
 
 	bot.Handle(tele.OnDocument, func(c tele.Context) error {
@@ -756,6 +873,10 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			return c.Reply("Not paired. Use /bot_pair first.")
 		}
 		doc := c.Message().Document
+		if (c.Chat().Type == "group" || c.Chat().Type == "supergroup") && isAudioDocument(doc) {
+			_, err := handleAudioTranscription(bs, c, bot, doc.FileID, audioExt(doc.FileName, doc.MIME), voicePrefix, "")
+			return err
+		}
 		localPath, err := downloadTGFile(bot, doc.FileID, doc.FileName)
 		if err != nil {
 			logger.Error(fmt.Sprintf("Document download failed: %v", err))

@@ -179,45 +179,106 @@ func resolveReplyTargetFromReply(bs *types.BotState, replyTo *tele.Message) (inj
 	return *targetPtr, nil
 }
 
+// msgKind classifies a message's media subtype for the "TG recv" summary line.
+func msgKind(msg *tele.Message) string {
+	switch {
+	case msg.Voice != nil:
+		return "voice"
+	case msg.Audio != nil:
+		return "audio"
+	case msg.Document != nil:
+		return "document"
+	case msg.Photo != nil:
+		return "photo"
+	default:
+		return "text"
+	}
+}
+
+// logMessageUpdate emits the "TG recv" INFO summary line for a message-shaped update. kind is the
+// media subtype for plain messages ("voice"/"audio"/"document"/"photo"/"text"), or "edited_message"/
+// "channel_post" for those update kinds. Guards Chat/Sender being nil (channel posts have no Sender).
+func logMessageUpdate(kind string, msg *tele.Message) {
+	var chatID, senderID int64
+	var chatType tele.ChatType
+	if msg.Chat != nil {
+		chatID = msg.Chat.ID
+		chatType = msg.Chat.Type
+	}
+	if msg.Sender != nil {
+		senderID = msg.Sender.ID
+	}
+	text := msg.Text
+	if msg.Caption != "" {
+		text = msg.Caption
+	}
+	preview := helpers.TruncateStr(text, 50)
+	replyInfo := ""
+	if msg.ReplyTo != nil {
+		replyInfo = fmt.Sprintf(" reply_to=%d", msg.ReplyTo.ID)
+	}
+	threadInfo := ""
+	if msg.ThreadID != 0 {
+		threadInfo = fmt.Sprintf(" thread_id=%d", msg.ThreadID)
+	}
+	topicInfo := ""
+	if msg.TopicMessage {
+		topicInfo = " is_topic=true"
+	}
+	logger.Info(fmt.Sprintf("TG recv %s: chat=%d type=%s sender=%d msg_id=%d%s%s%s text=%s",
+		kind, chatID, chatType, senderID, msg.ID, replyInfo, threadInfo, topicInfo, preview))
+}
+
+// LogIncomingUpdate logs every incoming Telegram update for debugging: one INFO summary line naming
+// the update kind, plus a DEBUG line with the raw JSON of the update. It reads directly from
+// *tele.Update (not tele.Context) so it can run at the poller level via NewIncomingLogPoller — telebot
+// only invokes bot.Use middleware for updates that match a registered handler, silently skipping
+// unhandled types (e.g. Audio); the poller filter runs for EVERY update before dispatch.
+func LogIncomingUpdate(u *tele.Update) {
+	if u == nil {
+		return
+	}
+	if cb := u.Callback; cb != nil {
+		var chatID, senderID int64
+		var msgID int
+		if cb.Sender != nil {
+			senderID = cb.Sender.ID
+		}
+		if cb.Message != nil {
+			msgID = cb.Message.ID
+			if cb.Message.Chat != nil {
+				chatID = cb.Message.Chat.ID
+			}
+		}
+		logger.Info(fmt.Sprintf("TG recv callback: chat=%d sender=%d msg_id=%d data=%s", chatID, senderID, msgID, cb.Data))
+	} else if msg := u.Message; msg != nil {
+		logMessageUpdate(msgKind(msg), msg)
+	} else if msg := u.EditedMessage; msg != nil {
+		logMessageUpdate("edited_message", msg)
+	} else if msg := u.ChannelPost; msg != nil {
+		logMessageUpdate("channel_post", msg)
+	} else {
+		logger.Info("TG recv other")
+	}
+	if raw, err := json.Marshal(u); err == nil {
+		logger.Debug(fmt.Sprintf("TG recv raw: %s", string(raw)))
+	}
+}
+
+// NewIncomingLogPoller wraps a Poller so LogIncomingUpdate runs for every update — production polling
+// and synthetic test dispatch alike — before it reaches any handler.
+func NewIncomingLogPoller(inner tele.Poller) tele.Poller {
+	return tele.NewMiddlewarePoller(inner, func(u *tele.Update) bool {
+		LogIncomingUpdate(u)
+		return true
+	})
+}
+
 // Register registers all Telegram bot handlers.
 func Register(bs *types.BotState) {
 	bot := bs.Bot
 	_ = bs.Creds
-	// Log every incoming Telegram message and callback for debugging
-	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
-		return func(c tele.Context) error {
-			if cb := c.Callback(); cb != nil {
-				logger.Info(fmt.Sprintf("TG recv callback: chat=%d sender=%d msg_id=%d data=%s",
-					c.Chat().ID, c.Sender().ID, c.Message().ID, cb.Data))
-			} else if msg := c.Message(); msg != nil {
-				msgType := "text"
-				if msg.Voice != nil {
-					msgType = "voice"
-				}
-				preview := helpers.TruncateStr(c.Text(), 50)
-				replyInfo := ""
-				if msg.ReplyTo != nil {
-					replyInfo = fmt.Sprintf(" reply_to=%d", msg.ReplyTo.ID)
-				}
-				threadInfo := ""
-				if msg.ThreadID != 0 {
-					threadInfo = fmt.Sprintf(" thread_id=%d", msg.ThreadID)
-				}
-				chatType := c.Chat().Type
-				topicInfo := ""
-				if msg.TopicMessage {
-					topicInfo = " is_topic=true"
-				}
-				logger.Info(fmt.Sprintf("TG recv %s: chat=%d type=%s sender=%d msg_id=%d%s%s%s text=%s",
-					msgType, c.Chat().ID, chatType, c.Sender().ID, msg.ID, replyInfo, threadInfo, topicInfo, preview))
-				if raw, err := json.Marshal(msg); err == nil {
-					logger.Debug(fmt.Sprintf("TG recv raw: %s", string(raw)))
-				}
-			}
-			return next(c)
-		}
-	})
-	// Track command usage for menu auto-sorting (runs after logging middleware)
+	// Track command usage for menu auto-sorting
 	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
 			if msg := c.Message(); msg != nil && strings.HasPrefix(msg.Text, "/") {

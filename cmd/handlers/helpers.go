@@ -551,12 +551,24 @@ func buildVoiceText(cfg config.AppConfig) string {
 		}
 		text += fmt.Sprintf("\nModel: %s", model)
 	}
+	if engine == "api" {
+		baseURL := cfg.VoiceAPIBaseURL
+		if baseURL == "" {
+			baseURL = "none"
+		}
+		model := cfg.VoiceAPIModel
+		if model == "" {
+			model = "none"
+		}
+		text += fmt.Sprintf("\nBase URL: %s\nModel: %s", baseURL, model)
+	}
 	text += fmt.Sprintf("\nLanguage: %s", lang)
 	return text
 }
 
-// buildVoiceMenu builds the voice settings inline keyboard.
-func buildVoiceMenu(engine string) *tele.ReplyMarkup {
+// buildVoiceMenu builds the voice settings inline keyboard. The api engine button is only
+// shown when apiConfigured (cfg.VoiceAPIBaseURL != "") — run `tg-cli voice` to configure it first.
+func buildVoiceMenu(engine string, apiConfigured bool) *tele.ReplyMarkup {
 	menu := &tele.ReplyMarkup{}
 	btnWhisper := menu.Data("🔊 whisper", "voice", "engine:whisper")
 	btnSenseVoice := menu.Data("🔊 sensevoice", "voice", "engine:sensevoice")
@@ -564,8 +576,12 @@ func buildVoiceMenu(engine string) *tele.ReplyMarkup {
 	btnLangZh := menu.Data("🇨🇳 zh", "voice", "lang:zh")
 	btnLangEn := menu.Data("🇺🇸 en", "voice", "lang:en")
 	btnLangJa := menu.Data("🇯🇵 ja", "voice", "lang:ja")
+	engineRow := []tele.Btn{btnWhisper, btnSenseVoice}
+	if apiConfigured {
+		engineRow = append(engineRow, menu.Data("🔊 api", "voice", "engine:api"))
+	}
 	rows := []tele.Row{
-		menu.Row(btnWhisper, btnSenseVoice),
+		menu.Row(engineRow...),
 	}
 	if engine == "" || engine == "whisper" {
 		rows = append(rows,
@@ -738,7 +754,7 @@ func showSettingsVoice(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 		engine = "whisper"
 	}
 	text := buildVoiceText(cfg)
-	menu := buildVoiceMenu(engine)
+	menu := buildVoiceMenu(engine, cfg.VoiceAPIBaseURL != "")
 	appendBackButton(menu)
 	helpers.RetryEdit(bot, msg, text, menu, tele.ModeHTML)
 }

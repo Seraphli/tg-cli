@@ -71,6 +71,32 @@ stop_claude() {
   E2E_PANE="$target_pane"
   local log_before_exit
   log_before_exit=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  # T10: a model may end its last turn at an OPEN interactive picker — a Bash permission dialog
+  # ("Do you want to proceed?") or an AskUserQuestion selection list. "/exit" typed INTO a picker is
+  # inert (the picker consumes it as list navigation/filter input), so CC never exits and the
+  # SessionEnd poll below burns its full 30s. Heuristically detect an open picker on the VISIBLE pane
+  # by observed picker markers (the permission-dialog question, or a selection cursor on a numbered
+  # option) and press Escape to dismiss it (bounded retries) so "/exit" lands on a clean prompt. This
+  # is a HEURISTIC, not an exact picker test: the "❯ N." marker can also match an ordinary numbered
+  # draft in the input box or numbered conversation/transcript text on the visible pane (e.g.
+  # tests/fixtures/cc-busy/busy-numbered-draft.txt). A false match at teardown is harmless — it costs
+  # only up to a few extra Escapes before "/exit" (Escape on a clean prompt is a no-op, on a draft it
+  # just clears it), never a functional change, and the bounded loop caps the cost. Use a here-string
+  # (not echo | grep -q) to avoid the SIGPIPE-under-pipefail trap (project lesson 2026-02-14).
+  local _pane_id="${target_pane%@*}"
+  local _dismiss=0
+  while [ $_dismiss -lt 3 ]; do
+    local _pane_now
+    _pane_now=$($TMUX_TEST capture-pane -t "$_pane_id" -p 2>/dev/null || echo "")
+    if grep -qE "Do you want to proceed\?|❯ [0-9]+\." <<< "$_pane_now"; then
+      pane_log "[stop_claude] open picker detected, sending Escape (attempt $((_dismiss + 1)))"
+      $TMUX_TEST send-keys -t "$session_name" Escape
+      sleep 1
+      _dismiss=$((_dismiss + 1))
+    else
+      break
+    fi
+  done
   $TMUX_TEST send-keys -t "$session_name" "/exit"
   sleep 1
   $TMUX_TEST send-keys -t "$session_name" Enter
@@ -85,7 +111,23 @@ stop_claude() {
     fi
   done
   if [ "$exited" = true ]; then
-    sleep 5
+    # T9: SessionEnd fired, but the CC TUI process can take several seconds to fully tear down and
+    # hand the pane back to the shell. Typing the shell "exit" while CC is still the foreground
+    # process makes "exit" land in CC's input box as literal text (the shell never sees it), so the
+    # tmux session persists. Poll pane_current_command until it is back to a shell (CC/node process
+    # gone), bounded to ~20s, THEN type the shell exit. On timeout, fall through and send it anyway
+    # (the has-session residual check + kill-session below stay the backstop). Here-string grep
+    # avoids the SIGPIPE-under-pipefail trap (project lesson 2026-02-14).
+    local _settle=0
+    while [ $_settle -lt 20 ]; do
+      local _cur_cmd
+      _cur_cmd=$($TMUX_TEST display-message -p -t "$session_name" '#{pane_current_command}' 2>/dev/null || echo "")
+      if grep -qE '^-?[a-z]*sh$' <<< "$_cur_cmd"; then
+        break
+      fi
+      sleep 1
+      _settle=$((_settle + 1))
+    done
     $TMUX_TEST send-keys -t "$session_name" "exit"
     sleep 1
     $TMUX_TEST send-keys -t "$session_name" Enter

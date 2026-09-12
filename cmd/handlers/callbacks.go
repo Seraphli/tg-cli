@@ -125,6 +125,20 @@ func ToggleAskAndReedit(bs *types.BotState, editMsg tele.Editable, snap stores.E
 	return askMarkupLabels(newMarkup), editErr
 }
 
+// audioExt derives a file extension for an Audio/Document media file from its filename or MIME type,
+// falling back to "bin" when neither yields anything usable.
+func audioExt(fileName, mime string) string {
+	if fileName != "" {
+		if e := strings.TrimPrefix(filepath.Ext(fileName), "."); e != "" {
+			return e
+		}
+	}
+	if idx := strings.LastIndex(mime, "/"); idx != -1 && idx+1 < len(mime) {
+		return mime[idx+1:]
+	}
+	return "bin"
+}
+
 // RegisterCallbackHandlers registers all Telegram inline button callback handlers.
 func RegisterCallbackHandlers(bs *types.BotState) {
 	bot := bs.Bot
@@ -879,12 +893,17 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				}
 				cfg.ModelPath = modelPath
 			}
+			if engine == "api" {
+				if cfg.VoiceAPIBaseURL == "" {
+					return c.Respond(&tele.CallbackResponse{Text: "❌ Run `tg-cli voice` to configure the API engine first"})
+				}
+			}
 			cfg.VoiceEngine = engine
 			if err := config.SaveAppConfig(cfg); err != nil {
 				return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 			}
 			text := buildVoiceText(cfg)
-			menu := buildVoiceMenu(engine)
+			menu := buildVoiceMenu(engine, cfg.VoiceAPIBaseURL != "")
 			if IsSettingsMenu(bs, c.Message().ID) {
 				appendBackButton(menu)
 			}
@@ -907,7 +926,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				engine = "whisper"
 			}
 			text := buildVoiceText(cfg)
-			menu := buildVoiceMenu(engine)
+			menu := buildVoiceMenu(engine, cfg.VoiceAPIBaseURL != "")
 			if IsSettingsMenu(bs, c.Message().ID) {
 				appendBackButton(menu)
 			}
@@ -959,7 +978,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 				engine = "whisper"
 			}
 			text := buildVoiceText(cfg)
-			menu := buildVoiceMenu(engine)
+			menu := buildVoiceMenu(engine, cfg.VoiceAPIBaseURL != "")
 			if IsSettingsMenu(bs, c.Message().ID) {
 				appendBackButton(menu)
 			}
@@ -1164,6 +1183,61 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		bs.BindMenuItems.Store(c.Message().ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
 		helpers.RetryEdit(bot, c.Message(), "Select a session to bind to this group:", sel, tele.ModeHTML)
 		return c.Respond()
+	})
+
+	// "vretry" callback: one-tap "retry with local model" on a transcription failure reply. Payload is
+	// "<engine>|<replyToID>|<threadID>", captured at failure time so the original routing is restored.
+	bot.Handle(&tele.InlineButton{Unique: "vretry"}, func(c tele.Context) error {
+		// A6: clear the client spinner BEFORE the (possibly minutes-long) transcription behind transcribeMu.
+		c.Respond()
+		parts := strings.SplitN(c.Data(), "|", 3)
+		if len(parts) != 3 {
+			_, err := helpers.RetryEdit(bot, c.Message(), "❌ Invalid retry data.", tele.ModeHTML)
+			return err
+		}
+		engine := parts[0]
+		replyToID, _ := strconv.Atoi(parts[1])
+		threadID, _ := strconv.Atoi(parts[2])
+		// V is the ORIGINAL audio message (with media, no nested ReplyTo — Telegram strips it).
+		V := c.Callback().Message.ReplyTo
+		if V == nil || (V.Voice == nil && V.Audio == nil && V.Document == nil) {
+			_, err := helpers.RetryEdit(bot, c.Message(), "❌ Original audio unavailable, please resend.", tele.ModeHTML)
+			return err
+		}
+		var fileID, ext string
+		switch {
+		case V.Voice != nil:
+			fileID, ext = V.Voice.FileID, "ogg"
+		case V.Audio != nil:
+			fileID, ext = V.Audio.FileID, audioExt(V.Audio.FileName, V.Audio.MIME)
+		case V.Document != nil:
+			fileID, ext = V.Document.FileID, audioExt(V.Document.FileName, V.Document.MIME)
+		}
+		// Observability marker distinguishing this REAL vretry retry path (forced engine) from the
+		// /test/callback synthetic echo, which never reaches this handler.
+		logger.Info(fmt.Sprintf("vretry: retrying with forced engine=%s", engine))
+		// A9: copy the struct (keeps V.ID, Chat, Sender, media) — do NOT build a fresh tele.Message, a
+		// zero ID would drop reply_to on a further failure and misrecord pending.
+		m := *V
+		if replyToID <= 0 {
+			m.ReplyTo = nil
+		} else {
+			m.ReplyTo = &tele.Message{ID: replyToID, Chat: m.Chat}
+		}
+		m.ThreadID = threadID
+		synth := bot.NewContext(tele.Update{Message: &m})
+		cfg, _ := config.LoadAppConfig()
+		// The outcome edit must be failure-aware: handleAudioTranscription returns transcribed=false when
+		// the forced-engine retry itself failed (download/transcribe/empty) — in that case the retry did
+		// NOT succeed, and its own error reply (with a further retry button) is sent below.
+		transcribed, _ := handleAudioTranscription(bs, synth, bot, fileID, ext, cfg.VoicePrefix, engine)
+		label := engineLabel(engine)
+		outcome := fmt.Sprintf("🔁 Retried with %s — see reply below.", label)
+		if !transcribed {
+			outcome = fmt.Sprintf("❌ Retry with %s failed — see error below.", label)
+		}
+		_, err := helpers.RetryEdit(bot, c.Message(), outcome, tele.ModeHTML)
+		return err
 	})
 
 	bot.Handle(&tele.Btn{Unique: "upgrade"}, func(c tele.Context) error {

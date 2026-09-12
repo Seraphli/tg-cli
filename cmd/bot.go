@@ -208,7 +208,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	rt := &pollStampRoundTripper{base: base, watch: pollWatch, now: time.Now}
 	pref := tele.Settings{
 		Token:  creds.BotToken,
-		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
+		Poller: handlers.NewIncomingLogPoller(&tele.LongPoller{Timeout: 10 * time.Second}),
 		Client: &http.Client{Timeout: 10 * time.Minute, Transport: rt},
 	}
 	bot, err := tele.NewBot(pref)

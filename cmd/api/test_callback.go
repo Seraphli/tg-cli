@@ -41,6 +41,9 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "invalid msg_id", http.StatusBadRequest)
 			return
 		}
+		// /test/callback simulates a button press without going through the real poller/dispatch
+		// (it calls internal handler functions directly below), so log R4 parity here.
+		handlers.LogIncomingUpdate(&tele.Update{Callback: &tele.Callback{Message: &tele.Message{ID: msgID}, Data: unique + "|" + data}})
 		logger.Info(fmt.Sprintf("Test callback: msg_id=%d unique=%s data=%s", msgID, unique, data))
 		w.Header().Set("Content-Type", "application/json")
 
@@ -337,6 +340,10 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				FileID   string `json:"file_id"`
 				FileName string `json:"file_name"`
 			} `json:"document"`
+			Audio *struct {
+				FileID   string `json:"file_id"`
+				FileName string `json:"file_name"`
+			} `json:"audio"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -360,15 +367,92 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		if req.Document != nil {
 			msg.Document = &tele.Document{File: tele.File{FileID: req.Document.FileID}, FileName: req.Document.FileName}
 		}
-		logger.Info(fmt.Sprintf("Test update: synth_id=%d chat=%d type=%s sender=%d text=%q reply_to=%d has_doc=%t",
-			synthID, req.ChatID, chatType, req.SenderID, req.Text, req.ReplyToMsgID, req.Document != nil))
+		if req.Audio != nil {
+			msg.Audio = &tele.Audio{File: tele.File{FileID: req.Audio.FileID}, FileName: req.Audio.FileName}
+		}
+		logger.Info(fmt.Sprintf("Test update: synth_id=%d chat=%d type=%s sender=%d text=%q reply_to=%d has_doc=%t has_audio=%t",
+			synthID, req.ChatID, chatType, req.SenderID, req.Text, req.ReplyToMsgID, req.Document != nil, req.Audio != nil))
 		// Dispatch through the REAL poller entry so bot.Use markIncoming middleware +
 		// command/media routing run exactly as in production. Dispatch is async
 		// (Synchronous unset), so fire-and-return {ok:true}.
-		bs.Bot.ProcessUpdate(tele.Update{ID: synthID, Message: msg})
+		u := tele.Update{ID: synthID, Message: msg}
+		// ProcessUpdate bypasses the poller (and its NewIncomingLogPoller wrapper), so log R4 parity here.
+		handlers.LogIncomingUpdate(&u)
+		bs.Bot.ProcessUpdate(u)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 	})
 
-	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message, /test/settings_message, /test/update")
+	mux.HandleFunc("/test/raw-callback", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body failed", http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			Unique   string `json:"unique"`
+			Data     string `json:"data"`
+			ChatID   int64  `json:"chat_id"`
+			SenderID int64  `json:"sender_id"`
+			MsgID    int    `json:"msg_id"`
+			ReplyTo  *struct {
+				ID    int `json:"id"`
+				Voice *struct {
+					FileID string `json:"file_id"`
+				} `json:"voice"`
+				Audio *struct {
+					FileID   string `json:"file_id"`
+					FileName string `json:"file_name"`
+				} `json:"audio"`
+				Document *struct {
+					FileID   string `json:"file_id"`
+					FileName string `json:"file_name"`
+				} `json:"document"`
+			} `json:"reply_to"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		synthID := int(atomic.AddInt64(&testUpdateSeq, 1))
+		chat := &tele.Chat{ID: req.ChatID}
+		// V is the ORIGINAL media message a real Telegram callback carries as Message.ReplyTo — a SINGLE
+		// level only (Telegram strips any further nesting), matching what handlers like "vretry" expect.
+		var replyTo *tele.Message
+		if req.ReplyTo != nil {
+			rt := &tele.Message{ID: req.ReplyTo.ID, Chat: chat}
+			switch {
+			case req.ReplyTo.Voice != nil:
+				rt.Voice = &tele.Voice{File: tele.File{FileID: req.ReplyTo.Voice.FileID}}
+			case req.ReplyTo.Audio != nil:
+				rt.Audio = &tele.Audio{File: tele.File{FileID: req.ReplyTo.Audio.FileID}, FileName: req.ReplyTo.Audio.FileName}
+			case req.ReplyTo.Document != nil:
+				rt.Document = &tele.Document{File: tele.File{FileID: req.ReplyTo.Document.FileID}, FileName: req.ReplyTo.Document.FileName}
+			}
+			replyTo = rt
+		}
+		// Real telebot wire framing (bot.go cbackRx, update.go:253-262): a button's Data is
+		// "\f" + unique + "|" + payload. This endpoint always PREPENDS that framing itself — callers
+		// supply only the unframed unique + payload, so ProcessUpdate's cbackRx match routes to the REAL
+		// registered handler for `unique` (e.g. "vretry"), not the /test/callback synthetic echo.
+		u := tele.Update{
+			ID: synthID,
+			Callback: &tele.Callback{
+				ID:      strconv.Itoa(synthID),
+				Sender:  &tele.User{ID: req.SenderID},
+				Message: &tele.Message{ID: req.MsgID, Chat: chat, ReplyTo: replyTo},
+				Data:    "\f" + req.Unique + "|" + req.Data,
+			},
+		}
+		logger.Info(fmt.Sprintf("Test raw-callback: synth_id=%d unique=%s data=%s chat=%d msg_id=%d sender=%d has_reply_to=%t",
+			synthID, req.Unique, req.Data, req.ChatID, req.MsgID, req.SenderID, req.ReplyTo != nil))
+		// Dispatch through the REAL poller entry (same as /test/update) so ProcessUpdate's cbackRx match
+		// runs the REAL registered button handler.
+		handlers.LogIncomingUpdate(&u)
+		bs.Bot.ProcessUpdate(u)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	})
+
+	logger.Info("Test endpoints registered: /test/callback (enhanced), /test/page_entry, /test/capture_message, /test/settings_message, /test/update, /test/raw-callback")
 }

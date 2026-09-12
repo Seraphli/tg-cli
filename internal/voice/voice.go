@@ -1,8 +1,12 @@
 package voice
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +19,10 @@ import (
 )
 
 var transcribeMu sync.Mutex
+
+// apiHTTPClient is the HTTP client used for the "api" engine. A package-level var
+// lets tests inject a client with a short timeout.
+var apiHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
 // transcribeWhisper converts an OGG voice file to text using ffmpeg + whisper.cpp.
 func transcribeWhisper(oggPath string) (string, error) {
@@ -137,6 +145,73 @@ func transcribeSherpaOnnx(oggPath string) (string, error) {
 	return "", fmt.Errorf("no transcription found in sherpa-onnx output")
 }
 
+// apiTranscriptionResponse is the OpenAI-compatible JSON response shape.
+type apiTranscriptionResponse struct {
+	Text string `json:"text"`
+}
+
+// transcribeAPI converts a voice file to text using a generic OpenAI-compatible
+// speech-to-text API. The file is uploaded as-is (no ffmpeg conversion).
+func transcribeAPI(oggPath string) (string, error) {
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
+	if cfg.VoiceAPIBaseURL == "" {
+		return "", fmt.Errorf("voiceApiBaseUrl not configured, run 'tg-cli voice' to set up")
+	}
+	if cfg.VoiceAPIModel == "" {
+		return "", fmt.Errorf("voiceApiModel not configured, run 'tg-cli voice' to set up")
+	}
+	data, err := os.ReadFile(oggPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read voice file: %w", err)
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filepath.Base(oggPath))
+	if err != nil {
+		return "", fmt.Errorf("failed to build multipart form: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("failed to write file part: %w", err)
+	}
+	if err := writer.WriteField("model", cfg.VoiceAPIModel); err != nil {
+		return "", fmt.Errorf("failed to write model field: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("failed to close multipart form: %w", err)
+	}
+	url := strings.TrimRight(cfg.VoiceAPIBaseURL, "/") + "/v1/audio/transcriptions"
+	req, err := http.NewRequest(http.MethodPost, url, &body)
+	if err != nil {
+		return "", fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.VoiceAPIKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := apiHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read api response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := string(respBody)
+		if len(snippet) > 500 {
+			snippet = snippet[:500]
+		}
+		return "", fmt.Errorf("api request failed with status %d: %s", resp.StatusCode, snippet)
+	}
+	var parsed apiTranscriptionResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("failed to parse api response: %w", err)
+	}
+	return parsed.Text, nil
+}
+
 // retainVoiceFile copies a voice file to ~/.tg-cli/voice-cache/, keeping only the last N files.
 func retainVoiceFile(oggPath string) {
 	home, err := os.UserHomeDir()
@@ -174,22 +249,31 @@ func retainVoiceFile(oggPath string) {
 	}
 }
 
-// Transcribe converts an OGG voice file to text using the configured engine.
+// TranscribeWithEngine converts a voice file to text using the given engine.
 // Returns (text, engineName, error). A mutex ensures concurrent voice messages are processed serially.
-func Transcribe(oggPath string) (string, string, error) {
+func TranscribeWithEngine(oggPath, engine string) (string, string, error) {
 	transcribeMu.Lock()
 	defer transcribeMu.Unlock()
 	retainVoiceFile(oggPath)
-	cfg, err := config.LoadAppConfig()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to load config: %w", err)
-	}
-	switch cfg.VoiceEngine {
+	switch engine {
 	case "sensevoice":
 		text, err := transcribeSherpaOnnx(oggPath)
 		return text, "sensevoice", err
+	case "api":
+		text, err := transcribeAPI(oggPath)
+		return text, "api", err
 	default:
 		text, err := transcribeWhisper(oggPath)
 		return text, "whisper", err
 	}
+}
+
+// Transcribe converts an OGG voice file to text using the configured engine.
+// Returns (text, engineName, error).
+func Transcribe(oggPath string) (string, string, error) {
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load config: %w", err)
+	}
+	return TranscribeWithEngine(oggPath, cfg.VoiceEngine)
 }
