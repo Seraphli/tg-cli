@@ -40,8 +40,8 @@ inject_prompt "/hotkeys" || true
 OUTCOME=""
 for i in $(seq 1 40); do
   SLICE=$(tail -n +"$((LOG_T_BEFORE + 1))" "$LOG_FILE")
-  if printf '%s\n' "$SLICE" | grep -q "pi slash inject confirmed"; then OUTCOME="confirmed"; break; fi
-  if printf '%s\n' "$SLICE" | grep -q "inject not confirmed"; then OUTCOME="not_confirmed"; break; fi
+  if grep -q "pi slash inject confirmed" <<< "$SLICE"; then OUTCOME="confirmed"; break; fi
+  if grep -q "inject not confirmed" <<< "$SLICE"; then OUTCOME="not_confirmed"; break; fi
   sleep 1
 done
 SLICE=$(tail -n +"$((LOG_T_BEFORE + 1))" "$LOG_FILE")

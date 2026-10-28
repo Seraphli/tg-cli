@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
@@ -132,7 +133,7 @@ var transcribeWithEngineFn = voice.TranscribeWithEngine
 // successful transcription to the shared input-processing path without exercising its full logic.
 var processUserInputFn = processUserInput
 
-// engineLabel returns the human-facing engine name used in retry-button labels and vretry outcome edits.
+// engineLabel returns the human-facing engine name used in retry-button labels and the voice status text.
 func engineLabel(engine string) string {
 	switch engine {
 	case "api":
@@ -179,55 +180,155 @@ func buildRetryButtons(engines []string, replyToID, threadID int) *tele.ReplyMar
 	return menu
 }
 
-// sendTranscriptionFailure replies to c with the transcription error, carrying one retry button per
-// fully-configured engine (including the engine that just failed) — NO silent fallback happens
-// automatically. When no engine is configured at all, the reply carries no button and states so.
-func sendTranscriptionFailure(c tele.Context, cfg config.AppConfig, err error) error {
+// audioStatusStateTag derives the state tag for a "Voice status" log line from a text that
+// audioStatusText produced (its fixed, package-controlled prefix — "🕒" means queued, anything else
+// means running) and the entry's verb. Never touches transcript content.
+func audioStatusStateTag(text, verb string) string {
+	if strings.HasPrefix(text, "🕒") {
+		return "queued"
+	}
+	if verb == "Retrying" {
+		return "retrying"
+	}
+	return "transcribing"
+}
+
+// updateAudioStatus recomputes the current display text for ticket and applies it to status, logging
+// the state transition when (and only when) an edit actually happens (skips silently once ticket has
+// left the queue — see audioStatusText).
+func updateAudioStatus(status *audioStatus, ticket int64, verb, engine string) {
+	text, ok := audioStatusText(ticket, verb, engine)
+	if !ok {
+		return
+	}
+	if status.update(text, &tele.ReplyMarkup{}) {
+		logger.Info(fmt.Sprintf("Voice status: msg_id=%d state=%s", status.msgID(), audioStatusStateTag(text, verb)))
+	}
+}
+
+// failAudioStatus edits status into the failure form: the error plus one retry button per fully
+// configured engine (including the engine that just failed), or, with no engine configured, a plain
+// message saying so and no buttons — configuredRetryEngines/buildRetryButtons UNCHANGED. replyToID/
+// threadID come from c's own message (for the vretry retry path, c is the synthetic context whose
+// ReplyTo/ThreadID were set from the original failure's captured payload, so a repeated failure keeps
+// carrying the SAME recovery target forward, exactly as today).
+func failAudioStatus(status *audioStatus, c tele.Context, cfg config.AppConfig, err error) {
 	engines := configuredRetryEngines(cfg)
 	if len(engines) == 0 {
-		return c.Reply(fmt.Sprintf("❌ %v (no transcription engine configured to retry with)", err))
+		if status.update(fmt.Sprintf("❌ %v (no transcription engine configured to retry with)", err), &tele.ReplyMarkup{}) {
+			logger.Info(fmt.Sprintf("Voice status: msg_id=%d state=failed", status.msgID()))
+		}
+		return
 	}
 	replyToID := 0
 	if c.Message().ReplyTo != nil {
 		replyToID = c.Message().ReplyTo.ID
 	}
-	return c.Reply(fmt.Sprintf("❌ %v", err), buildRetryButtons(engines, replyToID, c.Message().ThreadID))
+	markup := buildRetryButtons(engines, replyToID, c.Message().ThreadID)
+	if status.update(fmt.Sprintf("❌ %v", err), markup) {
+		logger.Info(fmt.Sprintf("Voice status: msg_id=%d state=failed", status.msgID()))
+	}
 }
 
 // handleAudioTranscription downloads and transcribes an audio/voice message by fileID, then routes the
 // resulting text through processUserInput. forcedEngine, when set, transcribes with that specific
-// engine (used by the "vretry" callback); empty uses the configured engine. Any failure (download error,
-// transcription error, or empty text) replies with the error and, when possible, a retry button.
-// handleAudioTranscription downloads and transcribes the audio, routing the text on success and replying
-// with a retry button on failure. It returns transcribed=true only when transcription produced text that
-// was handed off for delivery; on any failure (download/transcribe/empty) transcribed=false and the error
-// reply has already been sent. The returned error is the reply/delivery send error (nil when that send
-// succeeded) — callers that only propagate handler errors can ignore transcribed.
-func handleAudioTranscription(bs *types.BotState, c tele.Context, bot *tele.Bot, fileID, ext, voicePrefix, forcedEngine string) (bool, error) {
+// engine (used by the "vretry" callback); empty uses the configured engine. existing, when non-nil, is
+// an existing failure message to reuse (the vretry retry path) instead of sending a new reply; its old
+// buttons are cleared in the same edit that starts the retry. The single status message (new or reused)
+// carries the whole lifecycle in place — queued/transcribing (or retrying), then the transcript or a
+// fresh failure+buttons — no other message is ever sent for this transcription. Returns nil on a
+// transcription failure (the error edit has already been applied to the status message instead); on
+// success, returns whatever processUserInputFn returns (a delivery error from routing/injection, if any).
+func handleAudioTranscription(bs *types.BotState, c tele.Context, bot *tele.Bot, fileID, ext, voicePrefix, forcedEngine string, existing *tele.Message) error {
 	cfg, _ := config.LoadAppConfig()
+	verb := "Transcribing"
+	if existing != nil {
+		verb = "Retrying"
+	}
+	// displayEngine is set once and never reassigned: the ticker goroutine reads it concurrently with the
+	// handler goroutine until close(done)/wg.Wait() below, so it must stay immutable ([P.Step 2] round-1
+	// D1 fix). The engine actually returned by the transcription call goes into its own variable
+	// (resultEngine, below) instead of being written back here.
+	displayEngine := forcedEngine
+	if displayEngine == "" {
+		displayEngine = cfg.VoiceEngine
+	}
+
+	ticket, _ := audioQueueEnter()
+	initialText, _ := audioStatusText(ticket, verb, displayEngine)
+	var status *audioStatus
+	var initialOK bool
+	if existing == nil {
+		status = newAudioStatus(bot, c, initialText)
+		initialOK = status.msgID() != 0
+	} else {
+		// reuseAudioStatus's own return value, not status.msgID() != 0, tells us whether the edit
+		// succeeded: msgID is never 0 on this path, so msgID alone can't distinguish success from a
+		// failed edit ([P.Step 2] round-1 D2 fix).
+		status, initialOK = reuseAudioStatus(bot, existing, initialText)
+	}
+	if initialOK {
+		logger.Info(fmt.Sprintf("Voice status: msg_id=%d state=%s", status.msgID(), audioStatusStateTag(initialText, verb)))
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick, stop := statusTickerFn()
+		defer stop()
+		for {
+			select {
+			case <-tick:
+				updateAudioStatus(status, ticket, verb, displayEngine)
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	path, err := downloadAudio(bot, fileID, ext)
 	if err != nil {
-		return false, sendTranscriptionFailure(c, cfg, err)
+		close(done)
+		wg.Wait()
+		audioQueueLeave(ticket)
+		failAudioStatus(status, c, cfg, err)
+		return nil
 	}
 	defer os.Remove(path)
-	var text, engine string
-	start := time.Now()
+
+	audioQueueWaitTurn(ticket)
+	updateAudioStatus(status, ticket, verb, displayEngine)
+
+	start := statusNowFn()
+	var text, resultEngine string
 	if forcedEngine == "" {
-		text, engine, err = transcribeFn(path)
+		text, resultEngine, err = transcribeFn(path)
 	} else {
-		text, engine, err = transcribeWithEngineFn(path, forcedEngine)
+		text, resultEngine, err = transcribeWithEngineFn(path, forcedEngine)
 	}
-	duration := time.Since(start)
+	duration := statusNowFn().Sub(start)
+	audioQueueLeave(ticket)
+
+	close(done)
+	wg.Wait()
+
 	if err != nil {
 		logger.Error(fmt.Sprintf("Audio transcription failed: %v", err))
-		return false, sendTranscriptionFailure(c, cfg, err)
+		failAudioStatus(status, c, cfg, err)
+		return nil
 	}
 	if text == "" {
 		logger.Error("Audio transcription failed: empty text")
-		return false, sendTranscriptionFailure(c, cfg, fmt.Errorf("transcription produced empty text"))
+		failAudioStatus(status, c, cfg, fmt.Errorf("transcription produced empty text"))
+		return nil
 	}
-	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s duration=%s text=%s", engine, duration.Round(time.Millisecond), text))
-	return true, processUserInputFn(bs, c, bot, text, true, voicePrefix)
+	logger.Info(fmt.Sprintf("Voice transcribed: engine=%s duration=%s text=%s", resultEngine, duration.Round(time.Millisecond), text))
+	if status.update(voicePrefix+" "+text, &tele.ReplyMarkup{}) {
+		logger.Info(fmt.Sprintf("Voice status: msg_id=%d state=done", status.msgID()))
+	}
+	return processUserInputFn(bs, c, bot, text, true, voicePrefix)
 }
 
 // isAudioDocument reports whether doc is an audio file, by MIME prefix or filename extension. Used to
@@ -399,9 +500,6 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		}
 		items, notifyMsgID, chatID, _ := bs.MergeBuffers.AddAndGetInfo(key, content)
 		logger.Info(fmt.Sprintf("Merge add: key=%s items=%d text=%s", key, len(items), content))
-		if isVoice {
-			c.Reply(voicePrefix + " " + text)
-		}
 		if notifyMsgID != 0 {
 			preview := BuildMergeNotifyText(fmt.Sprintf("📝 Collecting (%d messages)", len(items)), items)
 			menu := &tele.ReplyMarkup{}
@@ -423,9 +521,6 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	}
 	sendFeedback := func(tmuxTarget string) {
 		recordPending(bs, tmuxTarget, c.Message().Chat.ID, c.Message().ID)
-		if isVoice {
-			c.Reply(voicePrefix + " " + text)
-		}
 	}
 	if c.Message().ReplyTo == nil {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
@@ -843,11 +938,9 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 				return nil
 			}
-			_, err := handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "")
-			return err
+			return handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "", nil)
 		}
-		_, err := handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "")
-		return err
+		return handleAudioTranscription(bs, c, bot, c.Message().Voice.FileID, "ogg", voicePrefix, "", nil)
 	})
 
 	// OnAudio: transcribe audio files (tele.Audio, distinct from voice notes) in group/supergroup chats
@@ -862,8 +955,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			return nil
 		}
 		audio := c.Message().Audio
-		_, err := handleAudioTranscription(bs, c, bot, audio.FileID, audioExt(audio.FileName, audio.MIME), voicePrefix, "")
-		return err
+		return handleAudioTranscription(bs, c, bot, audio.FileID, audioExt(audio.FileName, audio.MIME), voicePrefix, "", nil)
 	})
 
 	bot.Handle(tele.OnDocument, func(c tele.Context) error {
@@ -874,8 +966,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 		}
 		doc := c.Message().Document
 		if (c.Chat().Type == "group" || c.Chat().Type == "supergroup") && isAudioDocument(doc) {
-			_, err := handleAudioTranscription(bs, c, bot, doc.FileID, audioExt(doc.FileName, doc.MIME), voicePrefix, "")
-			return err
+			return handleAudioTranscription(bs, c, bot, doc.FileID, audioExt(doc.FileName, doc.MIME), voicePrefix, "", nil)
 		}
 		localPath, err := downloadTGFile(bot, doc.FileID, doc.FileName)
 		if err != nil {

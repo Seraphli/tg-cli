@@ -97,7 +97,7 @@ CC_LOG="$WORK/bot-ccshape.log";   make_botlog "$CC_LOG"  cc
 # --- POSITIVE: an agent_retry line for the flagged turn -> EXEMPT (turn-scoped + error-specific, single mechanism) ---
 if pos_out=$(run_validator "$POS_LOG" 2>&1); then pos_rc=0; else pos_rc=$?; fi
 echo "  DEBUG positive rc=$pos_rc"; printf '%s\n' "$pos_out" | sed 's/^/    /'
-if [ "$pos_rc" -eq 0 ] && printf '%s\n' "$pos_out" | grep -q "V3 exemption - pi retry-after-error"; then
+if [ "$pos_rc" -eq 0 ] && grep -q "V3 exemption - pi retry-after-error" <<< "$pos_out"; then
   pass "phase17 POSITIVE: retry-after-error exemption applied (validate passed + agent_retry NOTE printed)"
 else
   record_fail "phase17 POSITIVE: expected V3 exemption (pass + retry-after-error NOTE), got rc=$pos_rc"
@@ -107,8 +107,8 @@ fi
 if neg_out=$(run_validator "$NEG_LOG" 2>&1); then neg_rc=0; else neg_rc=$?; fi
 echo "  DEBUG negative rc=$neg_rc"; printf '%s\n' "$neg_out" | sed 's/^/    /'
 if [ "$neg_rc" -ne 0 ] \
-  && printf '%s\n' "$neg_out" | grep -q "consecutive Message sends in same turn_id=t2" \
-  && ! printf '%s\n' "$neg_out" | grep -q "V3 exemption"; then
+  && grep -q "consecutive Message sends in same turn_id=t2" <<< "$neg_out" \
+  && ! grep -q "V3 exemption" <<< "$neg_out"; then
   pass "phase17 NEGATIVE: a second agent_start without agent_retry does NOT exempt — V3 still FAILs"
 else
   record_fail "phase17 NEGATIVE: expected V3 FAIL with no exemption (agent_retry absent), got rc=$neg_rc"
@@ -119,8 +119,8 @@ fi
 if cmp_out=$(run_validator "$CMP_LOG" 2>&1); then cmp_rc=0; else cmp_rc=$?; fi
 echo "  DEBUG compact-shape rc=$cmp_rc"; printf '%s\n' "$cmp_out" | sed 's/^/    /'
 if [ "$cmp_rc" -ne 0 ] \
-  && printf '%s\n' "$cmp_out" | grep -q "consecutive Message sends in same turn_id=t2" \
-  && ! printf '%s\n' "$cmp_out" | grep -q "V3 exemption"; then
+  && grep -q "consecutive Message sends in same turn_id=t2" <<< "$cmp_out" \
+  && ! grep -q "V3 exemption" <<< "$cmp_out"; then
   pass "phase17 COMPACT-SHAPE: a compaction re-run (session_compact + 2nd agent_start, no agent_retry) stays a V3 violation — not exempted"
 else
   record_fail "phase17 COMPACT-SHAPE: expected V3 FAIL with no exemption (compaction re-run, agent_retry absent), got rc=$cmp_rc"
@@ -130,8 +130,8 @@ fi
 if cc_out=$(run_validator "$CC_LOG" 2>&1); then cc_rc=0; else cc_rc=$?; fi
 echo "  DEBUG cc-shape rc=$cc_rc"; printf '%s\n' "$cc_out" | sed 's/^/    /'
 if [ "$cc_rc" -ne 0 ] \
-  && printf '%s\n' "$cc_out" | grep -q "consecutive Message sends in same turn_id=t2" \
-  && ! printf '%s\n' "$cc_out" | grep -q "V3 exemption"; then
+  && grep -q "consecutive Message sends in same turn_id=t2" <<< "$cc_out" \
+  && ! grep -q "V3 exemption" <<< "$cc_out"; then
   pass "phase17 CC-SHAPE: no agent_retry -> plain V3 violation, exemption never engages (cc stays sensitive)"
 else
   record_fail "phase17 CC-SHAPE: expected a plain V3 violation with no exemption, got rc=$cc_rc"

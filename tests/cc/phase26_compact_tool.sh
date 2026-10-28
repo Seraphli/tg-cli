@@ -615,8 +615,8 @@ fi
 TC6_C0=$(echo "$TC6_JSON" | jq -r '.pretool.commands[0] // ""')
 TC6_C1=$(echo "$TC6_JSON" | jq -r '.pretool.commands[1] // ""')
 TC6_C2=$(echo "$TC6_JSON" | jq -r '.pretool.commands[2] // ""')
-if printf '%s' "$TC6_C0" | grep -qF "tee $TC6_CAT" && printf '%s' "$TC6_C1" | grep -qF "tee $TC6_DOG" \
-   && printf '%s' "$TC6_C2" | grep -qF "tee $TC6_WIN" && printf '%s' "$TC6_C2" | grep -qF "CATS" && printf '%s' "$TC6_C2" | grep -qF "DOGS"; then
+if grep -qF "tee $TC6_CAT" <<< "$TC6_C0" && grep -qF "tee $TC6_DOG" <<< "$TC6_C1" \
+   && grep -qF "tee $TC6_WIN" <<< "$TC6_C2" && grep -qF "CATS" <<< "$TC6_C2" && grep -qF "DOGS" <<< "$TC6_C2"; then
   pass "TC6d: the three Bash commands are the cat/dog/winner commands in order"
 else
   _tc6_cleanup; fail "TC6d: commands not the expected cat/dog/winner sequence (0=$TC6_C0 | 1=$TC6_C1 | 2=$TC6_C2)"

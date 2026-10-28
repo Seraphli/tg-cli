@@ -44,7 +44,7 @@ fi
 # meaningful when the model actually emitted a paragraph boundary (\n\n) in the reply: Round 3 aligns every
 # ticker send/edit to the last \n\n, so a break-less reply renders ONLY at Stop BY DESIGN and would fail
 # (c.2) for a reason unrelated to index mapping. Count \n\n in the delivered assistant text (Stop payload
-# last_assistant_message, cmd/hooks/register.go:76). Zero breaks => the stimulus, not the product, is at
+# last_assistant_message, cmd/hooks/register.go:79). Zero breaks => the stimulus, not the product, is at
 # fault: fail with that explicit cause instead of the misleading "index-mapping regression?" message below.
 PARA_BREAKS=$(printf '%s\n' "$SLICE" | python3 -c '
 import sys, json

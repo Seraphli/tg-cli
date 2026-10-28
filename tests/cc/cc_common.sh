@@ -6,6 +6,9 @@ source "${CC_COMMON_DIR}/../e2e_common.sh"
 start_claude() {
   local session_name="${1:-$E2E_SESSION}"
   local perm_flag="${2:---dangerously-skip-permissions}"
+  if [ "$perm_flag" = "--allow-dangerously-skip-permissions" ]; then
+    perm_flag="--permission-mode default $perm_flag"
+  fi
   local install_trap="${3:-true}"
   E2E_SESSION="$session_name"
   export E2E_SESSION
@@ -105,7 +108,7 @@ stop_claude() {
   while [ $elapsed -lt 30 ]; do
     sleep 2
     elapsed=$((elapsed + 2))
-    if tail -n +"$((log_before_exit + 1))" "$LOG_FILE" | grep -q "SessionEnd" 2>/dev/null; then
+    if grep -q "SessionEnd" <<< "$(tail -n +"$((log_before_exit + 1))" "$LOG_FILE")" 2>/dev/null; then
       exited=true
       break
     fi

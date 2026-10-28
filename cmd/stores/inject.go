@@ -272,20 +272,24 @@ type confirmEntry struct {
 	ch              chan bool
 }
 
-// InjectConfirmStore manages per-target content-verified inject confirmation.
+// InjectConfirmStore manages per-target content-verified inject confirmation. Multiple in-flight
+// registrations for the same target are kept in a slice (oldest first) instead of a single slot, so a
+// second Register for the same target cannot evict an earlier caller's still-waiting channel.
 type InjectConfirmStore struct {
 	mu      sync.Mutex
-	entries map[string]*confirmEntry
+	entries map[string][]*confirmEntry
 }
 
 // NewInjectConfirmStore creates an empty InjectConfirmStore.
 func NewInjectConfirmStore() *InjectConfirmStore {
 	return &InjectConfirmStore{
-		entries: make(map[string]*confirmEntry),
+		entries: make(map[string][]*confirmEntry),
 	}
 }
 
-// Register creates a confirmation channel for the target with expected type and snippet.
+// Register creates a confirmation channel for the target with expected type and snippet. Appends to
+// the target's slice instead of overwriting, so concurrent in-flight registrations for the same target
+// coexist without evicting each other.
 func (ic *InjectConfirmStore) Register(tmuxTarget string, expectedType InjectConfirmType, expectedSnippet string) chan bool {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
@@ -294,55 +298,83 @@ func (ic *InjectConfirmStore) Register(tmuxTarget string, expectedType InjectCon
 		snippet = snippet[:50]
 	}
 	ch := make(chan bool, 1)
-	ic.entries[tmuxTarget] = &confirmEntry{expectedType: expectedType, expectedSnippet: snippet, ch: ch}
+	ic.entries[tmuxTarget] = append(ic.entries[tmuxTarget], &confirmEntry{expectedType: expectedType, expectedSnippet: snippet, ch: ch})
 	return ch
+}
+
+// notify scans the target's entries front-to-back (oldest first) for the first entry of expectedType
+// whose content matches (via the matches callback); that entry is removed and signaled true. If no
+// entry matches by content, the OLDEST entry of expectedType (if any) is removed and signaled false —
+// this preserves today's single-entry "content mismatch" behavior exactly when only one entry is
+// pending, and gives FIFO resolution for ties (e.g. two entries sharing an identical snippet) because
+// the front-to-back scan finds the oldest matching entry first.
+func (ic *InjectConfirmStore) notify(tmuxTarget string, expectedType InjectConfirmType, matches func(*confirmEntry) bool) {
+	ic.mu.Lock()
+	list := ic.entries[tmuxTarget]
+	matchIdx := -1
+	oldestOfType := -1
+	for i, entry := range list {
+		if entry.expectedType != expectedType {
+			continue
+		}
+		if oldestOfType == -1 {
+			oldestOfType = i
+		}
+		if matches(entry) {
+			matchIdx = i
+			break
+		}
+	}
+	idx := matchIdx
+	result := true
+	if idx == -1 {
+		idx = oldestOfType
+		result = false
+	}
+	if idx == -1 {
+		ic.mu.Unlock()
+		return
+	}
+	entry := list[idx]
+	ic.entries[tmuxTarget] = append(list[:idx], list[idx+1:]...)
+	ic.mu.Unlock()
+	select {
+	case entry.ch <- result:
+	default:
+	}
 }
 
 // NotifyUserPromptSubmit signals confirmation for UserPromptSubmit events with content matching.
 func (ic *InjectConfirmStore) NotifyUserPromptSubmit(tmuxTarget, prompt string) {
-	ic.mu.Lock()
-	entry, ok := ic.entries[tmuxTarget]
-	if !ok || entry.expectedType != ConfirmUserPromptSubmit {
-		ic.mu.Unlock()
-		return
-	}
-	delete(ic.entries, tmuxTarget)
-	ic.mu.Unlock()
-	matched := strings.Contains(prompt, entry.expectedSnippet)
-	select {
-	case entry.ch <- matched:
-	default:
-	}
+	ic.notify(tmuxTarget, ConfirmUserPromptSubmit, func(e *confirmEntry) bool {
+		return strings.Contains(prompt, e.expectedSnippet)
+	})
 }
 
 // NotifyAskAnswered signals confirmation for AskUserQuestion answer events with content matching.
 func (ic *InjectConfirmStore) NotifyAskAnswered(tmuxTarget string, answers map[string]string) {
-	ic.mu.Lock()
-	entry, ok := ic.entries[tmuxTarget]
-	if !ok || entry.expectedType != ConfirmAskAnswered {
-		ic.mu.Unlock()
-		return
-	}
-	delete(ic.entries, tmuxTarget)
-	ic.mu.Unlock()
-	matched := false
-	for _, ans := range answers {
-		if strings.Contains(ans, entry.expectedSnippet) {
-			matched = true
-			break
+	ic.notify(tmuxTarget, ConfirmAskAnswered, func(e *confirmEntry) bool {
+		for _, ans := range answers {
+			if strings.Contains(ans, e.expectedSnippet) {
+				return true
+			}
 		}
-	}
-	select {
-	case entry.ch <- matched:
-	default:
-	}
+		return false
+	})
 }
 
-// Cancel removes the confirmation entry without signaling.
-func (ic *InjectConfirmStore) Cancel(tmuxTarget string) {
+// Cancel removes the confirmation entry owning ch, without signaling. A no-op if ch is not found for
+// tmuxTarget (e.g. it was already resolved by Notify*).
+func (ic *InjectConfirmStore) Cancel(tmuxTarget string, ch chan bool) {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
-	delete(ic.entries, tmuxTarget)
+	list := ic.entries[tmuxTarget]
+	for i, entry := range list {
+		if entry.ch == ch {
+			ic.entries[tmuxTarget] = append(list[:i], list[i+1:]...)
+			return
+		}
+	}
 }
 
 // InjectMode is the delivery mode chosen by the event-driven inject-queue router (R2).
@@ -377,8 +409,8 @@ func RouteInjectMode(event, toolName string) InjectMode {
 }
 
 // InjectRouteStore holds the per-target event-driven routing state for the inject queue (R2). It is a
-// dedicated sibling of InjectConfirmStore — NOT a reuse of it — so the single-slot, type-gated
-// delivery-confirmation store is never overwritten/blocked by a routing decision.
+// dedicated sibling of InjectConfirmStore — NOT a reuse of it — so the per-target, type-gated,
+// multi-entry delivery-confirmation store is never overwritten/blocked by a routing decision.
 //
 // Exactly-once semantics: ArmRoute atomically CLAIMs the target. Only ONE pending routing decision may
 // exist per target at a time; a second MD-final (they can fire multiple times per turn) or a supplement

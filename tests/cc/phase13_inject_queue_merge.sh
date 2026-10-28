@@ -10,6 +10,7 @@ ensure_infrastructure
 
 LOG_BEFORE=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
 start_claude "e2e-cc-13"
+cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
 
 SESSION_NAME="e2e-cli"
 MARKER_A="inject_merge_test_A_$RANDOM"
@@ -35,7 +36,8 @@ if [ -n "$SESSION_ID" ]; then
 fi
 
 # Step 1: Inject a bash sleep command to keep CC busy
-inject_prompt "Use the Bash tool to run this exact command: sleep 20. Do not print any text."
+rm -f "$CC_WORKDIR/prince-arrived"
+inject_prompt "We are acting out a short scene from the tale of Sleeping Beauty. The file sleeping_beauty.sh in your current directory is a test fixture that ships with this repository. You are welcome to read it first to see exactly what it does. In the scene, Sleeping Beauty eats the poisoned apple and falls into a long enchanted sleep, waking only when the prince arrives. To play it out, use the Bash tool to run this command exactly once and let it finish in the foreground (do not run it in the background): bash sleeping_beauty.sh. The script carries out her enchanted sleep and returns on its own when the prince arrives."
 
 # Wait for CC to become busy — polls the product /session/idle API (scoped to $E2E_PANE) via
 # check_session_idle, mirroring phase31. Pinned CC 2.1.261 leaves the pane title stuck at the idle
@@ -94,6 +96,9 @@ elif [ "$QUEUED_A" = true ] || [ "$QUEUED_B" = true ]; then
 else
   fail "inject queue: no messages were queued (CC may not have been busy)"
 fi
+
+# The prince arrives: create the sentinel so sleeping_beauty.sh returns and CC can proceed.
+touch "$CC_WORKDIR/prince-arrived"
 
 # Step 4: Wait for CC to finish and Stop hook to fire + flush
 echo "  Waiting for CC to finish and flush queue..."
@@ -227,25 +232,26 @@ fi
 CUSTOM_MARKER="CUSTOM_REPLY_$RANDOM"
 
 # Step 1: Inject prompt that sleeps 5s then calls AskUserQuestion
-inject_prompt "Do these two things in this exact order, all in this single reply, without skipping, combining, or repeating either step. Step 1: Use the Bash tool exactly once to run exactly this command: sleep 5. Step 2: Immediately after that Bash call returns, call the AskUserQuestion tool exactly once with exactly one question: header 'TestQ', question 'Pick one', two options: label 'OptionA' description 'first' and label 'OptionB' description 'second'. Do not stop or give a final answer after Step 1; actually issue the AskUserQuestion tool call before ending this reply."
+rm -f "$CC_WORKDIR/prince-arrived"
+inject_prompt "Do these two things in this exact order, all in this single reply, without skipping, combining, or repeating either step. Step 1: We are acting out a short scene from the tale of Sleeping Beauty. The file sleeping_beauty.sh in your current directory is a test fixture that ships with this repository. In the scene, Sleeping Beauty eats the poisoned apple and falls into a long enchanted sleep, waking only when the prince arrives. Use the Bash tool exactly once to run this command and let it finish in the foreground: bash sleeping_beauty.sh. The script carries out her enchanted sleep and returns on its own when the prince arrives. Step 2: Immediately after that Bash call returns, call the AskUserQuestion tool exactly once with exactly one question: header 'TestQ', question 'Pick one', two options: label 'OptionA' description 'first' and label 'OptionB' description 'second'. Do not stop or give a final answer after Step 1; actually issue the AskUserQuestion tool call before ending this reply."
 
 # Step 2: The marker must be queued DURING the sleep, AFTER the Bash PreToolUse fires — otherwise the
 # pre-sleep narration MD-final can arm a routing window carrying the marker and mis-deliver it before the
 # AskUserQuestion is pending. Poll the bot log for the Bash PreToolUse line (contains BOTH the literal
-# "Raw hook payload [PreToolUse]" AND the "sleep 5" command; the UserPromptSubmit line also has "sleep 5"
-# but is a different event line, gated out by the "Raw hook payload [PreToolUse]" prefix). This queues the
-# marker during the sleep with a ~4s margin.
-echo "  Waiting for the Bash PreToolUse (sleep 5) to fire..."
+# "Raw hook payload [PreToolUse]" AND the "bash sleeping_beauty.sh" command; the UserPromptSubmit line also
+# has "bash sleeping_beauty.sh" but is a different event line, gated out by the "Raw hook payload [PreToolUse]"
+# prefix). This queues the marker while the sentinel-gated Sleeping Beauty fixture holds the busy window open.
+echo "  Waiting for the Bash PreToolUse (bash sleeping_beauty.sh) to fire..."
 ELAPSED=0
 PTU_FIRED_B=false
-while [ $ELAPSED -lt 30 ]; do
+while [ $ELAPSED -lt 60 ]; do
   set +eo pipefail
-  tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -q "sleep 5"
+  tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -q '"command":"bash sleeping_beauty.sh"'
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ] && [ "${_ps[2]}" -eq 0 ]; then
     PTU_FIRED_B=true
-    echo "  Bash PreToolUse (sleep 5) fired at t=$ELAPSED"
+    echo "  Bash PreToolUse (bash sleeping_beauty.sh) fired at t=$ELAPSED"
     break
   fi
   sleep 1
@@ -253,7 +259,7 @@ while [ $ELAPSED -lt 30 ]; do
 done
 
 if [ "$PTU_FIRED_B" != true ]; then
-  fail "AskQ custom reply: Bash PreToolUse (sleep 5) never fired within 30s"
+  fail "AskQ custom reply: Bash PreToolUse (bash sleeping_beauty.sh) never fired within 60s"
 fi
 
 # Send the custom reply marker while CC is busy in the sleep (after the Bash PreToolUse)
@@ -272,10 +278,13 @@ else
   fail "AskQ custom reply: marker was NOT queued (CC may not have been busy)"
 fi
 
+# The prince arrives: create the sentinel so sleeping_beauty.sh returns and CC can proceed to Step 2.
+touch "$CC_WORKDIR/prince-arrived"
+
 # Step 4: Wait for the AskQ to be surfaced and the queued marker to be delivered as custom reply.
 # The queued marker may be delivered via EITHER of two legal paths; both end with the marker answered into
 # the pending AskUserQuestion, and either one satisfies this test:
-#   (a) Event-route (R9-item3): sleep 5 → assistant text MD-final arms the routing window →
+#   (a) Event-route (R9-item3): bash sleeping_beauty.sh → assistant text MD-final arms the routing window →
 #       PreToolUse(AskUserQuestion) is signalled into the window → mode=AskQ-custom-reply → deliverInjectQueue
 #       → SafeInjectText bounded-waits for the PendingWait AskQ snapshot (R1) → answers AskUserQuestion.
 #   (b) Idle/timeout fallback: if no in-window event selects the routing mode, the queued marker is still
@@ -337,13 +346,13 @@ wait_for_idle
 pane_log "[askq_custom_reply] AFTER test"
 
 # Structural exactly-once asserts (post-idle, catches post-answer duplicates): within the LOG_BEFORE_ASKQ
-# window, exactly one Bash "sleep 5" PreToolUse and exactly one AskUserQuestion PreToolUse. Guards against
-# the mimo duplicate-sleep / double-call family that mis-sequences the inject-queue routing window.
-BASH_SLEEP_PTU_COUNT=$(tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep '"tool_name":"Bash"' | grep -c "sleep 5" || true)
+# window, exactly one Bash "bash sleeping_beauty.sh" PreToolUse and exactly one AskUserQuestion PreToolUse.
+# Guards against the mimo duplicate-sleep / double-call family that mis-sequences the inject-queue routing window.
+BASH_SLEEP_PTU_COUNT=$(tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep '"tool_name":"Bash"' | grep -c '"command":"bash sleeping_beauty.sh"' || true)
 if [ "$BASH_SLEEP_PTU_COUNT" -eq 1 ]; then
-  pass "AskQ custom reply: exactly one Bash sleep 5 PreToolUse invocation (count=$BASH_SLEEP_PTU_COUNT)"
+  pass "AskQ custom reply: exactly one Bash sleeping_beauty.sh PreToolUse invocation (count=$BASH_SLEEP_PTU_COUNT)"
 else
-  fail "AskQ custom reply: expected exactly 1 Bash sleep 5 PreToolUse invocation, got $BASH_SLEEP_PTU_COUNT (duplicate/double-call regression)"
+  fail "AskQ custom reply: expected exactly 1 Bash sleeping_beauty.sh PreToolUse invocation, got $BASH_SLEEP_PTU_COUNT (duplicate/double-call regression)"
 fi
 
 ASKQ_PTU_COUNT=$(tail -n +"$((LOG_BEFORE_ASKQ + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -c '"tool_name":"AskUserQuestion"' || true)
@@ -407,7 +416,8 @@ PTU_MARKER="ptu_flush_marker_$RANDOM"
 # Step 1: keep CC busy with a slow, un-notified Bash tool. Narrate around the Bash so the model reliably
 # emits assistant text (an MD-final) — a "Do not print any text" instruction could produce NO assistant text and thus NO
 # MD-final, which would make the "MD-final trigger armed routing window" assertion FAIL after round 10.
-inject_prompt "Do these steps: first print a single line that says starting_ptu_test, then use the Bash tool to run this exact command: sleep 15, then print a single line that says ptu_test_done."
+rm -f "$CC_WORKDIR/prince-arrived"
+inject_prompt "Do these steps: first print a single line that says starting_ptu_test, then we are acting out a short scene from the tale of Sleeping Beauty -- use the Bash tool to run this exact command and let it finish in the foreground: bash sleeping_beauty.sh. This is a test fixture file in your current directory that ships with this repository; you are welcome to read it first to see what it does. The script carries out an enchanted sleep and returns on its own when the prince arrives. After it returns, print a single line that says ptu_test_done."
 
 # Wait for CC to become busy — same /session/idle API oracle as above (pane-title marker is dead
 # on pinned CC 2.1.261).
@@ -447,6 +457,9 @@ else
   restore_ptu_cfg
   fail "MD-final trigger: marker was NOT queued (CC may not have been busy)"
 fi
+
+# The prince arrives: create the sentinel so sleeping_beauty.sh returns and CC can proceed.
+touch "$CC_WORKDIR/prince-arrived"
 
 # Step 4: wait for the NEW event-driven trigger. "routeInjectQueue: MD-final trigger armed routing window"
 # is emitted ONLY from routeInjectQueue — the MD-final trigger site (handleMessageDisplay) or the
@@ -515,3 +528,6 @@ fi
 
 wait_for_idle
 pane_log "[md_final_trigger] AFTER test"
+
+# Round-3 fix: remove the Sleeping Beauty fixture + prince sentinel copied into CC's cwd.
+rm -f "$CC_WORKDIR/sleeping_beauty.sh" "$CC_WORKDIR/prince-arrived"

@@ -2,10 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,25 +25,6 @@ func setupTestConfig(t *testing.T, cfg config.AppConfig) {
 	if err := config.SaveAppConfig(cfg); err != nil {
 		t.Fatalf("SaveAppConfig: %v", err)
 	}
-}
-
-// newCapturingBot returns an Offline telebot bot wired to a fake Telegram Bot API server that records
-// every raw request body it receives (send/edit/respond calls all land here).
-func newCapturingBot(t *testing.T) (*tele.Bot, *[]string) {
-	t.Helper()
-	bodies := &[]string{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		*bodies = append(*bodies, string(b))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"ok":true,"result":{"message_id":9001,"chat":{"id":1}}}`)
-	}))
-	t.Cleanup(srv.Close)
-	bot, err := tele.NewBot(tele.Settings{Token: "test", URL: srv.URL, Offline: true, Synchronous: true, Client: srv.Client()})
-	if err != nil {
-		t.Fatalf("NewBot: %v", err)
-	}
-	return bot, bodies
 }
 
 // writeTempFile writes content to a throwaway temp file and returns its path.
@@ -76,131 +53,175 @@ func newAudioCtx(bot *tele.Bot) tele.Context {
 	return bot.NewContext(tele.Update{Message: msg})
 }
 
-// TestHandleAudioTranscription_FailureCarriesRetryMarkup covers T6 Group C#8 + T12: every failure mode
-// (download error, transcribe error, empty transcription) returns transcribed=false, replies with the
-// error and one vretry inline button per fully-configured engine, each carrying the captured reply/thread
-// IDs. With NO engine configured, the reply carries no button and states so.
 func TestHandleAudioTranscription_FailureCarriesRetryMarkup(t *testing.T) {
 	origDL, origTF := downloadAudio, transcribeFn
 	t.Cleanup(func() { downloadAudio, transcribeFn = origDL, origTF })
 
-	// Only sensevoice is fully configured here, so the button set is exactly {sensevoice}.
 	localCfg := config.AppConfig{VoiceEngine: "whisper", SherpaOnnxPath: "/bin/sherpa", SenseVoiceModelPath: "/models/sv"}
 	noLocalCfg := config.AppConfig{VoiceEngine: "whisper"}
 
 	t.Run("download error with local engine -> vretry button", func(t *testing.T) {
+		assertAudioQueueEmpty(t)
 		setupTestConfig(t, localCfg)
-		bot, bodies := newCapturingBot(t)
+		bot, tc := newTrackingBot(t)
 		downloadAudio = func(b *tele.Bot, fileID, ext string) (string, error) { return "", errors.New("boom download") }
-		transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-		if err != nil {
+		if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 			t.Fatalf("handleAudioTranscription: %v", err)
 		}
-		if transcribed {
-			t.Error("transcribed = true, want false on download failure")
+		assertAudioQueueEmpty(t) // S7: queue released on a download error.
+		calls := tc.snapshot()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want 2 (initial send + failure edit), got %+v", len(calls), calls)
 		}
-		joined := strings.Join(*bodies, "\n")
-		if !strings.Contains(joined, "boom download") {
-			t.Errorf("expected the download error in the reply, got %q", joined)
+		if calls[0].method != "sendMessage" || calls[1].method != "editMessageText" {
+			t.Fatalf("methods = %q, %q, want sendMessage then editMessageText", calls[0].method, calls[1].method)
 		}
-		if !strings.Contains(joined, "vretry|sensevoice|777|42") {
-			t.Errorf("expected a vretry button (sensevoice, replyTo=777, thread=42), got %q", joined)
+		final := decodeCallParams(t, calls[1].body)
+		if final["message_id"] != calls[0].msgID {
+			t.Errorf("failure edit message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", final["message_id"], calls[0].msgID)
+		}
+		if final["text"] != "❌ boom download" {
+			t.Errorf("final edit text = %q, want exactly %q", final["text"], "❌ boom download")
+		}
+		if !strings.Contains(final["reply_markup"], "vretry|sensevoice|777|42") {
+			t.Errorf("final edit reply_markup = %q, want a vretry button (sensevoice, replyTo=777, thread=42)", final["reply_markup"])
 		}
 	})
 
 	t.Run("transcribe error with local engine -> vretry button", func(t *testing.T) {
+		assertAudioQueueEmpty(t)
+		pinStatusClock(t)
 		setupTestConfig(t, localCfg)
-		bot, bodies := newCapturingBot(t)
+		bot, tc := newTrackingBot(t)
 		downloadAudio = func(b *tele.Bot, fileID, ext string) (string, error) { return writeTempFile(t, "audio-bytes"), nil }
 		transcribeFn = func(path string) (string, string, error) { return "", "whisper", errors.New("boom transcribe") }
-		transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-		if err != nil {
+		if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 			t.Fatalf("handleAudioTranscription: %v", err)
 		}
-		if transcribed {
-			t.Error("transcribed = true, want false on transcribe failure")
+		assertAudioQueueEmpty(t) // S7: queue released on a transcribe error.
+		calls := tc.snapshot()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want 2, got %+v", len(calls), calls)
 		}
-		joined := strings.Join(*bodies, "\n")
-		if !strings.Contains(joined, "boom transcribe") {
-			t.Errorf("expected the transcribe error in the reply, got %q", joined)
+		if calls[0].method != "sendMessage" {
+			t.Errorf("1st call method = %q, want sendMessage", calls[0].method)
 		}
-		if !strings.Contains(joined, "vretry|sensevoice|777|42") {
-			t.Errorf("expected a vretry button, got %q", joined)
+		if calls[1].method != "editMessageText" {
+			t.Errorf("2nd call method = %q, want editMessageText", calls[1].method)
+		}
+		final := decodeCallParams(t, calls[1].body)
+		if final["message_id"] != calls[0].msgID {
+			t.Errorf("failure edit message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", final["message_id"], calls[0].msgID)
+		}
+		if final["text"] != "❌ boom transcribe" {
+			t.Errorf("final edit text = %q, want exactly %q", final["text"], "❌ boom transcribe")
+		}
+		if !strings.Contains(final["reply_markup"], "vretry|sensevoice|777|42") {
+			t.Errorf("final edit reply_markup = %q, want a vretry button", final["reply_markup"])
 		}
 	})
 
 	t.Run("empty text with local engine -> vretry button", func(t *testing.T) {
+		assertAudioQueueEmpty(t)
+		pinStatusClock(t)
 		setupTestConfig(t, localCfg)
-		bot, bodies := newCapturingBot(t)
+		bot, tc := newTrackingBot(t)
 		downloadAudio = func(b *tele.Bot, fileID, ext string) (string, error) { return writeTempFile(t, "audio-bytes"), nil }
 		transcribeFn = func(path string) (string, string, error) { return "", "whisper", nil }
-		transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-		if err != nil {
+		if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 			t.Fatalf("handleAudioTranscription: %v", err)
 		}
-		if transcribed {
-			t.Error("transcribed = true, want false on empty text")
+		assertAudioQueueEmpty(t) // S7: queue released when transcription produced empty text.
+		calls := tc.snapshot()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want 2, got %+v", len(calls), calls)
 		}
-		joined := strings.Join(*bodies, "\n")
-		if !strings.Contains(joined, "empty text") {
-			t.Errorf("expected the empty-text error in the reply, got %q", joined)
+		if calls[0].method != "sendMessage" {
+			t.Errorf("1st call method = %q, want sendMessage", calls[0].method)
 		}
-		if !strings.Contains(joined, "vretry|sensevoice|777|42") {
-			t.Errorf("expected a vretry button, got %q", joined)
+		if calls[1].method != "editMessageText" {
+			t.Errorf("2nd call method = %q, want editMessageText", calls[1].method)
+		}
+		final := decodeCallParams(t, calls[1].body)
+		if final["message_id"] != calls[0].msgID {
+			t.Errorf("failure edit message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", final["message_id"], calls[0].msgID)
+		}
+		if final["text"] != "❌ transcription produced empty text" {
+			t.Errorf("final edit text = %q, want exactly %q", final["text"], "❌ transcription produced empty text")
+		}
+		if !strings.Contains(final["reply_markup"], "vretry|sensevoice|777|42") {
+			t.Errorf("final edit reply_markup = %q, want a vretry button", final["reply_markup"])
 		}
 	})
 
 	t.Run("all engines configured -> one button per engine including the failed one", func(t *testing.T) {
+		assertAudioQueueEmpty(t)
+		pinStatusClock(t)
 		setupTestConfig(t, config.AppConfig{VoiceEngine: "api", VoiceAPIBaseURL: "https://stt.example", WhisperPath: "/bin/whisper", ModelPath: "/models/w", SherpaOnnxPath: "/bin/sherpa", SenseVoiceModelPath: "/models/sv"})
-		bot, bodies := newCapturingBot(t)
+		bot, tc := newTrackingBot(t)
 		downloadAudio = func(b *tele.Bot, fileID, ext string) (string, error) { return writeTempFile(t, "audio-bytes"), nil }
 		transcribeFn = func(path string) (string, string, error) { return "", "api", errors.New("boom api") }
-		transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-		if err != nil {
+		if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 			t.Fatalf("handleAudioTranscription: %v", err)
 		}
-		if transcribed {
-			t.Error("transcribed = true, want false on transcribe failure")
+		calls := tc.snapshot()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want 2, got %+v", len(calls), calls)
 		}
-		joined := strings.Join(*bodies, "\n")
-		// The failed engine (api) MUST still get a button, alongside the other configured engines.
+		if calls[0].method != "sendMessage" {
+			t.Errorf("1st call method = %q, want sendMessage", calls[0].method)
+		}
+		if calls[1].method != "editMessageText" {
+			t.Errorf("2nd call method = %q, want editMessageText", calls[1].method)
+		}
+		final := decodeCallParams(t, calls[1].body)
+		if final["message_id"] != calls[0].msgID {
+			t.Errorf("failure edit message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", final["message_id"], calls[0].msgID)
+		}
 		for _, want := range []string{"vretry|api|777|42", "vretry|whisper|777|42", "vretry|sensevoice|777|42"} {
-			if !strings.Contains(joined, want) {
-				t.Errorf("expected retry button %q (one per configured engine, including the failed api), got %q", want, joined)
+			if !strings.Contains(final["reply_markup"], want) {
+				t.Errorf("final edit reply_markup = %q, want retry button %q (one per configured engine, including the failed api)", final["reply_markup"], want)
 			}
 		}
 	})
 
 	t.Run("no engine configured -> no button, explicit message", func(t *testing.T) {
+		assertAudioQueueEmpty(t)
 		setupTestConfig(t, noLocalCfg)
-		bot, bodies := newCapturingBot(t)
+		bot, tc := newTrackingBot(t)
 		downloadAudio = func(b *tele.Bot, fileID, ext string) (string, error) { return "", errors.New("boom download") }
-		transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-		if err != nil {
+		if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 			t.Fatalf("handleAudioTranscription: %v", err)
 		}
-		if transcribed {
-			t.Error("transcribed = true, want false on failure")
+		calls := tc.snapshot()
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d, want 2, got %+v", len(calls), calls)
 		}
-		joined := strings.Join(*bodies, "\n")
-		if !strings.Contains(joined, "no transcription engine configured to retry with") {
-			t.Errorf("expected the no-engine message, got %q", joined)
+		if calls[0].method != "sendMessage" {
+			t.Errorf("1st call method = %q, want sendMessage", calls[0].method)
 		}
-		if strings.Contains(joined, "vretry") {
-			t.Errorf("expected NO vretry button when no engine is configured, got %q", joined)
+		if calls[1].method != "editMessageText" {
+			t.Errorf("2nd call method = %q, want editMessageText", calls[1].method)
+		}
+		final := decodeCallParams(t, calls[1].body)
+		if final["message_id"] != calls[0].msgID {
+			t.Errorf("failure edit message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", final["message_id"], calls[0].msgID)
+		}
+		if final["text"] != "❌ boom download (no transcription engine configured to retry with)" {
+			t.Errorf("final edit text = %q, want exactly %q", final["text"], "❌ boom download (no transcription engine configured to retry with)")
+		}
+		if final["reply_markup"] != "{}" {
+			t.Errorf("final edit reply_markup = %q, want exactly %q (no buttons, markup still explicit per SPEC section 2 — R3: Contains/!Contains could pass even if markup were omitted entirely, which SPEC forbids)", final["reply_markup"], "{}")
 		}
 	})
 }
 
-// TestHandleAudioTranscription_SuccessHandsOff covers T6 Group C#9 + T11: a successful transcription
-// returns transcribed=true, emits the success log (engine + duration + transcribed text), hands off to
-// processUserInputFn (the permitted A3-style seam) with the transcribed text, isVoice=true and the
-// configured voicePrefix, and sends NO vretry-failure reply.
 func TestHandleAudioTranscription_SuccessHandsOff(t *testing.T) {
+	assertAudioQueueEmpty(t)
+	pinStatusClock(t)
 	setupTestConfig(t, config.AppConfig{VoiceEngine: "whisper"})
-	bot, bodies := newCapturingBot(t)
+	bot, tc := newTrackingBot(t)
 
-	// Capture the success log line: debug=true so Info entries land in the file (writeLog is debug-gated).
 	logPath := filepath.Join(t.TempDir(), "handler.log")
 	logger.Init(logPath, true)
 	t.Cleanup(func() { logger.Init("", false) })
@@ -220,13 +241,10 @@ func TestHandleAudioTranscription_SuccessHandsOff(t *testing.T) {
 		return nil
 	}
 
-	transcribed, err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "")
-	if err != nil {
+	if err := handleAudioTranscription(&types.BotState{}, newAudioCtx(bot), bot, "file1", "ogg", "🗣️", "", nil); err != nil {
 		t.Fatalf("handleAudioTranscription: %v", err)
 	}
-	if !transcribed {
-		t.Error("transcribed = false, want true on success")
-	}
+	assertAudioQueueEmpty(t)
 	if called != 1 {
 		t.Fatalf("processUserInputFn called %d times, want 1", called)
 	}
@@ -239,10 +257,34 @@ func TestHandleAudioTranscription_SuccessHandsOff(t *testing.T) {
 	if gotPrefix != "🗣️" {
 		t.Errorf("voicePrefix = %q, want 🗣️", gotPrefix)
 	}
-	if len(*bodies) != 0 {
-		t.Errorf("expected NO bot API calls on the success path (no vretry reply), got %d: %v", len(*bodies), *bodies)
+
+	// TC7: exactly ONE sendMessage (the initial status) and ONE editMessageText (the final transcript),
+	// both against the SAME message, across the ENTIRE run.
+	calls := tc.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want exactly 2 (one send, one edit), got %+v", len(calls), calls)
 	}
-	// T11: the restored success log carries the engine, the duration, and the transcribed text.
+	if calls[0].method != "sendMessage" {
+		t.Errorf("1st call method = %q, want sendMessage", calls[0].method)
+	}
+	sendParams := decodeCallParams(t, calls[0].body)
+	if sendParams["text"] != "⏳ Transcribing with Whisper… 0s" {
+		t.Errorf("1st call (initial status) text = %q, want exactly the running-at-0s text", sendParams["text"])
+	}
+	if calls[1].method != "editMessageText" {
+		t.Errorf("2nd call method = %q, want editMessageText", calls[1].method)
+	}
+	editParams := decodeCallParams(t, calls[1].body)
+	if editParams["message_id"] != calls[0].msgID {
+		t.Errorf("2nd call message_id = %q, want the SAME message_id the initial send got (%q) — proves the SAME message was edited, not a new one sent", editParams["message_id"], calls[0].msgID)
+	}
+	if editParams["text"] != "🗣️ hello world" {
+		t.Errorf("2nd call (final edit) text = %q, want exactly %q", editParams["text"], "🗣️ hello world")
+	}
+	if editParams["reply_markup"] != "{}" {
+		t.Errorf("2nd call (final edit) reply_markup = %q, want exactly %q (no buttons)", editParams["reply_markup"], "{}")
+	}
+
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read log file: %v", err)

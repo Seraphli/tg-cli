@@ -36,6 +36,7 @@ export default function (pi) {
   let lastRunTurnId = ""; // turn_id of the run whose agent_end last latched lastStopReason — lets the next agent_start tell a SAME-turn retry from a new turn (Item 7)
   let compactedInWindow = false; // set by session_compact within a (agent_end -> next agent_start) window; suppresses the Item 7 agent_retry for a compaction-driven re-run (overflow/threshold), which pi does NOT treat as a retry. Reset at every agent_end so only a compaction in THIS window counts.
   let reserveCache = null; // resolved reserveTokens, cached per session
+  let pendingQueued = []; // FIFO of {promptId, turnId, text} for queued (steered) inputs awaiting their message_start match
 
   function tmuxTarget() {
     const pane = process.env.TMUX_PANE;
@@ -134,9 +135,17 @@ export default function (pi) {
 
   pi.on("input", (event, ctx) => {
     promptCounter++;
-    promptId = "p" + promptCounter;
-    turnId = "t" + promptCounter;
-    post("UserPromptSubmit", ctx, { prompt: event.text, prompt_id: promptId, turn_id: turnId });
+    const pid = "p" + promptCounter;
+    const tid = "t" + promptCounter;
+    if (event.streamingBehavior) {
+      // queued (steered) input: reserve its id pair without activating it yet — the matching
+      // message_start (via text match against the queued message's own content) activates it.
+      pendingQueued.push({ promptId: pid, turnId: tid, text: event.text });
+    } else {
+      promptId = pid;
+      turnId = tid;
+    }
+    post("UserPromptSubmit", ctx, { prompt: event.text, prompt_id: pid, turn_id: tid });
   });
 
   pi.on("agent_start", (event, ctx) => {
@@ -171,6 +180,24 @@ export default function (pi) {
   });
 
   pi.on("message_start", (event, ctx) => {
+    if (event.message && event.message.role === "user") {
+      // Match a queued (steered) message to its reservation by its own text, since pi's
+      // _queueSteer builds the queued message as [{type:"text",text}] (chunk-JVUZSMYM.js) —
+      // index alone is NOT reliable (pendingQueued is not structurally empty at a direct
+      // prompt's own message_start). idx===-1 covers a direct prompt's own message_start or a
+      // resubmission matching nothing live: leave promptId/turnId untouched in that case.
+      const text = (event.message.content || []).find((c) => c && c.type === "text")?.text;
+      const idx = pendingQueued.findIndex((e) => e.text === text);
+      if (idx !== -1) {
+        const matched = pendingQueued[idx];
+        // Drop the matched entry AND every older, still-unmatched entry ahead of it — a steer
+        // is only ever drained in FIFO order, so those are now known-stale.
+        pendingQueued = pendingQueued.slice(idx + 1);
+        promptId = matched.promptId;
+        turnId = matched.turnId;
+      }
+      return;
+    }
     if (event.message && event.message.role === "assistant") {
       msgCounter++;
       curMsgId = String(msgCounter);

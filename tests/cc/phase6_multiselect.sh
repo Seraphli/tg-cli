@@ -39,7 +39,7 @@ if [ "$MQ_FOUND" = true ]; then
   pass "Multi-question AskUserQuestion notification received"
 
   # Rich migration (v9): multi-question AskUserQuestion is also sent via sendRichMessage.
-  if tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE" | grep -q "AskUserQuestion sent:.*fmt=rich" 2>/dev/null; then
+  if grep -q "AskUserQuestion sent:.*fmt=rich" <<< "$(tail -n +"$((LOG_BEFORE_MQ + 1))" "$LOG_FILE")" 2>/dev/null; then
     pass "Multi-question AskUserQuestion sent via rich message path (fmt=rich)"
   else
     fail "Multi-question AskUserQuestion sent marker missing fmt=rich (expected rich message path)"

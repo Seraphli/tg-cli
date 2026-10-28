@@ -179,14 +179,14 @@ sleep 2
 # If the marker line is absent, fall through with a non-critical pass.
 RICH_REGION=$(tail -n +"$((LOG_BEFORE_RICH + 1))" "$LOG_FILE")
 echo "  DEBUG: RICH_REGION lines: $(echo "$RICH_REGION" | wc -l)"
-if echo "$RICH_REGION" | grep -q "Mailbox notification body:"; then
-  if echo "$RICH_REGION" | grep -qE "<h1>|<b>"; then
+if grep -q "Mailbox notification body:" <<< "$RICH_REGION"; then
+  if grep -qE "<h1>|<b>" <<< "$RICH_REGION"; then
     pass "Mailbox rich: notification body contains rich HTML (<h1> or <b>)"
   else
     fail "Mailbox rich: notification body missing rich HTML tags in region"
   fi
   # Assert no RICH_FALLBACK (TG accepted the rich message)
-  if echo "$RICH_REGION" | grep -q "RICH_FALLBACK"; then
+  if grep -q "RICH_FALLBACK" <<< "$RICH_REGION"; then
     fail "Mailbox rich: RICH_FALLBACK triggered — TG 400 on mailbox channel post"
   else
     pass "Mailbox rich: no RICH_FALLBACK (mailbox channel post accepted by TG)"

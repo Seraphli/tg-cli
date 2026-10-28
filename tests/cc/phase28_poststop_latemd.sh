@@ -26,7 +26,7 @@ post_hook() {
 wait_for_log() {
   local from="$1" pat="$2" timeout="$3" elapsed=0
   while [ "$elapsed" -lt "$timeout" ]; do
-    if tail -n +"$((from + 1))" "$LOG_FILE" | grep -qE "$pat"; then
+    if grep -qE "$pat" <<< "$(tail -n +"$((from + 1))" "$LOG_FILE")"; then
       return 0
     fi
     sleep 1
@@ -56,17 +56,17 @@ sleep 1
 post_hook MessageDisplay "{\"session_id\":\"$SID1\",\"tmux_target\":\"$TGT1\",\"cwd\":\"$CWD_NOW\",\"project\":\"tg-cli\",\"backend\":\"cc\",\"hook_event_name\":\"MessageDisplay\",\"message_id\":\"mInv\",\"turn_id\":\"tInv\",\"prompt_id\":\"pInv\",\"index\":0,\"delta\":\"$BODY1\",\"final\":true}"
 wait_for_log "$LOG_BEFORE_TC1" "post-stop late MD dropped \(stop-copy\): session=$SID1 message_id=mInv" 15 || true
 
-if tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "Stop terminal: outcome=direct_send session=$SID1"; then
+if grep -q "Stop terminal: outcome=direct_send session=$SID1" <<< "$(tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE")"; then
   pass "TC1: FinalizeNoEntry terminal direct-send delivered the Stop body (functional)"
 else
   fail "TC1: FinalizeNoEntry terminal direct-send not found for $SID1"
 fi
-if tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "post-stop late MD dropped (stop-copy): session=$SID1 message_id=mInv"; then
+if grep -q "post-stop late MD dropped (stop-copy): session=$SID1 message_id=mInv" <<< "$(tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE")"; then
   pass "TC1: late fragment matching the Stop body dropped as STOP-COPY (no duplicate)"
 else
   fail "TC1: STOP-COPY drop marker not found for $SID1 message_id=mInv"
 fi
-if tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE" | grep -q "post-stop late MD accepted (stream): session=$SID1 message_id=mInv"; then
+if grep -q "post-stop late MD accepted (stream): session=$SID1 message_id=mInv" <<< "$(tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE")"; then
   fail "TC1: STOP-COPY fragment was WRONGLY accepted as a stream (duplicate delivery)"
 else
   pass "TC1: STOP-COPY fragment never streamed (exactly one delivery)"
@@ -88,22 +88,22 @@ sleep 1
 post_hook MessageDisplay "{\"session_id\":\"$SID2\",\"tmux_target\":\"$TGT2\",\"cwd\":\"$CWD_NOW\",\"project\":\"tg-cli\",\"backend\":\"cc\",\"hook_event_name\":\"MessageDisplay\",\"message_id\":\"mNew2\",\"turn_id\":\"tNew2\",\"prompt_id\":\"pNew2\",\"index\":1,\"delta\":\"and part two complete.\",\"final\":true}"
 wait_for_log "$LOG_BEFORE_TC2" "Stream relabel ✅: .*message_id=mNew2" 20 || true
 
-if tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE" | grep -q "post-stop late MD accepted (stream): session=$SID2 message_id=mNew2"; then
+if grep -q "post-stop late MD accepted (stream): session=$SID2 message_id=mNew2" <<< "$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")"; then
   pass "TC2: genuinely-new post-Stop message accepted as a stream"
 else
   fail "TC2: post-stop accepted-stream marker not found for $SID2 message_id=mNew2"
 fi
-if tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE" | grep -qE "Stream (send|edit):.*message_id=mNew2"; then
+if grep -qE "Stream (send|edit):.*message_id=mNew2" <<< "$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")"; then
   pass "TC2: post-Stop NEW message rendered via streaming (Stream send/edit)"
 else
   fail "TC2: no Stream send/edit for the post-Stop NEW message mNew2"
 fi
-if tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE" | grep -q "Stream relabel ✅: .*message_id=mNew2"; then
+if grep -q "Stream relabel ✅: .*message_id=mNew2" <<< "$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")"; then
   pass "TC2: completion boundary relabeled the post-Stop NEW message ✅"
 else
   fail "TC2: no Stream relabel ✅ for mNew2 (completion boundary not reached)"
 fi
-if tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE" | grep -q "post-stop late MD dropped (stop-copy): session=$SID2 message_id=mNew2"; then
+if grep -q "post-stop late MD dropped (stop-copy): session=$SID2 message_id=mNew2" <<< "$(tail -n +"$((LOG_BEFORE_TC2 + 1))" "$LOG_FILE")"; then
   fail "TC2: genuinely-new message was WRONGLY dropped as stop-copy"
 else
   pass "TC2: genuinely-new message not dropped as stop-copy"
@@ -123,7 +123,7 @@ sleep 1
 post_hook MessageDisplay "{\"session_id\":\"$SID3\",\"tmux_target\":\"$TGT3\",\"cwd\":\"$CWD_NOW\",\"project\":\"tg-cli\",\"backend\":\"cc\",\"hook_event_name\":\"MessageDisplay\",\"message_id\":\"mOne\",\"turn_id\":\"tOne\",\"prompt_id\":\"pOne\",\"index\":0,\"delta\":\"POSTSTOP_SINGLE_MARKER single new post-stop message.\",\"final\":true}"
 wait_for_log "$LOG_BEFORE_TC3" "Stream relabel ✅: .*message_id=mOne" 20 || true
 
-if tail -n +"$((LOG_BEFORE_TC3 + 1))" "$LOG_FILE" | grep -q "post-stop late MD accepted (stream): session=$SID3 message_id=mOne"; then
+if grep -q "post-stop late MD accepted (stream): session=$SID3 message_id=mOne" <<< "$(tail -n +"$((LOG_BEFORE_TC3 + 1))" "$LOG_FILE")"; then
   pass "TC3: single-delta new post-Stop message accepted as a stream"
 else
   fail "TC3: post-stop accepted-stream marker not found for $SID3 message_id=mOne"
@@ -151,7 +151,7 @@ if wait_for_log "$LOG_BEFORE_TC4" "Stream (send|edit):.*message_id=mPre" 20; the
   sleep 2 # let the render op set Sealed under DataMu
   post_hook Stop "{\"session_id\":\"$SID4\",\"tmux_target\":\"$TGT4\",\"cwd\":\"$CWD_NOW\",\"project\":\"tg-cli\",\"backend\":\"cc\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Different post-tool authoritative text.\"}"
   wait_for_log "$LOG_BEFORE_TC4" "Stop terminal: outcome=direct_send_sealed_mismatch session=$SID4" 15 || true
-  if tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE" | grep -q "Stop terminal: outcome=direct_send_sealed_mismatch session=$SID4"; then
+  if grep -q "Stop terminal: outcome=direct_send_sealed_mismatch session=$SID4" <<< "$(tail -n +"$((LOG_BEFORE_TC4 + 1))" "$LOG_FILE")"; then
     pass "TC4: SealedMismatch terminal direct-send functional"
   else
     fail "TC4: SealedMismatch terminal direct-send marker not found for $SID4"
@@ -165,7 +165,7 @@ fi
 # =============================================================================
 echo ""
 echo "--- TC5: no chat=0 / RICH_FALLBACK errors in the post-Stop phase ---"
-if tail -n +"$((PHASE_LOG_BEFORE + 1))" "$LOG_FILE" | grep -E "poststop-(inv|new|one|mism)" | grep -qE "chat=0|RICH_FALLBACK"; then
+if grep -qE "chat=0|RICH_FALLBACK" <<< "$(grep -E "poststop-(inv|new|one|mism)" <<< "$(tail -n +"$((PHASE_LOG_BEFORE + 1))" "$LOG_FILE")")"; then
   echo "  offending lines:"
   tail -n +"$((PHASE_LOG_BEFORE + 1))" "$LOG_FILE" | grep -E "poststop-(inv|new|one|mism)" | grep -E "chat=0|RICH_FALLBACK" | head -5
   fail "TC5: chat=0 or RICH_FALLBACK error found in the post-Stop phase"

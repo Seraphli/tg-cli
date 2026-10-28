@@ -171,6 +171,69 @@ else
   pass "TG has no text gluing issues"
 fi
 
+# v43: paragraph-aligned intermediate render. For EVERY intermediate "Stream send/edit...full_text:"
+# render of a streamed message in this turn (every occurrence except the LAST, which is that
+# message's own final render), its visible text must equal the visible text of SOME depth-0
+# paragraph-boundary prefix (allowed_cuts, tests/e2e_common.sh) of the final render's own body.
+# Whether a run produces ANY intermediate render at all depends on delta timing against the 200ms
+# ticker (cmd/stream.go:386) straddling a boundary -- zero intermediate renders satisfies the rule
+# vacuously (no retry, no skip branch).
+V43_MIDS=$(printf '%s\n' "$NEW_LOGS" | grep -oP '(?:Stream send:|Stream edit:).*message_id=\K[^ ]+' | sort -u || true)
+V43_FAIL=""
+for V43_MID in $V43_MIDS; do
+  V43_RENDERS=$(printf '%s\n' "$NEW_LOGS" | MID="$V43_MID" python3 -c '
+import sys, os, re, json
+mid = os.environ["MID"]
+pat = re.compile(r"Stream (?:send|edit):.*message_id=" + re.escape(mid) + r"(?: |$).*full_text:")
+ts_pat = re.compile(r"^\[\d{4}-")
+renders = []
+cur = None
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    m = pat.search(line)
+    if m:
+        if cur is not None:
+            renders.append(cur)
+        rest = line[m.end():]
+        cur = (rest + "\n") if rest else ""
+        continue
+    if cur is not None:
+        if ts_pat.match(line):
+            renders.append(cur)
+            cur = None
+        else:
+            cur += line + "\n"
+if cur is not None:
+    renders.append(cur)
+print(json.dumps(renders))
+')
+  V43_COUNT=$(printf '%s' "$V43_RENDERS" | jq 'length')
+  [ "$V43_COUNT" -le 1 ] && continue  # 0 or 1 render -> zero intermediate renders, vacuous
+  V43_FINAL=$(printf '%s' "$V43_RENDERS" | jq -r '.[-1]')
+  V43_FINAL_BODY=$(printf '%s' "$V43_FINAL" | body)
+  V43_CUTS=$(printf '%s' "$V43_FINAL_BODY" | allowed_cuts)
+  V43_N=$((V43_COUNT - 1))
+  for ((v43i = 0; v43i < V43_N; v43i++)); do
+    V43_R=$(printf '%s' "$V43_RENDERS" | jq -r --argjson i "$v43i" '.[$i]')
+    V43_R_VIS=$(printf '%s' "$V43_R" | body | visible)
+    V43_MATCHED=0
+    while IFS= read -r V43_C; do
+      [ -z "$V43_C" ] && continue
+      V43_PREFIX_VIS=$(printf '%s' "${V43_FINAL_BODY:0:V43_C}" | visible)
+      if [ "$V43_R_VIS" = "$V43_PREFIX_VIS" ]; then V43_MATCHED=1; break; fi
+    done <<< "$V43_CUTS"
+    if [ "$V43_MATCHED" -ne 1 ]; then
+      V43_FAIL="message_id=$V43_MID intermediate render #$v43i"
+      echo "  DEBUG v43: $V43_FAIL does not align to any allowed paragraph-boundary cut"
+    fi
+  done
+done
+if [ -z "$V43_FAIL" ]; then
+  pass "v43: every intermediate Stream send/edit render aligns to a depth-0 paragraph-boundary cut of its message's final render"
+else
+  record_fail "v43: $V43_FAIL does not align to any allowed paragraph-boundary cut of its message's final render"
+fi
+
 # Cleanup temp files
 rm -f "$TG_HTML_FILE" "$TG_PLAIN_FILE" "$TG_PLAIN_FILE.glue"
 

@@ -1,6 +1,7 @@
 package stores
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -12,13 +13,37 @@ import (
 // single precise-eligible MessageDisplay job while the worker awaits a lagging pre-tool MD (rev 15 MAJOR2).
 const sessionQueueCap = 128
 
+// transcriptPollInterval is how often ResolveContentAddressedToolBoundary re-reads the transcript while the
+// tool_use line has not been written yet. This phase of the wait has NO queue-broadcast event to wake on — a
+// transcript file write is invisible to w.cond (item 2 of note2's review, 2026-10-09: the ONLY Broadcast
+// sources are enqueue/dequeue/extractEligibleBeforeBoundaryLocked-removal/the deadline timer/the floor timer —
+// none of those fire when CC appends a line to its jsonl). Measured write-lag across 16 real CC tool calls
+// (PreToolUse hook fire -> the tool_use line visible in the transcript) is 54.59-94.87ms (/tmp/probe_hook.log,
+// re-derived 2026-10-09 — matches note2's cited "55-95 ms"). 20ms bounds the added latency on top of the real
+// write to at most one tick in the common case while costing only ~3-5 extra tail-reads per tool call.
+const transcriptPollInterval = 20 * time.Millisecond
+
+// noTimeoutHorizon is NOT a real timeout. The boss's ruling (2026-10-09, "没等到就得一直等") is unbounded
+// waiting with no fallback; this constant exists only so the SECOND phase of the wait (watching the queue for
+// the matching MessageDisplay group) can reuse the EXISTING bounded-over-cap admission reservation
+// (reservedLocked :107 / admitLocked :122 of this file) — which already takes a deadline — instead of adding a second,
+// parallel no-deadline admission code path (Occam's razor: reuse the existing mechanism with a deadline so far
+// in the future it never fires, rather than build a new one).
+const noTimeoutHorizon = 24 * time.Hour
+
 // sessionEventJob is one queued unit of work for a session worker. label/event/promptID/arrivedAt are the
-// drain-lookahead metadata (event classification + absolute arrival deadline eligibility); handler is the
-// work; done (when non-nil) receives the handler error for a sync Dispatch caller.
+// drain-lookahead metadata (event classification + absolute arrival deadline eligibility); messageID/index/
+// final/delta are populated on MessageDisplay jobs only (zero-value on every other event — fix C's content-
+// addressed boundary resolution, cmd C's ResolveContentAddressedToolBoundary/drainContentMatchLocked); handler
+// is the work; done (when non-nil) receives the handler error for a sync Dispatch caller.
 type sessionEventJob struct {
 	label     string
 	event     string
 	promptID  string
+	messageID string
+	index     int
+	final     bool
+	delta     string
 	arrivedAt time.Time
 	handler   func() error
 	done      chan error
@@ -30,6 +55,10 @@ type sessionEventJob struct {
 type JobMeta struct {
 	Event     string
 	PromptID  string
+	MessageID string
+	Index     int
+	Final     bool
+	Delta     string
 	ArrivedAt time.Time
 }
 
@@ -160,14 +189,27 @@ func (s *SessionEventStore) Dispatch(sessionID, label string, handler func() err
 	return <-done
 }
 
-// DispatchWithMeta is Dispatch carrying the drain-lookahead metadata (event/promptID/arrivedAt).
-func (s *SessionEventStore) DispatchWithMeta(sessionID, label, event, promptID string, arrivedAt time.Time, handler func() error) error {
+// JobInput is the drain-lookahead metadata for DispatchWithMeta, carried as one struct instead of growing
+// the positional-arg list further (fix C adds MessageID/Index/Final/Delta, populated on MessageDisplay only).
+type JobInput struct {
+	Label     string
+	Event     string
+	PromptID  string
+	MessageID string
+	Index     int
+	Final     bool
+	Delta     string
+	ArrivedAt time.Time
+}
+
+// DispatchWithMeta is Dispatch carrying the drain-lookahead metadata (JobInput).
+func (s *SessionEventStore) DispatchWithMeta(sessionID string, in JobInput, handler func() error) error {
 	if sessionID == "" {
 		return handler()
 	}
 	w := s.getOrCreate(sessionID)
 	done := make(chan error, 1)
-	w.enqueueBlocking(&sessionEventJob{label: label, event: event, promptID: promptID, arrivedAt: arrivedAt, handler: handler, done: done})
+	w.enqueueBlocking(&sessionEventJob{label: in.Label, event: in.Event, promptID: in.PromptID, messageID: in.MessageID, index: in.Index, final: in.Final, delta: in.Delta, arrivedAt: in.ArrivedAt, handler: handler, done: done})
 	return <-done
 }
 
@@ -236,7 +278,7 @@ func extractEligibleBeforeBoundaryLocked(w *sessionWorker, eligible, boundary fu
 	i := 0
 	for ; i < len(w.jobs); i++ {
 		j := w.jobs[i]
-		m := JobMeta{Event: j.event, PromptID: j.promptID, ArrivedAt: j.arrivedAt}
+		m := JobMeta{Event: j.event, PromptID: j.promptID, MessageID: j.messageID, Index: j.index, Final: j.final, Delta: j.delta, ArrivedAt: j.arrivedAt}
 		if boundary(m) {
 			hitBoundary = true
 			break // STOP at the first boundary; everything from here stays in order
@@ -369,4 +411,164 @@ func (s *SessionEventStore) WaitForMatchOrDeadlineFloored(sessionID, ptuPromptID
 	w.await = awaitReq{} // clear reservation UNDER mu
 	w.mu.Unlock()        // single explicit unlock; mu is always held here
 	return branch
+}
+
+// ResolveContentAddressedToolBoundary implements fix C (boss decision 2026-10-09, revised per note2's 8-item
+// review) for CC main-session PreToolUse: no fixed floor/budget window. Three states, not two (item 1 of the
+// review — the first draft's getText returning a single (text, found) pair conflated "tool_use line not yet
+// written" with "written, no text block", causing the notification to fire immediately on BOTH, and separately
+// made a written-no-text answer fall through into an unmatchable drainContentMatchLocked("")):
+//   - lineWritten=false: the tool_use line is not in the transcript yet. Sleep transcriptPollInterval (item 2 —
+//     this is a plain timed retry, NOT w.cond.Wait(), because nothing about this condition is a queue event)
+//     and loop — re-call getText(). No timeout, no fallback (boss's ruling).
+//   - lineWritten=true, hasText=false: the line IS written and the block immediately before it has no text (or
+//     a different message.id, or is itself another tool_use/attachment — TailFindToolUse's own job, see its doc comment in cmd/helpers/transcript.go).
+//     Return false immediately (caller sends the tool notification now).
+//   - lineWritten=true, hasText=true: text is the preceding text block's content. isRendered(text) true -> this
+//     text is ALREADY fully rendered in bs.Streams (see stream.go AssembledText) -> return true immediately
+//     (caller sends right away, nothing to wait for). isRendered(text) false -> scan the ENTIRE queue (item 3 —
+//     the first draft stopped at "other" boundaries, which can hang forever: in all 22 matched rows from round 4
+//     the matched (final) delta's MessageDisplay hook is spawned AFTER its own PreToolUse hook by PID order
+//     (an EARLIER, non-final delta for the same message can still fire before PreToolUse — see item 4's
+//     split-group example below, PID 3089126 before 3089132 — so this PID-order fact is about the final delta
+//     specifically, not every delta), so with parallel/overlapping
+//     tool calls a different tool's PreToolUse can be enqueued before this text's MD and the old scan would stop
+//     there and never find it — content equality to `text` PLUS the promptID filter already guarantee nothing
+//     but the intended group is ever touched, so a boundary stop protects nothing here) via
+//     drainContentMatchLocked for the MessageDisplay job group (filtered to promptID, grouped by messageID,
+//     SEEDED with whatever of that messageID's deltas are already in bs.Streams — item 4, see below) whose
+//     assembled text equals `text`. Found -> run its handlers now, return true. Not found -> publish the
+//     existing bounded over-cap admission reservation with deadline=now+noTimeoutHorizon (no real timeout) and
+//     block on w.cond.Wait() (this phase DOES have a queue-broadcast event to wake on: a new MessageDisplay job
+//     always arrives via enqueueBlocking, which always Broadcasts, session_queue.go:130 and :136) — then loop, re-running
+//     getText/isRendered each time since a Stop or further transcript writes can change the answer.
+//
+// toolUseID does NOT appear in this function's signature — it is only needed by the
+// getText closure (to ask TailFindToolUse about ONE specific tool_use_id), which register.go builds and passes
+// in; this package never needs to know it.
+func (s *SessionEventStore) ResolveContentAddressedToolBoundary(
+	sessionID, promptID string,
+	getText func() (text string, hasText, lineWritten bool),
+	seedGroup func(messageID string) (deltas map[int]string, finalIdx int, hasFinal bool),
+	isRendered func(text string) bool,
+) bool {
+	if sessionID == "" {
+		return false
+	}
+	w := s.getOrCreate(sessionID)
+	for {
+		text, hasText, lineWritten := getText()
+		if !lineWritten {
+			time.Sleep(transcriptPollInterval)
+			continue
+		}
+		if !hasText {
+			return false
+		}
+		if isRendered(text) {
+			return true
+		}
+		w.mu.Lock()
+		got, matched := drainContentMatchLocked(w, promptID, text, seedGroup)
+		if matched {
+			w.mu.Unlock()
+			for _, j := range got {
+				err := j.handler()
+				if j.done != nil {
+					j.done <- err
+					close(j.done)
+				}
+			}
+			return true
+		}
+		w.await = awaitReq{active: true, deadline: time.Now().Add(noTimeoutHorizon), promptID: promptID}
+		w.cond.Broadcast()
+		w.cond.Wait() // woken by any enqueue/dequeue/removal on THIS queue — re-check getText/isRendered next loop
+		w.await = awaitReq{}
+		w.mu.Unlock()
+	}
+}
+
+// drainContentMatchLocked front-scans the ENTIRE w.jobs (caller holds w.mu; item 3 — no boundary stop of any
+// kind, unlike extractEligibleBeforeBoundaryLocked). Every job that is not a MessageDisplay with a matching
+// promptID is skipped over untouched (this subsumes the first draft's special "skip this tool's own PostToolUse
+// without stopping" rule — there is no special case left: ALL non-matching jobs, including every kind of
+// boundary, are just skipped, never inspected further). Matching MessageDisplay jobs are grouped by messageID;
+// each group is SEEDED (item 4) via seedGroup(messageID) with whatever deltas for that messageID are already
+// merged into bs.Streams (register.go's AppendDelta may have already processed earlier-arriving deltas for this
+// SAME messageID before this PreToolUse's job was even dequeued — single-worker FIFO order means an earlier-
+// enqueued MessageDisplay job for the same bubble can fully complete before PreToolUse's job is dequeued, while
+// a LATER delta for that same messageID — enqueued after PreToolUse's job began running — still sits queued;
+// example from note2's review: session 2624141, prompt 6c5f37f4, tool toolu_07cce9f5 — delta hook PID 3089126
+// fired BEFORE the PreToolUse hook PID 3089132 and was already drained into bs.Streams by the time this PreToolUse
+// ran; delta hook PID 3089135 fired AFTER and was still queued. A scan that only looks at queued jobs can never
+// assemble a complete 0..finalIdx run in this case — assembleFromIndex always fails at index 0 — so it would
+// never match and the wait would never end). After each queued delta is folded into its group's byIndex map (on
+// top of the seed), the group is checked for completeness+equality to `text`; the FIRST group to match is
+// removed from w.jobs — only its OWN queued jobs (the seed is not represented by any queued job, so there is
+// nothing of the seed's to remove) — preserving the relative order of everything else. If the scan reaches the
+// end of w.jobs with no match, matched=false and w.jobs is unchanged (pure lookahead).
+func drainContentMatchLocked(w *sessionWorker, promptID, text string, seedGroup func(string) (map[int]string, int, bool)) (got []*sessionEventJob, matched bool) {
+	type matchGroup struct {
+		byIndex  map[int]string
+		finalIdx int
+		hasFinal bool
+		jobs     []*sessionEventJob
+	}
+	groups := map[string]*matchGroup{}
+	for _, j := range w.jobs {
+		if j.event != "MessageDisplay" || j.promptID != promptID {
+			continue // every non-matching job, incl. every kind of boundary, is skipped, never touched
+		}
+		g, ok := groups[j.messageID]
+		if !ok {
+			seedDeltas, seedFinalIdx, seedHasFinal := seedGroup(j.messageID)
+			byIndex := make(map[int]string, len(seedDeltas)+1)
+			for k, v := range seedDeltas {
+				byIndex[k] = v
+			}
+			g = &matchGroup{byIndex: byIndex, finalIdx: seedFinalIdx, hasFinal: seedHasFinal}
+			groups[j.messageID] = g
+		}
+		g.byIndex[j.index] = j.delta
+		g.jobs = append(g.jobs, j)
+		if j.final {
+			g.finalIdx = j.index
+			g.hasFinal = true
+		}
+		if !g.hasFinal {
+			continue
+		}
+		assembled, complete := assembleFromIndex(g.byIndex, g.finalIdx)
+		if !complete || assembled != text {
+			continue
+		}
+		matchSet := make(map[*sessionEventJob]bool, len(g.jobs))
+		for _, gj := range g.jobs {
+			matchSet[gj] = true
+		}
+		kept := make([]*sessionEventJob, 0, len(w.jobs)-len(matchSet))
+		for _, wj := range w.jobs {
+			if !matchSet[wj] {
+				kept = append(kept, wj)
+			}
+		}
+		w.jobs = kept
+		w.cond.Broadcast()
+		return g.jobs, true
+	}
+	return nil, false
+}
+
+// assembleFromIndex concatenates byIndex[0..finalIdx] in order; incomplete (a gap) -> ("", false).
+func assembleFromIndex(byIndex map[int]string, finalIdx int) (string, bool) {
+	var b strings.Builder
+	for i := 0; i <= finalIdx; i++ {
+		d, ok := byIndex[i]
+		if !ok {
+			return "", false
+		}
+		b.WriteString(d)
+	}
+	return b.String(), true
 }

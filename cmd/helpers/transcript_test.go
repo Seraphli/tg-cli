@@ -103,7 +103,7 @@ func ccAsstBash(cmd string) string {
 	})
 }
 
-// user record whose array content is [text + tool_result]; origin optional (site :81, ReadLastNRounds only)
+// user record whose array content is [text + tool_result]; origin optional (site transcript.go:82, ReadLastNRounds only)
 func ccUserTextToolResult(originKind, text string) string {
 	m := map[string]interface{}{
 		"type": "user",
@@ -149,10 +149,10 @@ type nhCase struct {
 
 func nonHumanCases() []nhCase {
 	return []nhCase{
-		{"interrupt-array", interruptTxt, ccUserArrNoOrigin(interruptTxt)},                                               // site :92
+		{"interrupt-array", interruptTxt, ccUserArrNoOrigin(interruptTxt)},                                               // site transcript.go:93
 		{"nonhuman-origin-string", "system routed notice", ccUserOriginStr("task-notification", "system routed notice")}, // site :55
 		{"ismeta-string", "meta please continue str", ccMetaStr("meta please continue str")},                             // site :55
-		{"ismeta-array", "meta please continue arr", ccMetaArr("meta please continue arr")},                              // site :92
+		{"ismeta-array", "meta please continue arr", ccMetaArr("meta please continue arr")},                              // site transcript.go:93
 		{"self-recovery-1", selfRecov1, ccMetaArr(selfRecov1)},
 		{"self-recovery-2", selfRecov2, ccMetaArr(selfRecov2)},
 		{"self-recovery-3", selfRecov3, ccMetaArr(selfRecov3)},
@@ -263,7 +263,7 @@ func TestReadLastNRounds_HumanOpensRound(t *testing.T) {
 	}
 }
 
-// (iii) noTools text+tool_result branch (:81), ReadLastNRounds only, correct on BOTH sides.
+// (iii) noTools text+tool_result branch (transcript.go:82), ReadLastNRounds only, correct on BOTH sides.
 func TestReadLastNRounds_ToolResultBranch(t *testing.T) {
 	t.Run("human-opens", func(t *testing.T) {
 		path := writeTranscript(t,
@@ -279,7 +279,7 @@ func TestReadLastNRounds_ToolResultBranch(t *testing.T) {
 		}
 		u := strings.Join(rounds[0].UserTexts, "|")
 		if !strings.Contains(u, "TT") {
-			t.Fatalf(":81 text must appear in UserTexts: %q", u)
+			t.Fatalf("transcript.go:82 text must appear in UserTexts: %q", u)
 		}
 		if strings.Contains(u, "H1") {
 			t.Fatalf("human V should open a round, evicting H1: %q", u)
@@ -299,7 +299,7 @@ func TestReadLastNRounds_ToolResultBranch(t *testing.T) {
 		}
 		u := strings.Join(rounds[0].UserTexts, "|")
 		if !strings.Contains(u, "TT") {
-			t.Fatalf(":81 text must appear in UserTexts: %q", u)
+			t.Fatalf("transcript.go:82 text must appear in UserTexts: %q", u)
 		}
 		if !strings.Contains(u, "H1") {
 			t.Fatalf("non-human V must not open a round; H1 retained: %q", u)
@@ -408,4 +408,122 @@ func TestParsePiTranscriptToolDetail(t *testing.T) {
 	if tool.ToolDetail != "echo hello_world" {
 		t.Errorf("entry.ToolDetail = %q, want the command %q (pre-fix dumps the raw arguments JSON)", tool.ToolDetail, "echo hello_world")
 	}
+}
+
+// --- TailFindToolUse fixture builders (fix C) ---
+// CC transcript lines carry ONE content block per line, with "message":{"id":..., "content":[block]} —
+// a SEPARATE jsonl line per block (text/tool_use/thinking), all sharing the same message.id for one turn
+// (verified against real ~/.claude/projects transcripts).
+func tfAsstText(messageID, text string) string {
+	return mustJSON(map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{"id": messageID, "content": []map[string]interface{}{
+			{"type": "text", "text": text},
+		}},
+	})
+}
+func tfAsstToolUse(messageID, toolUseID string) string {
+	return mustJSON(map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{"id": messageID, "content": []map[string]interface{}{
+			{"type": "tool_use", "id": toolUseID, "name": "Bash", "input": map[string]string{"command": "echo hi"}},
+		}},
+	})
+}
+func tfAsstThinking(messageID, thinking string) string {
+	return mustJSON(map[string]interface{}{
+		"type": "assistant",
+		"message": map[string]interface{}{"id": messageID, "content": []map[string]interface{}{
+			{"type": "thinking", "thinking": thinking},
+		}},
+	})
+}
+func tfUserAttachment() string {
+	return mustJSON(map[string]interface{}{
+		"type": "user",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "async_hook_response", "text": "attachment payload"},
+		}},
+	})
+}
+func tfUserToolResult() string {
+	return mustJSON(map[string]interface{}{
+		"type": "user",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "content": "earlier tool output"},
+		}},
+	})
+}
+func tfPermissionModeMeta() string {
+	return mustJSON(map[string]interface{}{"type": "permission-mode", "mode": "default"})
+}
+
+// TestTailFindToolUse (item 7 bullet 1): 7 table-driven cases over the three-state contract
+// (hasText/lineWritten), each a synthetic jsonl fixture written to a t.TempDir().
+func TestTailFindToolUse(t *testing.T) {
+	t.Run("text line before the tool_use", func(t *testing.T) {
+		path := writeTranscript(t, tfAsstText("msg1", "doing the thing"), tfAsstToolUse("msg1", "toolu_1"))
+		_, text, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if !lineWritten || !hasText || text != "doing the thing" {
+			t.Fatalf("got text=%q hasText=%v lineWritten=%v, want %q true true", text, hasText, lineWritten, "doing the thing")
+		}
+	})
+	t.Run("no text (previous line is another tool_use)", func(t *testing.T) {
+		path := writeTranscript(t, tfAsstToolUse("msg1", "toolu_other"), tfAsstToolUse("msg1", "toolu_1"))
+		_, _, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if !lineWritten || hasText {
+			t.Fatalf("got hasText=%v lineWritten=%v, want false true", hasText, lineWritten)
+		}
+	})
+	t.Run("text line, then intervening non-assistant lines, then the tool_use", func(t *testing.T) {
+		path := writeTranscript(t,
+			tfAsstText("msg1", "doing the thing"),
+			tfUserAttachment(), tfUserToolResult(), tfPermissionModeMeta(),
+			tfAsstToolUse("msg1", "toolu_1"))
+		_, text, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if !lineWritten || !hasText || text != "doing the thing" {
+			t.Fatalf("got text=%q hasText=%v lineWritten=%v, want %q true true (intervening lines must be skipped by type)", text, hasText, lineWritten, "doing the thing")
+		}
+	})
+	t.Run("previous line with a different message_id", func(t *testing.T) {
+		path := writeTranscript(t, tfAsstText("msg0", "belongs to a different turn"), tfAsstToolUse("msg1", "toolu_1"))
+		_, _, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if !lineWritten || hasText {
+			t.Fatalf("got hasText=%v lineWritten=%v, want false true (different message.id must not count as preceding text)", hasText, lineWritten)
+		}
+	})
+	t.Run("same-id thinking line directly before the tool_use", func(t *testing.T) {
+		path := writeTranscript(t, tfAsstThinking("msg1", "reasoning..."), tfAsstToolUse("msg1", "toolu_1"))
+		_, _, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if !lineWritten || hasText {
+			t.Fatalf("got hasText=%v lineWritten=%v, want false true (same-id thinking block has no text)", hasText, lineWritten)
+		}
+	})
+	t.Run("line not written yet", func(t *testing.T) {
+		path := writeTranscript(t, tfAsstText("msg1", "doing the thing"))
+		_, _, hasText, lineWritten := TailFindToolUse(path, "toolu_1")
+		if lineWritten || hasText {
+			t.Fatalf("got hasText=%v lineWritten=%v, want false false (tool_use_id absent entirely)", hasText, lineWritten)
+		}
+	})
+	t.Run("target line beyond the first 64 KB chunk", func(t *testing.T) {
+		// The text block alone (100,000 bytes) exceeds tailChunkSize (64KB), so the chunk boundary MUST land
+		// inside it regardless of filler size — the backward reader must cross chunk boundaries to assemble it.
+		bigText := strings.Repeat("x", 100000)
+		var lines []string
+		for i := 0; i < 20; i++ {
+			lines = append(lines, mustJSON(map[string]interface{}{
+				"type": "user", "message": map[string]interface{}{"content": "filler " + strings.Repeat("f", 2000)},
+			}))
+		}
+		lines = append(lines, tfAsstText("msgBig", bigText), tfAsstToolUse("msgBig", "toolu_big"))
+		path := writeTranscript(t, lines...)
+		_, text, hasText, lineWritten := TailFindToolUse(path, "toolu_big")
+		if !lineWritten || !hasText {
+			t.Fatalf("got hasText=%v lineWritten=%v, want true true", hasText, lineWritten)
+		}
+		if text != bigText {
+			t.Fatalf("text corrupted across the chunk boundary: got len=%d want len=%d", len(text), len(bigText))
+		}
+	})
 }

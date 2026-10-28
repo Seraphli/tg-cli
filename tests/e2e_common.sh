@@ -150,6 +150,65 @@ reconstruct_tg_full_text() {
   '
 }
 
+# Shared comparison methodology for streaming-alignment assertions (v43/v44/v45): compares an
+# intermediate render against the SAME message's own FINAL render, so no markdown/HTML rendering
+# needs to be reimplemented in bash — a literal/marker-substring compare fails on correctly-rendered
+# rich HTML (e.g. a "Here is a nested list:" intermediate vs its finalized "<p>Here is a nested
+# list:</p><ul>..." final has no literal/prefix relationship at the markup level).
+#
+# body(full_text) — reads full_text (one render's reconstructed multi-line text, collected the SAME
+# way reconstruct_tg_full_text collects per-chunk continuation lines above) from stdin, writes to
+# stdout everything AFTER the header's closing "</details>" marker. A render with no "</details>"
+# marker (a plain streamed reply has no collapsible header) is returned unchanged.
+body() {
+  python3 -c '
+import sys
+t = sys.stdin.read()
+i = t.find("</details>")
+sys.stdout.write(t[i + len("</details>"):] if i != -1 else t)
+'
+}
+
+# visible(x) — reads x from stdin, writes to stdout: HTML tags stripped, HTML entities decoded, and
+# ALL whitespace removed. Used to compare rendered content independently of markup/whitespace noise.
+visible() {
+  python3 -c '
+import sys, re, html
+t = sys.stdin.read()
+t = re.sub(r"<[^>]*>", "", t)
+t = html.unescape(t)
+sys.stdout.write(re.sub(r"\s+", "", t))
+'
+}
+
+# allowed_cuts(final_body) — reads final_body (a FINAL render, already passed through body()) from
+# stdin, writes to stdout every character offset right after a closing tag that brings the HTML
+# tag-depth back to 0 (void tags br/hr/img are ignored — they never open a nesting level), one per
+# line, plus len(final_body) as the last line. A final_body with no block-level tag at all (e.g. a
+# single paragraph with no "\n\n") yields exactly one cut: the whole body.
+allowed_cuts() {
+  python3 -c '
+import sys, re
+t = sys.stdin.read()
+void = {"br", "hr", "img"}
+depth = 0
+cuts = []
+for m in re.finditer(r"<(/?)([a-zA-Z0-9]+)[^>]*>", t):
+    closing = m.group(1) == "/"
+    name = m.group(2).lower()
+    if name in void:
+        continue
+    if closing:
+        depth -= 1
+        if depth == 0:
+            cuts.append(m.end())
+    else:
+        depth += 1
+cuts.append(len(t))
+sys.stdout.write("\n".join(str(c) for c in cuts))
+'
+}
+
 inject_prompt() {
   local text="$1"
   local image="${2:-}"
@@ -359,14 +418,52 @@ check_typing_continuity() {
   local t1_epoch t2_epoch
   t1_epoch=$(date -d "$t1_ts" +%s 2>/dev/null || echo 0)
   t2_epoch=$(date -d "$t2_ts" +%s 2>/dev/null || echo 0)
-  # Busy segments from the BOT log busy-status lifecycle within [T1,T2]. WHY: a mimo dump-at-Stop chunk
-  # gap makes a mid-turn IDLE island where the 3s typing ticker BY DESIGN does not send; asserting typing
-  # gaps across islands asserts against the design. A busy segment = the route was busy: START at
-  # "busy status sent", continues through edited/re-floated, END at "busy status grace start" (the bot idle
-  # signal; fallback "deleted"); a later "sent" opens a new segment. Segments come from bot.log only, so
-  # typing.log gains no new coupling. E2E per-run isolation => one active CC route per phase, so every
-  # in-window busy-status line belongs to this turn's route (no route arg threaded through the callers).
+  # Busy segments from the BOT log busy-status lifecycle, anchored to [T1,T2] but with ONE exception at
+  # the start: a busy status is "showing at T1" if it was sent before T1, not yet closed (no grace
+  # start/deleted for it) before T1, and has further activity (edited/re-floated/grace start/deleted) at
+  # or after T1 -- t1_epoch/t2_epoch come from the CLI's own UserPromptSubmit/end-event hook (codex, in
+  # the failing run), not from the 1s busy-status tick that reads the CLI's pane (cmd/bot_busy.go:32,
+  # cmd/helpers/session.go:118-128); the two are independent clocks with nothing ordering them; without
+  # this exception a "sent" landing a moment before T1 is silently dropped and the turn shows zero busy
+  # coverage even though it was busy the whole time. The liveness check guards against picking up an
+  # ABANDONED status from an earlier phase that was never closed (619/1776 "sent" lines across preserved
+  # logs have no close at all). Matching is by sequence order (most recent sent at/before T1, then any
+  # busy line at/after T1 before the next sent) rather than by msg_id: a re-floated line logs only its
+  # new_msg_id (cmd/bot_busy.go:435), so msg_id matching would miss a status that re-floats after T1
+  # before its first edit; sequence order also matches the function's existing one-route-per-phase
+  # assumption. Once a segment is open (pre-seeded below, or opened in-window further down), it continues
+  # through edited/re-floated, ends at "busy status grace start" (the bot idle signal; fallback
+  # "deleted"); a later "sent" opens a new segment. Segments come from bot.log only, so typing.log gains
+  # no new coupling. E2E per-run isolation => one active CC route per phase, so every busy-status line
+  # belongs to this turn's route (no route arg threaded through the callers).
   local seg_starts=() seg_ends=() busy_seconds=0 cur_start=""
+  local pre_epoch="" pre_closed="false" pre_touched="false" pre_in_lifecycle="false"
+  while IFS= read -r bl; do
+    if [ -z "$bl" ]; then continue; fi
+    local pts pepoch
+    pts=$(echo "$bl" | grep -oP '^\[\K[^]]+' || true)
+    if [ -z "$pts" ]; then continue; fi
+    pepoch=$(date -d "$pts" +%s 2>/dev/null || echo "")
+    if [ -z "$pepoch" ]; then continue; fi
+    if grep -q "busy status sent" <<< "$bl"; then
+      if [ "$pepoch" -le "$t1_epoch" ]; then
+        pre_epoch="$pepoch"; pre_closed="false"; pre_touched="false"; pre_in_lifecycle="true"
+      else
+        pre_in_lifecycle="false"
+      fi
+    elif [ "$pre_in_lifecycle" = "true" ] && grep -qE "busy status (edited|re-floated|grace start|deleted)" <<< "$bl"; then
+      if [ "$pepoch" -le "$t1_epoch" ]; then
+        if grep -qE "busy status (grace start|deleted)" <<< "$bl"; then
+          pre_closed="true"; pre_in_lifecycle="false"
+        fi
+      else
+        pre_touched="true"
+      fi
+    fi
+  done <<< "$(grep -E 'busy status (sent|edited|re-floated|grace start|deleted)' "$LOG_FILE" 2>/dev/null || true)"
+  if [ -n "$pre_epoch" ] && [ "$pre_closed" = "false" ] && [ "$pre_touched" = "true" ]; then
+    cur_start="$pre_epoch"
+  fi
   while IFS= read -r bl; do
     if [ -z "$bl" ]; then continue; fi
     local bts bepoch
@@ -375,9 +472,9 @@ check_typing_continuity() {
     bepoch=$(date -d "$bts" +%s 2>/dev/null || echo "")
     if [ -z "$bepoch" ]; then continue; fi
     if [ "$bepoch" -lt "$t1_epoch" ] || [ "$bepoch" -gt "$t2_epoch" ]; then continue; fi
-    if echo "$bl" | grep -q "busy status sent"; then
+    if grep -q "busy status sent" <<< "$bl"; then
       if [ -z "$cur_start" ]; then cur_start="$bepoch"; fi
-    elif echo "$bl" | grep -qE "busy status (grace start|deleted)"; then
+    elif grep -qE "busy status (grace start|deleted)" <<< "$bl"; then
       if [ -n "$cur_start" ]; then
         seg_starts+=("$cur_start"); seg_ends+=("$bepoch")
         busy_seconds=$((busy_seconds + bepoch - cur_start)); cur_start=""
@@ -749,7 +846,7 @@ ensure_infrastructure() {
   # mutated whitelist into every LATER phase (the F1->F2/F4 cascade). Re-baselining these 3 fields at the
   # top of every phase removes that at its source. config.json is created only by setup_hooks, so this MUST
   # run at the tail (after bootstrap in a standalone run; immediately in an orchestrated run, where e2e.sh
-  # already created config.json). Written ATOMICALLY (temp file + os.replace, the phase13:378-386 template)
+  # already created config.json). Written ATOMICALLY (temp file + os.replace, the phase13:384-392 template)
   # because the bot daemon reads config.json continuously; load-merge preserves claudeCommand /
   # paginationMaxRunes. A phase that intentionally mutates these fields (phase13/26/31) does so AFTER this
   # baseline, so it is unaffected.

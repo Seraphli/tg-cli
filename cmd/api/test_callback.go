@@ -336,6 +336,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			SenderID     int64  `json:"sender_id"`
 			Text         string `json:"text"`
 			ReplyToMsgID int    `json:"reply_to_msg_id"`
+			MsgID        int    `json:"msg_id"`
 			Document     *struct {
 				FileID   string `json:"file_id"`
 				FileName string `json:"file_name"`
@@ -344,6 +345,9 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				FileID   string `json:"file_id"`
 				FileName string `json:"file_name"`
 			} `json:"audio"`
+			Voice *struct {
+				FileID string `json:"file_id"`
+			} `json:"voice"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -354,8 +358,12 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			chatType = "private" // explicit default; the ReplyTo /p route does not depend on it
 		}
 		synthID := int(atomic.AddInt64(&testUpdateSeq, 1))
+		msgID := synthID
+		if req.MsgID != 0 {
+			msgID = req.MsgID
+		}
 		msg := &tele.Message{
-			ID:       synthID,
+			ID:       msgID,
 			Chat:     &tele.Chat{ID: req.ChatID, Type: tele.ChatType(chatType)},
 			Sender:   &tele.User{ID: req.SenderID},
 			ThreadID: req.TopicID,
@@ -370,8 +378,11 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 		if req.Audio != nil {
 			msg.Audio = &tele.Audio{File: tele.File{FileID: req.Audio.FileID}, FileName: req.Audio.FileName}
 		}
-		logger.Info(fmt.Sprintf("Test update: synth_id=%d chat=%d type=%s sender=%d text=%q reply_to=%d has_doc=%t has_audio=%t",
-			synthID, req.ChatID, chatType, req.SenderID, req.Text, req.ReplyToMsgID, req.Document != nil, req.Audio != nil))
+		if req.Voice != nil {
+			msg.Voice = &tele.Voice{File: tele.File{FileID: req.Voice.FileID}}
+		}
+		logger.Info(fmt.Sprintf("Test update: synth_id=%d msg_id=%d chat=%d type=%s sender=%d text=%q reply_to=%d has_doc=%t has_audio=%t has_voice=%t",
+			synthID, msgID, req.ChatID, chatType, req.SenderID, req.Text, req.ReplyToMsgID, req.Document != nil, req.Audio != nil, req.Voice != nil))
 		// Dispatch through the REAL poller entry so bot.Use markIncoming middleware +
 		// command/media routing run exactly as in production. Dispatch is async
 		// (Synchronous unset), so fire-and-return {ok:true}.

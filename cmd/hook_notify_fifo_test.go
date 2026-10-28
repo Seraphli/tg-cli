@@ -80,7 +80,7 @@ func postHookNotifyFIFO(t *testing.T, srv *httptest.Server, event string, payloa
 	}
 }
 
-// TestHookNotify_SessionStart_OnMessageFIFO asserts the SessionStart notification (register.go ~114, the
+// TestHookNotify_SessionStart_OnMessageFIFO asserts the SessionStart notification (register.go ~117, the
 // ~20-min registration blocker under a TG flood) is enqueued onto the Message FIFO via DispatchAsync,
 // not sent inline on the Hook FIFO.
 func TestHookNotify_SessionStart_OnMessageFIFO(t *testing.T) {
@@ -123,7 +123,7 @@ func TestHookNotify_SessionStart_OnMessageFIFO(t *testing.T) {
 }
 
 // TestHookNotify_AgentInterrupted_OnMessageFIFO asserts the agent_idle/aborted -> AgentInterrupted
-// notification (register.go ~470) is enqueued onto the Message FIFO, not sent inline on the Hook FIFO.
+// notification (register.go ~473) is enqueued onto the Message FIFO, not sent inline on the Hook FIFO.
 func TestHookNotify_AgentInterrupted_OnMessageFIFO(t *testing.T) {
 	release := make(chan struct{})
 	closeOnce := sync.Once{}
@@ -165,7 +165,7 @@ func TestHookNotify_AgentInterrupted_OnMessageFIFO(t *testing.T) {
 }
 
 // TestHookNotify_AgentError_OnMessageFIFO asserts the agent_idle/error -> AgentError notification
-// (register.go ~473) is enqueued onto the Message FIFO, not sent inline on the Hook FIFO.
+// (register.go ~476) is enqueued onto the Message FIFO, not sent inline on the Hook FIFO.
 func TestHookNotify_AgentError_OnMessageFIFO(t *testing.T) {
 	release := make(chan struct{})
 	closeOnce := sync.Once{}

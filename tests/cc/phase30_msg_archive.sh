@@ -143,9 +143,10 @@ pass "TC30-5: SessionStart hook recorded in hook_events with valid JSON payload"
 # TC30-6 — Change 2 join: an assistant message (streamed) links hook_events to its messages row via the
 # CC message_id. cc_message_id is populated ONLY by the incremental Stream-send path; a reply short enough
 # to burst coincident with Stop is delivered via Stop direct-send and records NO cc_message_id. f21: elicit
-# a substantially LONG multi-line reply so generation spans multiple stream throttle windows and streams
-# incrementally, then assert a messages row with a non-empty cc_message_id joins to a hook_events row on
-# cc_message_id = message_id.
+# a substantially LONG multi-line reply so the stream-send path records a cc_message_id -- in practice this
+# reply renders ONCE, at finalize (all deltas merge into a single send after they finish arriving and the
+# Stop hook runs; see v44 below), not incrementally across multiple throttle windows -- then assert a
+# messages row with a non-empty cc_message_id joins to a hook_events row on cc_message_id = message_id.
 # ---------------------------------------------------------------------------------------------------
 echo ""
 echo "  [TC30-6] hook<->message join via cc_message_id"
@@ -160,6 +161,70 @@ TC6_JOIN=$(sq "SELECT COUNT(*) FROM messages m JOIN hook_events h ON m.cc_messag
 echo "  DEBUG: TC30-6 join rows (messages.cc_message_id = hook_events.message_id) = $TC6_JOIN"
 [ "$TC6_JOIN" -ge 1 ] || fail "TC30-6: a streamed message's cc_message_id did not join to any hook_events.message_id"
 pass "TC30-6: streamed assistant message links to its hook events via cc_message_id (join rows=$TC6_JOIN)"
+
+# v44: SAME rule as v43 (paragraph-aligned intermediate render), applied to the ten-languages reply.
+# This reply has no "\n\n" anywhere, so its final body has no block-level tag at all and
+# allowed_cuts(final_body) contains exactly ONE cut (the whole body) -- meaning the rule is satisfiable
+# only with ZERO intermediate renders (a genuinely-intermediate/partial render cannot equal the FULL
+# final text while still growing). No separate "zero sends" rule is written; the generic rule already
+# covers this case.
+V44_MIDS=$(sq "SELECT DISTINCT cc_message_id FROM messages WHERE id>$BASE_ID_JOIN AND cc_message_id != ''")
+V44_LOGS=$(cat "$LOG_FILE")
+V44_FAIL=""
+for V44_MID in $V44_MIDS; do
+  [ -z "$V44_MID" ] && continue
+  V44_RENDERS=$(printf '%s\n' "$V44_LOGS" | MID="$V44_MID" python3 -c '
+import sys, os, re, json
+mid = os.environ["MID"]
+pat = re.compile(r"Stream (?:send|edit):.*message_id=" + re.escape(mid) + r"(?: |$).*full_text:")
+ts_pat = re.compile(r"^\[\d{4}-")
+renders = []
+cur = None
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    m = pat.search(line)
+    if m:
+        if cur is not None:
+            renders.append(cur)
+        rest = line[m.end():]
+        cur = (rest + "\n") if rest else ""
+        continue
+    if cur is not None:
+        if ts_pat.match(line):
+            renders.append(cur)
+            cur = None
+        else:
+            cur += line + "\n"
+if cur is not None:
+    renders.append(cur)
+print(json.dumps(renders))
+')
+  V44_COUNT=$(printf '%s' "$V44_RENDERS" | jq 'length')
+  [ "$V44_COUNT" -le 1 ] && continue  # 0 or 1 render -> zero intermediate renders, vacuous
+  V44_FINAL=$(printf '%s' "$V44_RENDERS" | jq -r '.[-1]')
+  V44_FINAL_BODY=$(printf '%s' "$V44_FINAL" | body)
+  V44_CUTS=$(printf '%s' "$V44_FINAL_BODY" | allowed_cuts)
+  V44_N=$((V44_COUNT - 1))
+  for ((v44i = 0; v44i < V44_N; v44i++)); do
+    V44_R=$(printf '%s' "$V44_RENDERS" | jq -r --argjson i "$v44i" '.[$i]')
+    V44_R_VIS=$(printf '%s' "$V44_R" | body | visible)
+    V44_MATCHED=0
+    while IFS= read -r V44_C; do
+      [ -z "$V44_C" ] && continue
+      V44_PREFIX_VIS=$(printf '%s' "${V44_FINAL_BODY:0:V44_C}" | visible)
+      if [ "$V44_R_VIS" = "$V44_PREFIX_VIS" ]; then V44_MATCHED=1; break; fi
+    done <<< "$V44_CUTS"
+    if [ "$V44_MATCHED" -ne 1 ]; then
+      V44_FAIL="cc_message_id=$V44_MID intermediate render #$v44i"
+      echo "  DEBUG v44: $V44_FAIL does not align to any allowed paragraph-boundary cut"
+    fi
+  done
+done
+if [ -z "$V44_FAIL" ]; then
+  pass "v44: no-boundary reply has zero (or fully-aligned) intermediate renders against its final render"
+else
+  record_fail "v44: $V44_FAIL does not align to any allowed paragraph-boundary cut of its message's final render"
+fi
 
 echo ""
 echo "  Phase 30 complete."

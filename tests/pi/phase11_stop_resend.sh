@@ -65,7 +65,7 @@ start_pi "e2e-pi-11"
 
 MARKER="ALPHA_MARKER_ONE_TWO_THREE"
 
-# Fetch the initial pi SID before the first f6_new_reset (mirrors phase15:71). f6_new_reset reads $SID as
+# Fetch the initial pi SID before the first f6_new_reset (mirrors phase15:72). f6_new_reset reads $SID as
 # SID_BEFORE, so it MUST be bound before the first call, else `set -u` crashes (phase11 FAIL-1, r1).
 SID=$(curl -s "http://127.0.0.1:$TEST_PORT/session/list" | python3 -c '
 import sys, json
@@ -120,7 +120,7 @@ for _attempt in 1 2 3; do
   # the first text delta); same total timeout budget (TIMEOUT*5 iterations x 0.2s).
   UPS_SEEN=false
   for i in $(seq 1 $((TIMEOUT * 5))); do
-    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[UserPromptSubmit\]:"; then UPS_SEEN=true; break; fi
+    if grep -q "Raw hook payload \[UserPromptSubmit\]:" <<< "$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE")"; then UPS_SEEN=true; break; fi
     sleep 0.2
   done
   if [ "$UPS_SEEN" != true ]; then echo "  F8: Run B UserPromptSubmit never fired on attempt $_attempt/3 — retrying the sequence"; continue; fi
@@ -129,7 +129,7 @@ for _attempt in 1 2 3; do
   # Wait for run B to settle (agent_idle after the abort).
   _STOP_SEEN=false
   for i in $(seq 1 90); do
-    if tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then _STOP_SEEN=true; break; fi
+    if grep -q "Raw hook payload \[agent_idle\]:" <<< "$(tail -n +"$((LOG_B_BEFORE + 1))" "$LOG_FILE")"; then _STOP_SEEN=true; break; fi
     sleep 1
   done
   if [ "$_STOP_SEEN" != true ]; then echo "  F8: Run B never settled (no agent_idle) on attempt $_attempt/3 — retrying the sequence"; continue; fi
@@ -178,7 +178,7 @@ set -eo pipefail
 # aborted run posts no Stop -> no FinalizeNoEntry -> no direct_send; a regression that wrongly re-emitted a Stop
 # with the stale body WOULD trip it), and (ii) the Round-4 pi abort phase (v17), which POSITIVELY asserts no Stop
 # payload for both abort shapes. This comment is the record; see SUMMARY.md round notes.
-RUNB_STOP=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
+RUNB_STOP=$(awk '/Raw hook payload \[agent_idle\]:/{print; exit}' <<< "$SLICE_B")
 echo "  DEBUG: run B Stop payload (first 220 chars): ${RUNB_STOP:0:220}"
 [ -n "$RUNB_STOP" ] || fail "pi Item1: could not locate run B's terminal payload (no agent_idle in run B's slice)"
 set +eo pipefail

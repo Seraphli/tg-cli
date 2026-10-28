@@ -21,7 +21,7 @@ wait_for_log_pattern() {
   local label="${4:-pattern}"
   local elapsed=0
   while [ $elapsed -lt $timeout ]; do
-    if tail -n +"$((since + 1))" "$LOG_FILE" | grep -qE "$pattern" 2>/dev/null; then
+    if grep -qE "$pattern" <<< "$(tail -n +"$((since + 1))" "$LOG_FILE")" 2>/dev/null; then
       return 0
     fi
     sleep 1
@@ -63,7 +63,7 @@ pane_log "[busy] TC-a AFTER inject"
 if wait_for_log_pattern "$LOG_BEFORE_TCA" "busy status sent chat=" 30 "TC-a status send"; then
   pass "TC-a: busy status sent log line found"
   # Verify disable_notification via SendOptions (bot log shows the sent message).
-  if tail -n +"$((LOG_BEFORE_TCA + 1))" "$LOG_FILE" | grep -q "busy status sent" 2>/dev/null; then
+  if grep -q "busy status sent" <<< "$(tail -n +"$((LOG_BEFORE_TCA + 1))" "$LOG_FILE")" 2>/dev/null; then
     pass "TC-a: busy status message created (muted send confirmed)"
   else
     fail "TC-a: busy status sent marker missing"
@@ -137,8 +137,7 @@ ESC_TARGET_TCB=$(printf '%s' "$E2E_PANE" | python3 -c "import sys,re; print(re.e
 _tt_elapsed=0
 _tt_found=false
 while [ $_tt_elapsed -lt 20 ]; do
-  if tail -n +"$((TYPING_BEFORE_TCB + 1))" "$TYPING_LOG_FILE" 2>/dev/null \
-      | grep -qE "target=$ESC_TARGET_TCB .*paneRunning=true sending=true" 2>/dev/null; then
+  if grep -qE "target=$ESC_TARGET_TCB .*paneRunning=true sending=true" <<< "$(tail -n +"$((TYPING_BEFORE_TCB + 1))" "$TYPING_LOG_FILE" 2>/dev/null)" 2>/dev/null; then
     _tt_found=true
     break
   fi
@@ -173,10 +172,10 @@ REFLOAT_NEW_ID=$(echo "$WIN" | grep -oP "busy status re-floated chat=$CHAT topic
 # OWNED = status-owned ids across the WHOLE CHAT (all topics) — a TG send line has no topic,
 # so chat-wide exclusion is the only safe trigger filter.
 OWNED=$(echo "$WIN" | grep -oP "busy status sent chat=$CHAT topic=[0-9]+ msg_id=\K[0-9]+|busy status re-floated chat=$CHAT topic=[0-9]+ new_msg_id=\K[0-9]+" | sort -u)
-TRIGGER_MSG_ID=$(echo "$WIN" | awk -v owned="$OWNED" -v chat="$CHAT" -v topic="$TOPIC" '
+TRIGGER_MSG_ID=$(awk -v owned="$OWNED" -v chat="$CHAT" -v topic="$TOPIC" '
   BEGIN { n=split(owned,a,"\n"); for(i=1;i<=n;i++) own[a[i]]=1 }
   index($0, "TG send: chat=" chat " ") { if (match($0,/msg_id=[0-9]+/)) { id=substr($0,RSTART+7,RLENGTH-7); if (!(id in own)) last=id } }
-  index($0, "busy status re-floated chat=" chat " topic=" topic " ") { print last; exit }')
+  index($0, "busy status re-floated chat=" chat " topic=" topic " ") { print last; exit }' <<< "$WIN")
 if [ -z "$REFLOAT_NEW_ID" ] || [ -z "$TRIGGER_MSG_ID" ]; then
   fail "TC-b: no genuine route-scoped trigger/refloat (chat=$CHAT refloat=$REFLOAT_NEW_ID trigger=$TRIGGER_MSG_ID)"
 fi
@@ -265,7 +264,7 @@ done
 # post-truncation TC-d/e/f segment. This uses validate_phase_log (NOT validate_phase_inline): it does NOT touch
 # .phase-validated, so the trap's inline validation still fires and run_phase's fallback stays gated (no
 # double-count, flag protocol intact).
-validate_phase_log "phase31 pre-restart" "${PHASE_LOG_BEFORE:-0}"
+( validate_phase_log "phase31 pre-restart" "${PHASE_LOG_BEFORE:-0}" ) || true
 start_bot
 # f15: re-baseline the phase offset to 0 (script-local; the EXIT-trap validate_phase_inline reads it in THIS
 # same process) so the final trap validation covers the post-truncation TC-d/e/f content, not an empty slice.
@@ -315,7 +314,7 @@ wait_for_idle
 pane_log "[busy] TC-e AFTER idle"
 
 # Must NOT have any busy status sent line.
-if tail -n +"$((LOG_BEFORE_TCE + 1))" "$LOG_FILE" | grep -q "busy status sent" 2>/dev/null; then
+if grep -q "busy status sent" <<< "$(tail -n +"$((LOG_BEFORE_TCE + 1))" "$LOG_FILE")" 2>/dev/null; then
   fail "TC-e: busy status was sent despite busyIndicator=false"
 else
   pass "TC-e: no busy status sent with busyIndicator=false"

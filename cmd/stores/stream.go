@@ -832,16 +832,19 @@ func (s *StreamStore) SetLastToolNotify(sessionID, promptID string) {
 	ss.LastToolNotify = ToolNotifyMark{PromptID: promptID, At: time.Now()}
 }
 
-// GetLastToolNotify returns the last recorded tool-notify mark (ok=false if none recorded yet).
-func (s *StreamStore) GetLastToolNotify(sessionID string) (ToolNotifyMark, bool) {
+// GetAndClearLastToolNotify atomically reads+clears the last recorded tool-notify mark (ok=false if none
+// recorded yet), per the same take-and-clear pattern as TakeNewTextSinceTool/TakeSendBelowSinceTool. Fix C
+// option 3: a second same-prompt late-MD check must find nothing, since the mark was already consumed by the
+// first (replaces the read-only GetLastToolNotify, which had no other caller — confirmed via grep).
+func (s *StreamStore) GetAndClearLastToolNotify(sessionID string) (ToolNotifyMark, bool) {
 	ss := s.lookup(sessionID)
 	if ss == nil {
 		return ToolNotifyMark{}, false
 	}
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
-	if ss.LastToolNotify.At.IsZero() {
-		return ToolNotifyMark{}, false
-	}
-	return ss.LastToolNotify, true
+	mark := ss.LastToolNotify
+	ok := mark.At != (time.Time{})
+	ss.LastToolNotify = ToolNotifyMark{}
+	return mark, ok
 }

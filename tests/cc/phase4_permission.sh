@@ -20,6 +20,32 @@ pane_log "[permission] BEFORE permission prompt"
 inject_prompt "Answer this question first in 2 sentences: what does the bash redirect operator '>' do when used with echo? After answering, use the Bash tool to run this exact command: echo perm_test_ok > /tmp/tg-cli-perm-test.txt. Run only this one command and nothing else, do not verify or cat the file."
 pane_log "[permission] AFTER sending permission prompt"
 
+# TC-perm-default: the just-started session must begin in "default" permission mode (CC 2.1.261+
+# defaults to "auto" otherwise, which never emits PermissionRequest — root cause A). Read it from the
+# first UserPromptSubmit raw hook payload, not the transcript file: CC does not create the transcript
+# file until the first prompt is actually submitted (confirmed directly: run 588312/session 68243970,
+# SessionStart hook fired 20:43:07 but the transcript's birth time per stat is 20:43:22.452, matching
+# the first UserPromptSubmit at 20:43:22 — a 15s gap), so reading a transcript field right after
+# start_claude (as the first draft of this fix did, with only a 2s sleep) is far too early and the
+# assertion goes red even with the cc_common.sh fix applied. inject_prompt only confirms the
+# inject/message API call succeeded, not that CC has processed the prompt yet, so poll (bounded by
+# $TIMEOUT, same idiom as the permission-wait loop below) for the raw payload to appear.
+PERM_DEFAULT_MODE=""
+ELAPSED_PERM_MODE=0
+while [ $ELAPSED_PERM_MODE -lt $TIMEOUT ]; do
+  PERM_DEFAULT_MODE=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" \
+    | grep -m1 'Raw hook payload \[UserPromptSubmit\]' \
+    | grep -oE '"permission_mode":"[^"]*"' | head -1 | sed 's/"permission_mode":"//;s/"$//' || true)
+  [ -n "$PERM_DEFAULT_MODE" ] && break
+  sleep 2
+  ELAPSED_PERM_MODE=$((ELAPSED_PERM_MODE + 2))
+done
+if [ "$PERM_DEFAULT_MODE" != "default" ]; then
+  fail "TC-perm-default: session started in permission_mode=$PERM_DEFAULT_MODE, expected default"
+else
+  pass "TC-perm-default: session started in permission_mode=default"
+fi
+
 # Wait for permission request in bot log
 ELAPSED=0
 PERM_FOUND=false
@@ -44,7 +70,7 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
 
   # TC9 rich migration (v9): PermissionRequest is sent via sendRichMessage → the sent marker
   # carries fmt=rich. Guards against reverting the permission send to legacy HTML mode.
-  if tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE" | grep -q "Permission request sent:.*fmt=rich" 2>/dev/null; then
+  if grep -q "Permission request sent:.*fmt=rich" <<< "$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")" 2>/dev/null; then
     pass "TC9: PermissionRequest sent via rich message path (fmt=rich)"
   else
     fail "TC9: Permission request sent marker missing fmt=rich (expected rich message path)"

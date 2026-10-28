@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,7 +32,7 @@ func allowChat(t *testing.T, chatID int64) {
 func newRoutedBotState(t *testing.T) (*tele.Bot, *types.BotState) {
 	t.Helper()
 	setupTestConfig(t, config.AppConfig{VoicePrefix: "🗣️"})
-	bot, _ := newCapturingBot(t)
+	bot, _ := newTrackingBot(t)
 	// MergeBuffers is touched by processUserInput's very first line (the non-audio Document inject path
 	// dispatches into it) even when no merge is active.
 	bs := &types.BotState{Bot: bot, MergeBuffers: stores.NewMergeBufferStore(t.TempDir())}
@@ -143,11 +142,6 @@ func TestAudioRouting_DispatchMatrix(t *testing.T) {
 	})
 }
 
-// TestVretryCallback_RedeliversAndRoutesByCapturedTarget covers T6 Group D#11 (i)-(iii): a real "vretry"
-// callback dispatch re-downloads V's (the original audio message's) FileID, forces the payload-encoded
-// engine into transcribeWithEngineFn, and hands off to processUserInputFn with a synthetic context whose
-// ReplyTo/ThreadID are the captured N.ID/threadID and whose Message().ID is V.ID (A9: recordPending/
-// sendFeedback must use V.ID, never 0).
 func TestVretryCallback_RedeliversAndRoutesByCapturedTarget(t *testing.T) {
 	origDL, origTWE, origPUI := downloadAudio, transcribeWithEngineFn, processUserInputFn
 	t.Cleanup(func() { downloadAudio, transcribeWithEngineFn, processUserInputFn = origDL, origTWE, origPUI })
@@ -162,13 +156,13 @@ func TestVretryCallback_RedeliversAndRoutesByCapturedTarget(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			assertAudioQueueEmpty(t)
+			pinStatusClock(t)
 			setupTestConfig(t, config.AppConfig{VoicePrefix: "🗣️"})
-			bot, bodies := newCapturingBot(t)
+			bot, tc := newTrackingBot(t)
 			bs := &types.BotState{Bot: bot}
 			RegisterCallbackHandlers(bs)
 
-			// V: the ORIGINAL audio message. Single-level ReplyTo==nil (a nested fixture would hide the
-			// A1 bug per the plan's explicit instruction).
 			V := &tele.Message{ID: 1001, Chat: &tele.Chat{ID: 500, Type: tele.ChatPrivate}, Voice: &tele.Voice{File: tele.File{FileID: "orig-file-abc"}}}
 			failureMsg := &tele.Message{ID: 4004, Chat: V.Chat, ReplyTo: V}
 
@@ -178,9 +172,18 @@ func TestVretryCallback_RedeliversAndRoutesByCapturedTarget(t *testing.T) {
 				return writeTempFile(t, "audio-bytes"), nil
 			}
 			var gotEngine string
-			transcribeWithEngineFn = func(path, engine string) (string, string, error) {
-				gotEngine = engine
-				return "transcribed", engine, nil
+			var atEngine []apiCall
+			engine := "sensevoice"
+			transcribeWithEngineFn = func(path, engine2 string) (string, string, error) {
+				gotEngine = engine2
+				// R1: no t.Fatal/t.Error inside a stub that runs under handleAudioTranscription's own
+				// call stack (Synchronous dispatch) — Fatalf's runtime.Goexit would unwind straight
+				// past close(done)/wg.Wait()/audioQueueLeave(ticket), leaking the ticket and leaving
+				// the ticker goroutine running against a server t.Cleanup has already closed. Just
+				// capture the snapshot here; assert on it after ProcessUpdate returns (S6: proves the
+				// Retrying edit happened strictly BEFORE the engine call).
+				atEngine = tc.snapshot()
+				return "transcribed", engine2, nil
 			}
 			var gotCtx tele.Context
 			var puiCalled int
@@ -190,7 +193,6 @@ func TestVretryCallback_RedeliversAndRoutesByCapturedTarget(t *testing.T) {
 				return nil
 			}
 
-			engine := "sensevoice"
 			data := "\fvretry|" + engine + "|" + strconv.Itoa(c.replyToID) + "|" + strconv.Itoa(c.threadID)
 			bot.ProcessUpdate(tele.Update{Callback: &tele.Callback{Sender: &tele.User{ID: 1}, Message: failureMsg, Data: data}})
 
@@ -213,29 +215,63 @@ func TestVretryCallback_RedeliversAndRoutesByCapturedTarget(t *testing.T) {
 				t.Errorf("routing threadID = %d, want %d (captured)", gotCtx.Message().ThreadID, c.threadID)
 			}
 			if gotCtx.Message().ID != V.ID {
-				t.Errorf("synthetic context Message().ID = %d, want V.ID=%d (A9 struct-copy: recordPending/sendFeedback must use V.ID, not 0)", gotCtx.Message().ID, V.ID)
+				t.Errorf("synthetic context Message().ID = %d, want V.ID=%d (A9 struct-copy)", gotCtx.Message().ID, V.ID)
 			}
-			// The vretry outcome edit must claim success only on an actual successful retry.
-			if joined := strings.Join(*bodies, "\n"); !strings.Contains(joined, "Retried with SenseVoice") {
-				t.Errorf("expected the success outcome edit (Retried with SenseVoice — see reply below), got %q", joined)
+
+			// S6 (TC9(a)): assert on the snapshot captured INSIDE the stub (atEngine), proving the
+			// Retrying edit was already applied strictly BEFORE the engine call started — not just
+			// before the LAST edit, which synchronous dispatch would prove anyway even if
+			// reuseAudioStatus ran after the engine call.
+			if len(atEngine) != 2 {
+				t.Fatalf("calls recorded when the engine call started = %d, want exactly 2 (answerCallbackQuery + the Retrying edit already applied)", len(atEngine))
+			}
+			if atEngine[0].method != "answerCallbackQuery" || atEngine[1].method != "editMessageText" {
+				t.Fatalf("calls recorded when the engine call started = %+v, want answerCallbackQuery then editMessageText", atEngine)
+			}
+			retryAtEngine := decodeCallParams(t, atEngine[1].body)
+			if retryAtEngine["text"] != "⏳ Retrying with SenseVoice… 0s" || retryAtEngine["reply_markup"] != "{}" || atEngine[1].msgID != "4004" {
+				t.Errorf("Retrying edit not yet correctly applied when the engine call started: %+v", retryAtEngine)
+			}
+
+			calls := tc.snapshot()
+			if len(calls) != 3 {
+				t.Fatalf("calls = %d, want exactly 3 (answerCallbackQuery + retry-status edit + final transcript edit), got %+v", len(calls), calls)
+			}
+			if calls[0].method != "answerCallbackQuery" {
+				t.Fatalf("1st call method = %q, want answerCallbackQuery (A6: spinner cleared first)", calls[0].method)
+			}
+			if calls[1].method != "editMessageText" || calls[2].method != "editMessageText" {
+				t.Fatalf("2nd/3rd call methods = %q, %q, want editMessageText, editMessageText (failureMsg is REUSED, never a new send)", calls[1].method, calls[2].method)
+			}
+			retryParams := decodeCallParams(t, calls[1].body)
+			if retryParams["text"] != "⏳ Retrying with SenseVoice… 0s" {
+				t.Errorf("1st edit (retry status) text = %q, want exactly the Retrying-at-0s text", retryParams["text"])
+			}
+			if retryParams["reply_markup"] != "{}" {
+				t.Errorf("1st edit (retry status) reply_markup = %q, want exactly %q (buttons cleared in the SAME edit)", retryParams["reply_markup"], "{}")
+			}
+			finalParams := decodeCallParams(t, calls[2].body)
+			if finalParams["text"] != "🗣️ transcribed" {
+				t.Errorf("2nd edit (final) text = %q, want exactly %q", finalParams["text"], "🗣️ transcribed")
+			}
+			if finalParams["reply_markup"] != "{}" {
+				t.Errorf("2nd edit (final) reply_markup = %q, want exactly %q (no buttons)", finalParams["reply_markup"], "{}")
+			}
+			if calls[1].msgID != "4004" || calls[2].msgID != "4004" {
+				t.Errorf("both edits must target failureMsg (message_id=4004) only — no other message: retry msg_id=%q, final msg_id=%q", calls[1].msgID, calls[2].msgID)
 			}
 		})
 	}
 }
 
-// TestVretryCallback_A9Chain_RetryAlsoFails_PreservesRecovery covers T6 Group D#11's A9 chain + T12: when
-// the forced-local retry ALSO fails, the NEW failure reply must (i) be a reply to V.ID, so a further
-// vretry click can still recover V (Telegram re-attaches V as .ReplyTo of the new failure message), and
-// (ii) carry the full configured-engine retry button set (here whisper only, the sole configured engine)
-// still encoding the ORIGINAL captured N.ID (replyToID), not V.ID or 0 — so the SAME FileID+target chain
-// stays recoverable indefinitely.
 func TestVretryCallback_A9Chain_RetryAlsoFails_PreservesRecovery(t *testing.T) {
+	assertAudioQueueEmpty(t)
+	pinStatusClock(t)
 	origDL, origTWE := downloadAudio, transcribeWithEngineFn
 	t.Cleanup(func() { downloadAudio, transcribeWithEngineFn = origDL, origTWE })
 
-	// whisper is the ONLY configured engine, so the recovery button set on the new failure is {whisper}.
 	setupTestConfig(t, config.AppConfig{VoicePrefix: "🗣️", WhisperPath: "/bin/whisper", ModelPath: "/models/w"})
-	bot, bodies := newCapturingBot(t)
+	bot, tc := newTrackingBot(t)
 	bs := &types.BotState{Bot: bot}
 	RegisterCallbackHandlers(bs)
 
@@ -251,35 +287,38 @@ func TestVretryCallback_A9Chain_RetryAlsoFails_PreservesRecovery(t *testing.T) {
 	data := "\fvretry|sensevoice|" + strconv.Itoa(replyToID) + "|0"
 	bot.ProcessUpdate(tele.Update{Callback: &tele.Callback{Sender: &tele.User{ID: 1}, Message: failureMsg, Data: data}})
 
-	joined := strings.Join(*bodies, "\n")
-	if !strings.Contains(joined, "boom retry-transcribe") {
-		t.Errorf("expected the retry-transcribe error in the new failure reply, got %q", joined)
+	calls := tc.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want exactly 3 (answerCallbackQuery + retry-status edit + new failure edit), got %+v", len(calls), calls)
 	}
-	if !strings.Contains(joined, fmt.Sprintf(`"reply_to_message_id":"%d"`, V.ID)) {
-		t.Errorf("expected the NEW failure reply to be a reply to V.ID=%d, got %q", V.ID, joined)
+	if calls[0].method != "answerCallbackQuery" {
+		t.Fatalf("1st call method = %q, want answerCallbackQuery", calls[0].method)
 	}
-	if !strings.Contains(joined, "vretry|whisper|"+strconv.Itoa(replyToID)+"|0") {
-		t.Errorf("expected the NEW failure's retry button to still carry the captured N.ID=%d (SAME target recovery), got %q", replyToID, joined)
+	// S9 (TC9b "again no other message was sent"): both edits after the spinner-clear target
+	// failureMsg — previously only the LAST call was checked.
+	if calls[1].method != "editMessageText" || calls[2].method != "editMessageText" {
+		t.Fatalf("2nd/3rd call methods = %q, %q, want editMessageText, editMessageText", calls[1].method, calls[2].method)
 	}
-	// Failure-aware outcome edit: when the forced retry's own transcription failed, the button-message
-	// edit must say the retry FAILED with that engine, never claim success.
-	if !strings.Contains(joined, "Retry with SenseVoice failed") {
-		t.Errorf("expected the failure-aware outcome edit (Retry with SenseVoice failed) when the forced retry itself failed, got %q", joined)
+	if calls[1].msgID != "4004" || calls[2].msgID != "4004" {
+		t.Errorf("both edits must target failureMsg (message_id=4004): retry msg_id=%q, final msg_id=%q", calls[1].msgID, calls[2].msgID)
 	}
-	if strings.Contains(joined, "Retried with SenseVoice") {
-		t.Errorf("outcome edit must NOT claim success (Retried with ...) when the forced retry failed, got %q", joined)
+	final := decodeCallParams(t, calls[2].body)
+	if final["text"] != "❌ boom retry-transcribe" {
+		t.Errorf("new failure edit text = %q, want exactly %q", final["text"], "❌ boom retry-transcribe")
+	}
+	if !strings.Contains(final["reply_markup"], "vretry|whisper|"+strconv.Itoa(replyToID)+"|0") {
+		t.Errorf("expected the NEW failure's retry button to still carry the captured N.ID=%d (SAME target recovery), got %q", replyToID, final["reply_markup"])
 	}
 }
 
-// TestVretryCallback_APIForcedPath covers T12: a "vretry" callback carrying engine=api forces "api" into
-// transcribeWithEngineFn (the shared handler dispatches api like any other engine) and the outcome edit
-// uses the "API" label — the boss ruling makes api a first-class retry target, not just the local engines.
 func TestVretryCallback_APIForcedPath(t *testing.T) {
+	assertAudioQueueEmpty(t)
+	pinStatusClock(t)
 	origDL, origTWE, origPUI := downloadAudio, transcribeWithEngineFn, processUserInputFn
 	t.Cleanup(func() { downloadAudio, transcribeWithEngineFn, processUserInputFn = origDL, origTWE, origPUI })
 
 	setupTestConfig(t, config.AppConfig{VoicePrefix: "🗣️"})
-	bot, bodies := newCapturingBot(t)
+	bot, tc := newTrackingBot(t)
 	bs := &types.BotState{Bot: bot}
 	RegisterCallbackHandlers(bs)
 
@@ -302,7 +341,31 @@ func TestVretryCallback_APIForcedPath(t *testing.T) {
 	if gotEngine != "api" {
 		t.Errorf("forced engine reaching transcribeWithEngineFn = %q, want api", gotEngine)
 	}
-	if joined := strings.Join(*bodies, "\n"); !strings.Contains(joined, "Retried with API") {
-		t.Errorf("expected the API-labeled success outcome edit (Retried with API — see reply below), got %q", joined)
+	calls := tc.snapshot()
+	if len(calls) != 3 {
+		t.Fatalf("calls = %d, want exactly 3 (answerCallbackQuery + retry-status edit + final transcript edit), got %+v", len(calls), calls)
+	}
+	if calls[0].method != "answerCallbackQuery" {
+		t.Fatalf("1st call method = %q, want answerCallbackQuery", calls[0].method)
+	}
+	if calls[1].method != "editMessageText" || calls[2].method != "editMessageText" {
+		t.Fatalf("2nd/3rd call methods = %q, %q, want editMessageText, editMessageText (failureMsg is REUSED, never a new send)", calls[1].method, calls[2].method)
+	}
+	if calls[1].msgID != "4004" || calls[2].msgID != "4004" {
+		t.Errorf("both edits must target failureMsg (message_id=4004) only — no other message: retry msg_id=%q, final msg_id=%q", calls[1].msgID, calls[2].msgID)
+	}
+	retryParams := decodeCallParams(t, calls[1].body)
+	if retryParams["text"] != "⏳ Retrying with API… 0s" {
+		t.Errorf("1st edit (retry status) text = %q, want exactly the Retrying-with-API-at-0s text", retryParams["text"])
+	}
+	if retryParams["reply_markup"] != "{}" {
+		t.Errorf("1st edit (retry status) reply_markup = %q, want exactly %q (buttons cleared in the same edit)", retryParams["reply_markup"], "{}")
+	}
+	finalParams := decodeCallParams(t, calls[2].body)
+	if finalParams["text"] != "🗣️ api transcript" {
+		t.Errorf("2nd edit (final) text = %q, want exactly %q", finalParams["text"], "🗣️ api transcript")
+	}
+	if finalParams["reply_markup"] != "{}" {
+		t.Errorf("2nd edit (final) reply_markup = %q, want exactly %q (no buttons)", finalParams["reply_markup"], "{}")
 	}
 }

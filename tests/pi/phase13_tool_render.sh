@@ -57,7 +57,7 @@ printf '%s\n' "$BODIES" | sed 's/^/    /'
 echo "  === END DEBUG ==="
 
 # PRECONDITION: a compact tool line must have rendered (else Item 2 is un-exercised).
-printf '%s\n' "$BODIES" | grep -q "echo $MARK" || fail "pi Item2 PRECONDITION: no rendered compact tool line for the bash call — cannot test the compact-line render"
+grep -q "echo $MARK" <<< "$BODIES" || fail "pi Item2 PRECONDITION: no rendered compact tool line for the bash call — cannot test the compact-line render"
 
 # Item 2: the compact tool line must use the normalized "💻 Bash", not the pre-fix "🔧 bash" default.
 set +eo pipefail

@@ -34,7 +34,7 @@ echo "Long prompt injected, waiting for Claude to respond (expecting single rich
 pane_log "[pagination] AFTER injecting long prompt"
 
 # Wait for any streaming activity (Stream send: or Stream edit:). Mirror wait_for_idle's busy-extend
-# (e2e_common.sh:255-298): a genuinely-slow model (mimo took 194s > 180s in the range run) must not
+# (e2e_common.sh:348-355): a genuinely-slow model (mimo took 194s > 180s in the range run) must not
 # false-fail. On inner-window timeout, diagnose the session; if it is still busy, extend up to 3 more
 # rounds. Break the OUTER loop IMMEDIATELY once STREAM_FOUND is true, before diagnosing.
 STREAM_FOUND=false
@@ -81,7 +81,7 @@ if [ "$STREAM_FOUND" = true ]; then
     pass "Moderate turn produced a single rich stream message (no continuation at RichMaxRunes)"
   fi
   # v10: the single message is delivered via sendRichMessage (fmt=rich on the stream marker).
-  if echo "$NEW_PAGE_LOGS" | grep -qE "Stream (send|edit):.*fmt=rich" 2>/dev/null; then
+  if grep -qE "Stream (send|edit):.*fmt=rich" <<< "$NEW_PAGE_LOGS" 2>/dev/null; then
     pass "Moderate turn streamed via rich message (fmt=rich)"
   else
     fail "Moderate turn stream marker missing fmt=rich (expected rich message)"
@@ -99,7 +99,7 @@ else
   # but no delivery (streaming broken), (c) total no-response.
   LOG_NOW=$(wc -l < "$LOG_FILE")
   PAGE_SLICE=$(tail -n +"$((LOG_BEFORE_PAGE + 1))" "$LOG_FILE")
-  if echo "$PAGE_SLICE" | grep -q "Stop terminal: outcome=direct_send"; then
+  if grep -q "Stop terminal: outcome=direct_send" <<< "$PAGE_SLICE"; then
     pass "Moderate turn delivered via Stop direct_send (model emitted a single final message; incremental-streaming/pagination assertions not exercised this run)"
   elif [ "$LOG_NOW" -gt "$LOG_BEFORE_PAGE" ]; then
     fail "Bot log activity present but no streaming (Stream send:/Stream edit:) found — streaming may be broken"

@@ -231,13 +231,13 @@ fi
 ESC_REGION=$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")
 echo "  DEBUG: ESC_REGION lines: $(echo "$ESC_REGION" | wc -l)"
 
-if echo "$ESC_REGION" | grep -q "&lt;patt&gt;"; then
+if grep -q "&lt;patt&gt;" <<< "$ESC_REGION"; then
   pass "Cron rich-escape: < and > escaped to &lt;/&gt; in notification body"
 else
   fail "Cron rich-escape: &lt;patt&gt; not found in notification body region"
 fi
 
-if echo "$ESC_REGION" | grep -q "&amp;"; then
+if grep -q "&amp;" <<< "$ESC_REGION"; then
   pass "Cron rich-escape: & escaped to &amp; in notification body"
 else
   fail "Cron rich-escape: &amp; not found in notification body region"

@@ -1185,10 +1185,12 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		return c.Respond()
 	})
 
-	// "vretry" callback: one-tap "retry with local model" on a transcription failure reply. Payload is
-	// "<engine>|<replyToID>|<threadID>", captured at failure time so the original routing is restored.
+	// "vretry" callback: a per-engine retry button on the voice status message in its failed state.
+	// Payload is "<engine>|<replyToID>|<threadID>", captured at failure time so the original routing is
+	// restored. The handler edits that same status message in place through the retry.
 	bot.Handle(&tele.InlineButton{Unique: "vretry"}, func(c tele.Context) error {
-		// A6: clear the client spinner BEFORE the (possibly minutes-long) transcription behind transcribeMu.
+		// A6: clear the client spinner BEFORE the (possibly minutes-long) transcription behind the
+		// handler-level FIFO queue (audio_status.go).
 		c.Respond()
 		parts := strings.SplitN(c.Data(), "|", 3)
 		if len(parts) != 3 {
@@ -1227,17 +1229,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		m.ThreadID = threadID
 		synth := bot.NewContext(tele.Update{Message: &m})
 		cfg, _ := config.LoadAppConfig()
-		// The outcome edit must be failure-aware: handleAudioTranscription returns transcribed=false when
-		// the forced-engine retry itself failed (download/transcribe/empty) — in that case the retry did
-		// NOT succeed, and its own error reply (with a further retry button) is sent below.
-		transcribed, _ := handleAudioTranscription(bs, synth, bot, fileID, ext, cfg.VoicePrefix, engine)
-		label := engineLabel(engine)
-		outcome := fmt.Sprintf("🔁 Retried with %s — see reply below.", label)
-		if !transcribed {
-			outcome = fmt.Sprintf("❌ Retry with %s failed — see error below.", label)
-		}
-		_, err := helpers.RetryEdit(bot, c.Message(), outcome, tele.ModeHTML)
-		return err
+		return handleAudioTranscription(bs, synth, bot, fileID, ext, cfg.VoicePrefix, engine, c.Message())
 	})
 
 	bot.Handle(&tele.Btn{Unique: "upgrade"}, func(c tele.Context) error {

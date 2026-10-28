@@ -48,7 +48,7 @@ EXIT_FOUND=false
 while [ $ELAPSED -lt 30 ]; do
   sleep 2
   ELAPSED=$((ELAPSED + 2))
-  if tail -n +"$((LOG_BEFORE_EXIT + 1))" "$LOG_FILE" | grep -q "SessionEnd" 2>/dev/null; then
+  if grep -q "SessionEnd" <<< "$(tail -n +"$((LOG_BEFORE_EXIT + 1))" "$LOG_FILE")" 2>/dev/null; then
     EXIT_FOUND=true
     break
   fi
@@ -68,7 +68,7 @@ while [ $ELAPSED -lt 30 ]; do
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   sleep 2
   PANE_CONTENT=$($TMUX_TEST capture-pane -t "${E2E_PANE%@*}" -p 2>/dev/null || true)
-  if echo "$PANE_CONTENT" | grep -q "$SENTINEL" 2>/dev/null; then
+  if grep -q "$SENTINEL" <<< "$PANE_CONTENT" 2>/dev/null; then
     echo "  Shell is ready."
     break
   fi

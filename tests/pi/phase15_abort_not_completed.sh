@@ -30,7 +30,8 @@ f6_new_reset() {
   local _fail_extra="${2:-}"
   local _echo_extra="${3:-}"
   local _rebuild="${4:-}"
-  wait_for_idle 5 "$E2E_PANE" || true
+  if [ "$(check_session_idle "$E2E_PANE")" = busy ]; then esc_twice; fi
+  wait_for_idle "$TIMEOUT" "$E2E_PANE"
   # Unified LOG anchor: single wc -l capture then mirror to both names. Avoids set -u unbound on _F6_NEW_BEFORE_C.
   _F6_NEW_BEFORE=$(wc -l < "$LOG_FILE")
   _F6_NEW_BEFORE_C="$_F6_NEW_BEFORE"
@@ -91,7 +92,20 @@ esc_twice() { # F5 single Escape abort (isStreaming aborts on first press, 500ms
 wait_for_marker() { # $1=start-line $2=marker-regex $3=max-seconds ; echoes true/false
   local start="$1" rx="$2" max="$3" i
   for i in $(seq 1 "$max"); do
-    if tail -n +"$((start + 1))" "$LOG_FILE" | grep -qE "$rx"; then echo true; return; fi
+    if grep -qE "$rx" <<< "$(tail -n +"$((start + 1))" "$LOG_FILE")"; then echo true; return; fi
+    sleep 1
+  done
+  echo false
+}
+
+wait_for_bash_cmd() { # $1=start-line $2=exact-full-command-value $3=max-seconds ; echoes true/false
+  # Two-stage grep (same convention as phase13:249/phase25:1104): first narrow to PreToolUse lines, then
+  # match the command value with -F (fixed-string) so $CC_WORKDIR's path content is never regex-interpreted.
+  # This is the EXACT fixture command, not a bare tool_name=Bash match (which would catch an unrelated
+  # inspect-before-bash call like `ls -la` or `cat sleeping_beauty.sh`).
+  local start="$1" cmd="$2" max="$3" i
+  for i in $(seq 1 "$max"); do
+    if grep -qF "\"command\":\"$cmd\"" <<< "$(tail -n +"$((start + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]")"; then echo true; return; fi
     sleep 1
   done
   echo false
@@ -119,7 +133,7 @@ pane_log "[pi/item3-A] after abort+settle"
 SLICE_A=$(tail -n +"$((LOG_A + 1))" "$LOG_FILE")
 
 # A.1: the settle payload is agent_idle carrying pi's stopReason "aborted" verbatim.
-AI_A=$(printf '%s\n' "$SLICE_A" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
+AI_A=$(awk '/Raw hook payload \[agent_idle\]:/{print; exit}' <<< "$SLICE_A")
 echo "  DEBUG-A agent_idle (first 240): ${AI_A:0:240}"
 set +eo pipefail
 printf '%s\n' "$AI_A" | grep -q '"stop_reason":"aborted"'
@@ -173,7 +187,7 @@ for _B_attempt in 1 2 3; do
   LOG_B=$(wc -l < "$LOG_FILE")
   pane_log "[pi/item3-B] before inject (bash sleep) attempt=$_B_attempt/3"
   inject_prompt "$_B_F7_PROMPT"
-  if [ "$(wait_for_marker "$LOG_B" 'Raw hook payload \[PreToolUse\]:.*"tool_name":"[Bb]ash"' "$TIMEOUT")" = true ]; then
+  if [ "$(wait_for_bash_cmd "$LOG_B" "bash $CC_WORKDIR/sleeping_beauty.sh" "$TIMEOUT")" = true ]; then
     break
   fi
   if [ "$_B_attempt" -eq 3 ]; then
@@ -196,7 +210,7 @@ pane_log "[pi/item3-B] after abort+settle"
 SLICE_B=$(tail -n +"$((LOG_B + 1))" "$LOG_FILE")
 
 # B.1: agent_idle carries stopReason "error" verbatim (pi's during-tool classification).
-AI_B=$(printf '%s\n' "$SLICE_B" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
+AI_B=$(awk '/Raw hook payload \[agent_idle\]:/{print; exit}' <<< "$SLICE_B")
 echo "  DEBUG-B agent_idle (first 260): ${AI_B:0:260}"
 set +eo pipefail
 printf '%s\n' "$AI_B" | grep -q '"stop_reason":"error"'
@@ -248,7 +262,7 @@ if [ -n "$SID" ]; then
     LOG_C=$(wc -l < "$LOG_FILE")
     pane_log "[pi/item3-C] before inject (bash sleep, will queue an inject then abort) attempt=$_C_attempt/3"
     inject_prompt "$_C_F7_PROMPT"
-    if [ "$(wait_for_marker "$LOG_C" 'Raw hook payload \[PreToolUse\]:.*"tool_name":"[Bb]ash"' "$TIMEOUT")" = true ]; then
+    if [ "$(wait_for_bash_cmd "$LOG_C" "bash $CC_WORKDIR/sleeping_beauty.sh" "$TIMEOUT")" = true ]; then
       break
     fi
     if [ "$_C_attempt" -eq 3 ]; then
@@ -279,10 +293,10 @@ if [ -n "$SID" ]; then
     || fail "pi Item3-C: the queued inject was never delivered after the abort (idle flush did not fire) — interlock broken"
   sleep 1
   SLICE_C=$(tail -n +"$((LOG_C + 1))" "$LOG_FILE")
-  IDLE_LN=$(printf '%s\n' "$SLICE_C" | awk '/state: event=agent_idle .*state=idle/{print NR; exit}')
+  IDLE_LN=$(awk '/state: event=agent_idle .*state=idle/{print NR; exit}' <<< "$SLICE_C")
   # fall back to the agent_idle payload line if the typing-state line is in TYPING_LOG_FILE, not bot.log
-  [ -n "$IDLE_LN" ] || IDLE_LN=$(printf '%s\n' "$SLICE_C" | awk '/Raw hook payload \[agent_idle\]:/{print NR; exit}')
-  DELIVER_LN=$(printf '%s\n' "$SLICE_C" | awk '/flushInjectQueue: .*(merging|inject completed)/{print NR; exit}')
+  [ -n "$IDLE_LN" ] || IDLE_LN=$(awk '/Raw hook payload \[agent_idle\]:/{print NR; exit}' <<< "$SLICE_C")
+  DELIVER_LN=$(awk '/flushInjectQueue: .*(merging|inject completed)/{print NR; exit}' <<< "$SLICE_C")
   echo "  DEBUG-C IDLE_LN=$IDLE_LN DELIVER_LN=$DELIVER_LN QUEUE_LN=$QUEUE_LN"
   if [ -n "$IDLE_LN" ] && [ -n "$DELIVER_LN" ] && [ "$DELIVER_LN" -gt "$IDLE_LN" ]; then
     pass "pi Item3-C: the queued inject was delivered AFTER the abort cleared busy (idle-triggered flush; Items 2+3 interlock)"

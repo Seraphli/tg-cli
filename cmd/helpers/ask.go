@@ -603,7 +603,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 		injErr = injector.InjectText(target, text, shouldSubmit)
 	}
 	if injErr != nil {
-		p.InjectConfirm.Cancel(tmuxTarget)
+		p.InjectConfirm.Cancel(tmuxTarget, ch)
 		if sessionMu != nil {
 			sessionMu.Unlock()
 		}
@@ -629,7 +629,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 				logger.Info(fmt.Sprintf("safeInjectText: AskQ answer content mismatch, target=%s", tmuxTarget))
 			}
 		case <-time.After(30 * time.Second):
-			p.InjectConfirm.Cancel(tmuxTarget)
+			p.InjectConfirm.Cancel(tmuxTarget, res.ch)
 			logger.Info(fmt.Sprintf("safeInjectText: AskQ answer not confirmed (PostToolUse timeout), target=%s", tmuxTarget))
 		}
 		return nil
@@ -777,7 +777,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 				logger.Info(fmt.Sprintf("safeInjectText: UserPromptSubmit content mismatch, target=%s", tmuxTarget))
 			}
 		case <-time.After(10 * time.Second):
-			p.InjectConfirm.Cancel(tmuxTarget)
+			p.InjectConfirm.Cancel(tmuxTarget, res.ch)
 			logger.Debug(fmt.Sprintf("safeInjectText: inject confirmation timeout for target=%s", tmuxTarget))
 		}
 	}
@@ -789,7 +789,7 @@ func safeInjectPhase2(p SafeInjectTextParams, tmuxTarget string, res injectResul
 		return fmt.Errorf("%w for target=%s", ErrInjectNotConfirmed, tmuxTarget)
 	}
 	if !res.shouldSubmit {
-		p.InjectConfirm.Cancel(tmuxTarget)
+		p.InjectConfirm.Cancel(tmuxTarget, res.ch)
 	}
 	return nil
 }

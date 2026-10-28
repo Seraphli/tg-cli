@@ -54,7 +54,7 @@ pass "AskUserQuestion triggered for escape test"
 
 # Rich migration (v9): the AskUserQuestion under ESC-freeze test is sent via sendRichMessage,
 # so its ESC-cancel freeze edit takes the rich (RetryFreezeEditAuto→rich) path.
-if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -q "AskUserQuestion sent:.*fmt=rich" 2>/dev/null; then
+if grep -q "AskUserQuestion sent:.*fmt=rich" <<< "$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")" 2>/dev/null; then
   pass "Escape-test AskUserQuestion sent via rich message path (fmt=rich)"
 else
   fail "Escape-test AskUserQuestion sent marker missing fmt=rich (expected rich message path)"
@@ -175,7 +175,7 @@ pane_log "[escape] followup turn idle"
 
 # Rich-freeze regression guard (v9 ESC-freeze): the AskQ freeze edit after ESC uses the rich
 # (RetryFreezeEditAuto→rich) path; a rich-payload rejection would log an "EDIT failed" line.
-if tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE" | grep -qE "(DoCancelAsk|CancelAskBySnapshot|CleanupPendingState): EDIT failed" 2>/dev/null; then
+if grep -qE "(DoCancelAsk|CancelAskBySnapshot|CleanupPendingState): EDIT failed" <<< "$(tail -n +"$((LOG_BEFORE_ESC + 1))" "$LOG_FILE")" 2>/dev/null; then
   fail "AskUserQuestion rich freeze edit failed after escape (rich edit rejected)"
 else
   pass "AskUserQuestion rich freeze edit succeeded after escape (no EDIT failed)"
@@ -198,7 +198,7 @@ inject_prompt "First, on its own line, print exactly this literal text and nothi
 INT_ELAPSED=0
 INT_BUSY=false
 while [ $INT_ELAPSED -lt 30 ]; do
-  if tail -n +"$((LOG_BEFORE_INT + 1))" "$LOG_FILE" | grep -q "busy status sent chat=" 2>/dev/null; then
+  if grep -q "busy status sent chat=" <<< "$(tail -n +"$((LOG_BEFORE_INT + 1))" "$LOG_FILE")" 2>/dev/null; then
     INT_BUSY=true
     break
   fi
@@ -236,7 +236,7 @@ echo "  /group/text (TC-INT) response: $INT_FU_RESP"
 INT_FU_ELAPSED=0
 INT_FU_FOUND=false
 while [ $INT_FU_ELAPSED -lt $TIMEOUT ]; do
-  if tail -n +"$((LOG_BEFORE_INT_FU + 1))" "$LOG_FILE" | grep -q "Group text API injected" 2>/dev/null; then
+  if grep -q "Group text API injected" <<< "$(tail -n +"$((LOG_BEFORE_INT_FU + 1))" "$LOG_FILE")" 2>/dev/null; then
     INT_FU_FOUND=true
     break
   fi

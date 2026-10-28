@@ -63,7 +63,7 @@ inject_prompt "Reply with exactly one word: hello"
 # Every request hits ECONNREFUSED; pi retries then settles stopReason error. Give the retry loop room.
 AI_SEEN=false
 for i in $(seq 1 120); do
-  if tail -n +"$((LOG_E + 1))" "$LOG_FILE" | grep -q "Raw hook payload \[agent_idle\]:"; then AI_SEEN=true; break; fi
+  if grep -q "Raw hook payload \[agent_idle\]:" <<< "$(tail -n +"$((LOG_E + 1))" "$LOG_FILE")"; then AI_SEEN=true; break; fi
   sleep 1
 done
 [ "$AI_SEEN" = true ] || fail "pi Item3b: the errored run never settled with agent_idle within 120s (retries may still be running, or agent_settled did not fire) — report to note3"
@@ -72,7 +72,7 @@ pane_log "[pi/item3b] after error settle"
 SLICE_E=$(tail -n +"$((LOG_E + 1))" "$LOG_FILE")
 
 # E.1: agent_idle carries stopReason "error" verbatim + a NON-EMPTY error_message (the transport failure text).
-AI_E=$(printf '%s\n' "$SLICE_E" | awk '/Raw hook payload \[agent_idle\]:/{print; exit}')
+AI_E=$(awk '/Raw hook payload \[agent_idle\]:/{print; exit}' <<< "$SLICE_E")
 echo "  DEBUG-E agent_idle (first 300): ${AI_E:0:300}"
 set +eo pipefail
 printf '%s\n' "$AI_E" | grep -q '"stop_reason":"error"'

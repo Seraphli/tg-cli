@@ -427,7 +427,7 @@ func TestTwoReservedMDContend(t *testing.T) {
 	// Two eligible MD Dispatch callers contend for the single reserved slot.
 	for i := 0; i < 2; i++ {
 		go func() {
-			s.DispatchWithMeta("sess", "md", "MessageDisplay", "P", base, func() error { ran.Add(1); return nil })
+			s.DispatchWithMeta("sess", JobInput{Label: "md", Event: "MessageDisplay", PromptID: "P", ArrivedAt: base}, func() error { ran.Add(1); return nil })
 		}()
 	}
 	// Wait so at least one MD is parked at cap before the wait publishes await.

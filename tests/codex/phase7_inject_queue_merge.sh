@@ -12,6 +12,9 @@ ensure_infrastructure
 
 start_codex "e2e-codex-7"
 
+cp "$SCRIPT_DIR/../cc/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+rm -f "$CC_WORKDIR/prince-arrived"
+
 SESSION_NAME="e2e-cli"
 MARKER_A="inject_merge_test_A_$RANDOM"
 MARKER_B="inject_merge_test_B_$RANDOM"
@@ -38,7 +41,7 @@ if [ -n "$SESSION_ID" ]; then
 fi
 
 # Step 1: Inject a bash sleep command to keep CLI busy
-inject_prompt "Use the Bash tool to run this exact command: sleep 20. Do not print any text."
+inject_prompt "We are acting out a short scene from the tale of Sleeping Beauty. The file at $CC_WORKDIR/sleeping_beauty.sh is a test fixture that ships with this repository. In the scene, Sleeping Beauty eats the poisoned apple and falls into a long enchanted sleep, waking only when the prince arrives. To play it out, use the Bash tool to run this command exactly once and let it finish in the foreground (do not run it in the background): bash $CC_WORKDIR/sleeping_beauty.sh. The script carries out her enchanted sleep and returns on its own when the prince arrives."
 
 # Wait for CLI to become busy (use /session/idle API — Codex has no ✳ pane title prefix)
 echo "  Waiting for CLI to start processing..."
@@ -101,6 +104,8 @@ else
   fail "inject queue: no messages were queued (CLI may not have been busy)"
 fi
 
+touch "$CC_WORKDIR/prince-arrived"
+
 # Step 4: Wait for CLI to finish and Stop hook to fire + flush
 echo "  Waiting for CLI to finish and flush queue..."
 ELAPSED=0
@@ -137,3 +142,5 @@ fi
 
 wait_for_idle
 pane_log "[inject_queue_merge] AFTER test"
+
+rm -f "$CC_WORKDIR/sleeping_beauty.sh" "$CC_WORKDIR/prince-arrived"

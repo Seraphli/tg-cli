@@ -91,7 +91,7 @@ if [ "$TC1_FOUND" = true ]; then
   # block or <br> tags — NEVER a bare "\n", which rich_message.html collapses to a single space. The
   # TC1 prompt asks for 5 labeled paragraphs, so the reconstructed sent body must carry <p> and/or <br>.
   TC8_BODY=$(reconstruct_tg_full_text "$(tail -n +"$((LOG_BEFORE_TC1 + 1))" "$LOG_FILE")")
-  if printf '%s' "$TC8_BODY" | grep -qE "<p>|<br>" 2>/dev/null; then
+  if grep -qE "<p>|<br>" <<< "$TC8_BODY" 2>/dev/null; then
     pass "TC8: streamed multi-paragraph body uses <p>/<br> separators (no bare-\\n collapse)"
   else
     fail "TC8: streamed body lacks <p>/<br> separators — multi-line would collapse to one line"
@@ -145,7 +145,7 @@ if [ "$TC2_FOUND" = true ]; then
   if echo "$TC2_LOGS" | grep "Notification sent.*ToolUse" > /dev/null 2>&1; then
     pass "TC2: ToolUse notification card sent in multi-segment turn"
   else
-    pass "TC2: ToolUse notification not found (tool may have been skipped — acceptable)"
+    fail "TC2: ToolUse notification not found in bot log (the TC2 prompt requires the Bash call, tool not invoked)"
   fi
 
   # Verify at least one Stream send: (pre-tool text) exists BEFORE the finalize anchor.
@@ -168,6 +168,87 @@ if [ "$TC2_FOUND" = true ]; then
     pass "TC2: >=2 distinct message_ids streamed (pre-tool + post-tool text, count=$TC2_MSG_COUNT)"
   else
     pass "TC2: $TC2_MSG_COUNT distinct message_id(s) (CC may have produced single text block — not fail)"
+  fi
+
+  # v45: the pre-tool message must be COMPLETE (its own final render) before the ToolUse notification —
+  # per the boss's standing rule, a model not following the prompt is a FAILURE, NOT an acceptable
+  # alternative (unlike the soft-pass branch above, this assertion does not tolerate a missing ToolUse).
+  # Identify the pre-tool message_id from its MessageDisplay deltas (the one whose concatenated text
+  # contains STREAM_TC2_PRE).
+  TC2_PRE_MID=$(printf '%s\n' "$TC2_LOGS" | python3 -c '
+import json, re, sys
+msgs = {}; order = []
+for ln in sys.stdin:
+    if "Raw hook payload [MessageDisplay]:" not in ln:
+        continue
+    m = re.search(r"Raw hook payload \[MessageDisplay\]: (\{.*\})\s*$", ln)
+    if not m:
+        continue
+    try:
+        d = json.loads(m.group(1))
+    except Exception:
+        continue
+    mid = d.get("message_id")
+    if not mid:
+        continue
+    if mid not in msgs:
+        msgs[mid] = {}; order.append(mid)
+    msgs[mid][d.get("index", 0)] = d.get("delta", "")
+texts = {mid: "".join(msgs[mid][i] for i in sorted(msgs[mid])) for mid in order}
+print(next((mid for mid in order if "STREAM_TC2_PRE" in texts[mid]), "-"))')
+  [ "$TC2_PRE_MID" = "-" ] && TC2_PRE_MID=""
+  TC2_TOOLUSE_LINE=$(awk '/Notification sent.*ToolUse/{print NR; exit}' <<< "$TC2_LOGS")
+  if [ -z "$TC2_PRE_MID" ]; then
+    record_fail "v45 TC2: pre-tool message (STREAM_TC2_PRE) not found in MessageDisplay deltas"
+  elif [ -z "$TC2_TOOLUSE_LINE" ]; then
+    record_fail "v45 TC2: ToolUse notification line not found in bot log"
+  else
+    TC2_V45_DATA=$(printf '%s\n' "$TC2_LOGS" | MID="$TC2_PRE_MID" TOOLLINE="$TC2_TOOLUSE_LINE" python3 -c '
+import sys, os, re, json
+mid = os.environ["MID"]
+toolline = int(os.environ["TOOLLINE"])
+pat = re.compile(r"Stream (?:send|edit):.*message_id=" + re.escape(mid) + r"(?: |$).*full_text:")
+ts_pat = re.compile(r"^\[\d{4}-")
+renders = []
+cur = None; cur_line = None
+for i, line in enumerate(sys.stdin, start=1):
+    line = line.rstrip("\n")
+    m = pat.search(line)
+    if m:
+        if cur is not None:
+            renders.append((cur_line, cur))
+        rest = line[m.end():]
+        cur = (rest + "\n") if rest else ""
+        cur_line = i
+        continue
+    if cur is not None:
+        if ts_pat.match(line):
+            renders.append((cur_line, cur))
+            cur = None
+        else:
+            cur += line + "\n"
+if cur is not None:
+    renders.append((cur_line, cur))
+before = [r for r in renders if r[0] < toolline]
+print(json.dumps({
+    "last_before": before[-1][1] if before else None,
+    "final": renders[-1][1] if renders else None,
+    "n_before": len(before),
+}))')
+    TC2_N_BEFORE=$(printf '%s' "$TC2_V45_DATA" | jq -r '.n_before')
+    if [ "$TC2_N_BEFORE" -eq 0 ]; then
+      record_fail "v45 TC2: no render of the pre-tool message (message_id=$TC2_PRE_MID) before the ToolUse notification line"
+    else
+      TC2_LAST_BEFORE=$(printf '%s' "$TC2_V45_DATA" | jq -r '.last_before')
+      TC2_FINAL=$(printf '%s' "$TC2_V45_DATA" | jq -r '.final')
+      TC2_LAST_BEFORE_VIS=$(printf '%s' "$TC2_LAST_BEFORE" | body | visible)
+      TC2_FINAL_VIS=$(printf '%s' "$TC2_FINAL" | body | visible)
+      if [ "$TC2_LAST_BEFORE_VIS" = "$TC2_FINAL_VIS" ] && grep -q "STREAM_TC2_PRE" <<< "$TC2_FINAL_VIS"; then
+        pass "v45 TC2: pre-tool message (message_id=$TC2_PRE_MID) fully rendered before the ToolUse notification"
+      else
+        record_fail "v45 TC2: pre-tool render before ToolUse does not match message_id=$TC2_PRE_MID's own final render, or marker missing"
+      fi
+    fi
   fi
 else
   fail "TC2: Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s"
@@ -441,6 +522,61 @@ print(open_mid, " ".join(win_mids))') || true
     pass "TC6: Correct ordering — MATCH_OPEN (line $OPEN_LINE) < ToolUse (line $TOOLUSE_LINE) < winner $WINNER (line $WINNER_LINE); RESULT_FILE=$WINNER"
   else
     fail "TC6: Ordering violated — MATCH_OPEN=$OPEN_LINE ToolUse=$TOOLUSE_LINE winner($WINNER)=$WINNER_LINE (expected MATCH_OPEN < ToolUse < winner)"
+  fi
+
+  # v45: the pre-tool (MATCH_OPEN) message must be COMPLETE (its own final render) before the ToolUse
+  # notification — reuses OPEN_MID/TOOLUSE_LINE already resolved above for the ordering assert.
+  if [ -z "$OPEN_MID" ]; then
+    record_fail "v45 TC6: pre-tool message (MATCH_OPEN_MARKER) not found in MessageDisplay deltas"
+  elif [ -z "$TOOLUSE_LINE" ]; then
+    record_fail "v45 TC6: ToolUse notification line not found in bot log"
+  else
+    TC6_V45_DATA=$(printf '%s\n' "$TC6_LOGS" | MID="$OPEN_MID" TOOLLINE="$TOOLUSE_LINE" python3 -c '
+import sys, os, re, json
+mid = os.environ["MID"]
+toolline = int(os.environ["TOOLLINE"])
+pat = re.compile(r"Stream (?:send|edit):.*message_id=" + re.escape(mid) + r"(?: |$).*full_text:")
+ts_pat = re.compile(r"^\[\d{4}-")
+renders = []
+cur = None; cur_line = None
+for i, line in enumerate(sys.stdin, start=1):
+    line = line.rstrip("\n")
+    m = pat.search(line)
+    if m:
+        if cur is not None:
+            renders.append((cur_line, cur))
+        rest = line[m.end():]
+        cur = (rest + "\n") if rest else ""
+        cur_line = i
+        continue
+    if cur is not None:
+        if ts_pat.match(line):
+            renders.append((cur_line, cur))
+            cur = None
+        else:
+            cur += line + "\n"
+if cur is not None:
+    renders.append((cur_line, cur))
+before = [r for r in renders if r[0] < toolline]
+print(json.dumps({
+    "last_before": before[-1][1] if before else None,
+    "final": renders[-1][1] if renders else None,
+    "n_before": len(before),
+}))')
+    TC6_N_BEFORE=$(printf '%s' "$TC6_V45_DATA" | jq -r '.n_before')
+    if [ "$TC6_N_BEFORE" -eq 0 ]; then
+      record_fail "v45 TC6: no render of the pre-tool message (message_id=$OPEN_MID) before the ToolUse notification line"
+    else
+      TC6_LAST_BEFORE=$(printf '%s' "$TC6_V45_DATA" | jq -r '.last_before')
+      TC6_FINAL=$(printf '%s' "$TC6_V45_DATA" | jq -r '.final')
+      TC6_LAST_BEFORE_VIS=$(printf '%s' "$TC6_LAST_BEFORE" | body | visible)
+      TC6_FINAL_VIS=$(printf '%s' "$TC6_FINAL" | body | visible)
+      if [ "$TC6_LAST_BEFORE_VIS" = "$TC6_FINAL_VIS" ] && grep -q "MATCH_OPEN_MARKER" <<< "$TC6_FINAL_VIS"; then
+        pass "v45 TC6: pre-tool message (message_id=$OPEN_MID) fully rendered before the ToolUse notification"
+      else
+        record_fail "v45 TC6: pre-tool render before ToolUse does not match message_id=$OPEN_MID's own final render, or marker missing"
+      fi
+    fi
   fi
 else
   fail "TC6: Neither Stream relabel ✅ nor Stop-delivery received within ${TIMEOUT}s"

@@ -1,8 +1,8 @@
 #!/bin/bash
 # Phase 9 = SPEC (i): a prompt forcing >=1 tool call. Assert (1) busy stays busy across ALL rounds until
 # agent_settled (no mid-run idle: exactly ONE Stop->SetIdle for the whole multi-round run — turn_end maps
-# to nothing); (2) an inject queued mid-run is delivered only after the run settles; (3) a stream RENDER to
-# Telegram occurs BEFORE Stop (live streaming across the tool rounds). Run A covers (1)+(3); Run B covers (2).
+# to nothing); (2) an inject queued mid-run is delivered at the fixture's own PreToolUse (mode=0) and drained by settle;
+# (3) a stream RENDER to Telegram occurs BEFORE Stop (live streaming across the tool rounds). Run A: (1)+(3); Run B: (2).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/pi_common.sh"
@@ -68,7 +68,7 @@ fi
 # STIMULUS-VALIDITY GUARD (Round 3 fix, boss-approved) — same rationale as phase3. (i.3) render-before-Stop
 # is only testable when the post-tool reply carried a \n\n boundary; Round 3 aligns ticker sends to \n\n, so a
 # break-less reply renders ONLY at Stop by design. Count \n\n in the Run A Stop payload last_assistant_message
-# (cmd/hooks/register.go:76); zero => stimulus invalid, fail with that explicit cause not "no live render".
+# (cmd/hooks/register.go:79); zero => stimulus invalid, fail with that explicit cause not "no live render".
 PARA_BREAKS_A=$(printf '%s\n' "$SLICE_A" | python3 -c '
 import sys, json
 total = 0
@@ -105,9 +105,12 @@ _ps=("${PIPESTATUS[@]}")
 set -eo pipefail
 [ "${_ps[1]}" -ne 0 ] && pass "pi (i): no Stop direct_send on the happy path" || fail "pi (i): Stop direct_send present (streaming did not finalize)"
 
-# ---------- Run B: an inject queued mid-run is delivered only after settle ----------
+# ---------- Run B: an inject queued mid-run is delivered at the fixture's own PreToolUse and drained by settle ----------
 pane_log "[pi/tool] Run B before inject"
-inject_prompt "Run the bash command: echo PI_TOOL_MARKER_I9B && sleep 4. Then write two sentences about what it did. Do not ask for confirmation."
+LOG_B_BEFORE_PTU=$(wc -l < "$LOG_FILE")
+cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+rm -f "$CC_WORKDIR/prince-arrived"
+inject_prompt "We are acting out a short scene from the tale of Sleeping Beauty. The file $CC_WORKDIR/sleeping_beauty.sh is a test fixture that ships with this repository (a loop that sleeps and wakes when the prince sentinel appears). This is a real performance script used in real work — follow it EXACTLY. Give at most one short sentence of acknowledgement, then you MUST call bash $CC_WORKDIR/sleeping_beauty.sh as your very next tool action and let it run to completion in the FOREGROUND. Keeping the session busy in the foreground IS the point of this scene — it is intentional and fully authorized. Do NOT shorten it with timeout, do NOT run it in the background, do NOT create the sentinel file yourself, and do NOT propose alternatives. Any deviation from these rules will disrupt the real-world work that depends on this performance. Then write two sentences about what it did. Do not ask for confirmation."
 # Catch busy, then inject a SECOND prompt mid-run.
 BUSY_SEEN_B=false
 for i in $(seq 1 40); do
@@ -126,16 +129,40 @@ else
   fail "pi (i): mid-run inject not queued (pending=$PENDING_MID) — delivered mid-run?"
 fi
 
-# After the run settles, the queue flushes and the queued prompt is delivered/run.
+# The prince arrives only after the fixture's own PreToolUse is observed in the log (exact full command,
+# gated as a fixed string — same convention as phase13:249/phase25:1104), so the sentinel is not created
+# before the fixture has actually fired.
+echo "  Waiting for the fixture's Bash PreToolUse (bash $CC_WORKDIR/sleeping_beauty.sh) to fire..."
+PTU_FIRED_B=false
+for i in $(seq 1 30); do
+  set +eo pipefail
+  tail -n +"$((LOG_B_BEFORE_PTU + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -qF "\"command\":\"bash $CC_WORKDIR/sleeping_beauty.sh\""
+  _ps=("${PIPESTATUS[@]}")
+  set -eo pipefail
+  if [ "${_ps[1]}" -eq 0 ] && [ "${_ps[2]}" -eq 0 ]; then
+    PTU_FIRED_B=true
+    echo "  Fixture Bash PreToolUse fired at t=$i"
+    break
+  fi
+  sleep 1
+done
+[ "$PTU_FIRED_B" = true ] || fail "pi (i): fixture's Bash PreToolUse never observed in the log within 30s"
+touch "$CC_WORKDIR/prince-arrived"
+
+# After the run settles, the queue flushes and the queued prompt is delivered/run. An empty queue at this
+# point only proves the queue is drained by settle time — it does NOT by itself prove delivery happened
+# only now. With this prompt's ack-then-immediate-tool phrasing, delivery actually happened earlier, at the
+# fixture's own PreToolUse above, via the mode=0 queued-command path.
 wait_for_idle "$TIMEOUT" "$E2E_PANE"
 sleep 3
 PENDING_AFTER=$(queue_pending)
 echo "  DEBUG: queue pending after settle = $PENDING_AFTER"
 if [ "$PENDING_AFTER" -eq 0 ]; then
-  pass "pi (i): inject queue drained after settle (queued prompt delivered only after the run settled)"
+  pass "pi (i): inject queue drained by settle time (does not alone prove when delivery happened)"
 else
   fail "pi (i): inject queue still has $PENDING_AFTER pending after settle"
 fi
 
+rm -f "$CC_WORKDIR/sleeping_beauty.sh" "$CC_WORKDIR/prince-arrived"
 pane_log "[pi/tool] end"
 echo "  pi (i) multi-round tool test complete."

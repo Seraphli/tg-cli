@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -632,4 +633,133 @@ func ReadContextBlock(path string, rounds, lines int, backend, sessionName, disp
 		}
 	}
 	return strings.Join(output, "\n"), nil
+}
+
+// tailChunkSize is the backward read chunk size for TailFindToolUse — bounds a tail-read to a few chunks
+// in the common case (the tool_use line is near EOF) instead of scanning from line 1 at the observed max
+// transcript size of 459MB.
+const tailChunkSize = 64 * 1024
+
+// tailBlock is one content block inside a CC transcript assistant message (text/tool_use/thinking).
+type tailBlock struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// tailLine is the subset of a CC transcript JSONL line's fields TailFindToolUse needs.
+type tailLine struct {
+	Type    string `json:"type"`
+	Message struct {
+		ID      string          `json:"id"`
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+// backwardLineReader yields complete lines from a file from EOF toward BOF, one at a time, reading in
+// tailChunkSize chunks and crossing chunk boundaries as needed (a line may start in an earlier chunk than
+// the one that first revealed its end).
+type backwardLineReader struct {
+	f   *os.File
+	pos int64
+	buf []byte
+}
+
+func newBackwardLineReader(f *os.File) (*backwardLineReader, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return &backwardLineReader{f: f, pos: info.Size()}, nil
+}
+
+// next returns the next line going backward (without its trailing newline), or ok=false once exhausted.
+func (r *backwardLineReader) next() (string, bool) {
+	for {
+		if idx := bytes.LastIndexByte(r.buf, '\n'); idx >= 0 {
+			line := string(r.buf[idx+1:])
+			r.buf = r.buf[:idx]
+			if line == "" {
+				continue // the file's trailing newline produces one empty "line" — skip it
+			}
+			return line, true
+		}
+		if r.pos == 0 {
+			if len(r.buf) == 0 {
+				return "", false
+			}
+			line := string(r.buf)
+			r.buf = nil
+			return line, line != ""
+		}
+		readSize := int64(tailChunkSize)
+		if readSize > r.pos {
+			readSize = r.pos
+		}
+		newPos := r.pos - readSize
+		chunk := make([]byte, readSize)
+		if _, err := r.f.ReadAt(chunk, newPos); err != nil {
+			return "", false
+		}
+		r.buf = append(chunk, r.buf...)
+		r.pos = newPos
+	}
+}
+
+// TailFindToolUse tail-reads transcriptPath backward in tailChunkSize chunks for the line carrying
+// tool_use_id==toolUseID, then walks further backward — skipping every line whose top-level "type" is not
+// "assistant" (an attachment, a user-role tool_result of an earlier tool call in the same message, an isMeta
+// line, a metadata-only line) — to the FIRST assistant-type line, deciding hasText from it (see
+// ResolveContentAddressedToolBoundary's doc comment in cmd/stores/session_queue.go for the full three-state
+// contract/rationale). os.Open error (incl. transcriptPath=="") -> lineWritten=false (keep retrying).
+func TailFindToolUse(transcriptPath, toolUseID string) (messageID, text string, hasText, lineWritten bool) {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return "", "", false, false
+	}
+	defer f.Close()
+	r, err := newBackwardLineReader(f)
+	if err != nil {
+		return "", "", false, false
+	}
+	foundTarget := false
+	targetMessageID := ""
+	for {
+		line, ok := r.next()
+		if !ok {
+			break
+		}
+		var tl tailLine
+		if json.Unmarshal([]byte(line), &tl) != nil {
+			continue
+		}
+		var blocks []tailBlock
+		_ = json.Unmarshal(tl.Message.Content, &blocks) // string content (user turns) fails harmlessly -> nil
+		if !foundTarget {
+			for _, b := range blocks {
+				if b.Type == "tool_use" && b.ID == toolUseID {
+					foundTarget = true
+					targetMessageID = tl.Message.ID
+					break
+				}
+			}
+			continue // whether matched or not, keep walking backward for the preceding assistant-type line
+		}
+		if tl.Type != "assistant" {
+			continue // skip every non-assistant line (attachment/tool_result/metadata/isMeta...)
+		}
+		if tl.Message.ID != targetMessageID {
+			return targetMessageID, "", false, true // different assistant turn -> no text belongs to this tool call
+		}
+		for _, b := range blocks {
+			if b.Type == "text" {
+				return targetMessageID, b.Text, true, true
+			}
+		}
+		return targetMessageID, "", false, true // same-id tool_use (parallel call) or thinking block -> no text
+	}
+	if foundTarget {
+		return targetMessageID, "", false, true // no preceding assistant-type line exists at all
+	}
+	return "", "", false, false // toolUseID not found anywhere -> the line has not been written yet
 }

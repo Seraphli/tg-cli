@@ -60,7 +60,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 		// Hook FIFO is the per-session ordering reservation, done BEFORE any archive I/O — a slow SQLite write
 		// cannot reorder the reservation. ALL hooks (incl. MessageDisplay) are now serialized through this FIFO;
 		// the archive write, the MessageDisplay branch, re-register, prelude, and switch all run INSIDE the job.
-		bs.SessionEvents.DispatchWithMeta(p.SessionID, "hook:"+event, event, p.PromptID, arrivedAt, func() error {
+		bs.SessionEvents.DispatchWithMeta(p.SessionID, stores.JobInput{
+			Label: "hook:" + event, Event: event, PromptID: p.PromptID,
+			MessageID: p.MessageID, Index: p.Index, Final: p.Final, Delta: p.Delta, ArrivedAt: arrivedAt,
+		}, func() error {
 			// Archive every hook event (Change 2) at the TOP of the queued handler, stamping the ingress
 			// arrivedAt at ns precision (RecordHookEventAt). Degraded-mode: log + continue, never block the hook.
 			if helpers.Archive != nil {
@@ -571,67 +574,112 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				} else {
 					if p.ToolName != "AskUserQuestion" {
-						// S6 QUEUE-LOOKAHEAD (rev 13 predicate; rev 14/15/16 ordering fixes): drain/wait for any
-						// LAGGING pre-tool MessageDisplay for THIS tool boundary on the Hook FIFO, then flush it
-						// before the tool notification (text -> tool). Replaces the old poll-external-state
-						// tool-boundary wait. arrivedAt is the in-scope ingress stamp of this PTU job. f23 (boss
-						// restoration): deadline = arrivedAt + budget (1500ms), floor = arrivedAt + b2Floor (500ms).
-						deadline := arrivedAt.Add(budget)
-						floor := arrivedAt.Add(b2Floor)
-						// eligible: a MessageDisplay that arrived within the absolute deadline and is prompt-
-						// compatible (a non-empty prompt_id mismatch disqualifies; empty on either side is fine).
-						eligible := func(m stores.JobMeta) bool {
-							return m.Event == "MessageDisplay" && !m.ArrivedAt.After(deadline) &&
-								!(m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
+						if p.Backend == "cc" {
+							transcriptPath := p.TranscriptPath
+							tUseID := p.ToolUseID
+							getText := func() (text string, hasText, lineWritten bool) {
+								_, text, hasText, lineWritten = helpers.TailFindToolUse(transcriptPath, tUseID)
+								return
+							}
+							ss := bs.Streams.Session(p.SessionID)
+							seedGroup := func(messageID string) (map[int]string, int, bool) {
+								ss.DataMu.Lock()
+								defer ss.DataMu.Unlock()
+								e, ok := ss.Msgs[messageID]
+								if !ok {
+									return nil, -1, false
+								}
+								deltas := make(map[int]string, len(e.Deltas))
+								for k, v := range e.Deltas {
+									deltas[k] = v
+								}
+								return deltas, e.FinalIdx, e.FinalIdx >= 0
+							}
+							isRendered := func(text string) bool {
+								ss.DataMu.Lock()
+								defer ss.DataMu.Unlock()
+								for _, mid := range ss.Order {
+									e := ss.Msgs[mid]
+									if e.PromptID != p.PromptID {
+										continue
+									}
+									if t, complete := e.AssembledText(); complete && t == text {
+										return true
+									}
+								}
+								return false
+							}
+							hadText := bs.SessionEvents.ResolveContentAddressedToolBoundary(p.SessionID, p.PromptID, getText, seedGroup, isRendered)
+							logger.Info(fmt.Sprintf("tool-boundary wait done: session=%s prompt=%s branch=content_matched had_text=%v elapsed_ms=%d",
+								p.SessionID, p.PromptID, hadText, time.Since(arrivedAt).Milliseconds()))
+							cb.FlushStreamOp(bs, p.SessionID)
+							sendBelow := bs.Streams.TakeSendBelowSinceTool(p.SessionID)
+							if sendBelow {
+								resetCompactAndScheduleDelete(bs, p.SessionID)
+							}
+						} else {
+							// S6 QUEUE-LOOKAHEAD (rev 13 predicate; rev 14/15/16 ordering fixes): drain/wait for any
+							// LAGGING pre-tool MessageDisplay for THIS tool boundary on the Hook FIFO, then flush it
+							// before the tool notification (text -> tool). Replaces the old poll-external-state
+							// tool-boundary wait. arrivedAt is the in-scope ingress stamp of this PTU job. f23 (boss
+							// restoration): deadline = arrivedAt + budget (1500ms), floor = arrivedAt + b2Floor (500ms).
+							deadline := arrivedAt.Add(budget)
+							floor := arrivedAt.Add(b2Floor)
+							// eligible: a MessageDisplay that arrived within the absolute deadline and is prompt-
+							// compatible (a non-empty prompt_id mismatch disqualifies; empty on either side is fine).
+							eligible := func(m stores.JobMeta) bool {
+								return m.Event == "MessageDisplay" && !m.ArrivedAt.After(deadline) &&
+									!(m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
+							}
+							// boundary: the front-scan STOPS here — the next tool, THIS tool's own PostToolUse (so a
+							// post-tool MD is never drained into the pre-tool flush), a turn-terminal, anything past the
+							// deadline, or a different-prompt MessageDisplay (rev 15 MAJOR1 zero-grace terminate).
+							boundary := func(m stores.JobMeta) bool {
+								return m.Event == "PreToolUse" || m.Event == "PostToolUse" || m.Event == "Stop" || m.Event == "UserPromptSubmit" ||
+									m.Event == "SessionEnd" || m.ArrivedAt.After(deadline) ||
+									(m.Event == "MessageDisplay" && m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
+							}
+							// (a) snapshot+clear the marker BEFORE the drain (a drain may re-set it for bubble B).
+							initialText := bs.Streams.TakeNewTextSinceTool(p.SessionID)
+							// (b) ALWAYS run every already-queued eligible pre-tool MD now (incl. a 2nd bubble), front-
+							// scanning and stopping at a boundary (rev 15 BLOCKER — the drain is never skipped).
+							n := bs.SessionEvents.DrainAndRunMatching(p.SessionID, eligible, boundary)
+							// (c) WAIT only when no pre-tool text has arrived AND nothing was queued. f23: the floored
+							// variant honors the b2Floor=500ms early-exit floor and the budget=1500ms deadline (nil
+							// resolve = the pre-f23 drain-until-deadline semantics; an eligible pre-tool MD still drains
+							// and thus renders before the tool at ANY time, including inside the floor).
+							waitBranch := "skipped"
+							if !initialText && n == 0 {
+								waitBranch = bs.SessionEvents.WaitForMatchOrDeadlineFloored(p.SessionID, p.PromptID, eligible, boundary, nil, floor, deadline)
+							}
+							// (d) consume the post-drain marker on its OWN statement (NO || short-circuit, rev 16
+							// BLOCKER3) so a drain-set marker (bubble B) cannot leak to the next PTU, then merge.
+							drainedText := bs.Streams.TakeNewTextSinceTool(p.SessionID)
+							hadNewText := initialText || drainedText
+							// f23: log the tool-boundary wait resolution (branch + elapsed since ingress) like the
+							// original 56e071f streamFlushAwaitToolBoundary did, so raws prove the restored window fired.
+							logger.Info(fmt.Sprintf("tool-boundary wait done: session=%s prompt=%s branch=%s had_text=%v n_drained=%d elapsed_ms=%d floor_ms=%d budget_ms=%d",
+								p.SessionID, p.PromptID, waitBranch, hadNewText, n, time.Since(arrivedAt).Milliseconds(), b2Floor.Milliseconds(), budget.Milliseconds()))
+							// (e) UNCONDITIONAL plain pre-tool flush via the NON-DRAINING op (no drainUntilComplete —
+							// the lookahead above already drained/waited). Renders the pre-tool text before the notify;
+							// a cheap no-op when nothing is renderable (S3).
+							cb.FlushStreamOp(bs, p.SessionID)
+							// (f) f25: reset the compact-tool cycle iff a NEW TG text message was (or will be) placed
+							// BELOW the last tool notification since the last tool — the placement signal, NOT any-text.
+							// A continuation that only EDITS the bubble above the tool must not split the compact group
+							// (rev 14 BLOCKER3 false split). SendBelowSinceTool is set in flushSession p3 at enqueue time,
+							// incl. the pre-tool flush at (e) above, so TAKE it AFTER cb.FlushStreamOp. (No-op in standard
+							// mode — ResetAndTakeInternalID returns 0. Serialized with the Get/Store below on the Hook FIFO
+							// worker — the off-FIFO Reset-vs-Store race stays fixed.)
+							sendBelow := bs.Streams.TakeSendBelowSinceTool(p.SessionID)
+							if sendBelow {
+								resetCompactAndScheduleDelete(bs, p.SessionID)
+							}
+							// f25 observability (codexnote: not behavior proof): distinguish the any-text union (had_text,
+							// wait-skip) from the placement signal (new_send_below, reset) in the raws.
+							logger.Info(fmt.Sprintf("compact reset decision: session=%s prompt=%s new_send_below=%v had_text=%v",
+								p.SessionID, p.PromptID, sendBelow, hadNewText))
 						}
-						// boundary: the front-scan STOPS here — the next tool, THIS tool's own PostToolUse (so a
-						// post-tool MD is never drained into the pre-tool flush), a turn-terminal, anything past the
-						// deadline, or a different-prompt MessageDisplay (rev 15 MAJOR1 zero-grace terminate).
-						boundary := func(m stores.JobMeta) bool {
-							return m.Event == "PreToolUse" || m.Event == "PostToolUse" || m.Event == "Stop" || m.Event == "UserPromptSubmit" ||
-								m.Event == "SessionEnd" || m.ArrivedAt.After(deadline) ||
-								(m.Event == "MessageDisplay" && m.PromptID != "" && p.PromptID != "" && m.PromptID != p.PromptID)
-						}
-						// (a) snapshot+clear the marker BEFORE the drain (a drain may re-set it for bubble B).
-						initialText := bs.Streams.TakeNewTextSinceTool(p.SessionID)
-						// (b) ALWAYS run every already-queued eligible pre-tool MD now (incl. a 2nd bubble), front-
-						// scanning and stopping at a boundary (rev 15 BLOCKER — the drain is never skipped).
-						n := bs.SessionEvents.DrainAndRunMatching(p.SessionID, eligible, boundary)
-						// (c) WAIT only when no pre-tool text has arrived AND nothing was queued. f23: the floored
-						// variant honors the b2Floor=500ms early-exit floor and the budget=1500ms deadline (nil
-						// resolve = the pre-f23 drain-until-deadline semantics; an eligible pre-tool MD still drains
-						// and thus renders before the tool at ANY time, including inside the floor).
-						waitBranch := "skipped"
-						if !initialText && n == 0 {
-							waitBranch = bs.SessionEvents.WaitForMatchOrDeadlineFloored(p.SessionID, p.PromptID, eligible, boundary, nil, floor, deadline)
-						}
-						// (d) consume the post-drain marker on its OWN statement (NO || short-circuit, rev 16
-						// BLOCKER3) so a drain-set marker (bubble B) cannot leak to the next PTU, then merge.
-						drainedText := bs.Streams.TakeNewTextSinceTool(p.SessionID)
-						hadNewText := initialText || drainedText
-						// f23: log the tool-boundary wait resolution (branch + elapsed since ingress) like the
-						// original 56e071f streamFlushAwaitToolBoundary did, so raws prove the restored window fired.
-						logger.Info(fmt.Sprintf("tool-boundary wait done: session=%s prompt=%s branch=%s had_text=%v n_drained=%d elapsed_ms=%d floor_ms=%d budget_ms=%d",
-							p.SessionID, p.PromptID, waitBranch, hadNewText, n, time.Since(arrivedAt).Milliseconds(), b2Floor.Milliseconds(), budget.Milliseconds()))
-						// (e) UNCONDITIONAL plain pre-tool flush via the NON-DRAINING op (no drainUntilComplete —
-						// the lookahead above already drained/waited). Renders the pre-tool text before the notify;
-						// a cheap no-op when nothing is renderable (S3).
-						cb.FlushStreamOp(bs, p.SessionID)
-						// (f) f25: reset the compact-tool cycle iff a NEW TG text message was (or will be) placed
-						// BELOW the last tool notification since the last tool — the placement signal, NOT any-text.
-						// A continuation that only EDITS the bubble above the tool must not split the compact group
-						// (rev 14 BLOCKER3 false split). SendBelowSinceTool is set in flushSession p3 at enqueue time,
-						// incl. the pre-tool flush at (e) above, so TAKE it AFTER cb.FlushStreamOp. (No-op in standard
-						// mode — ResetAndTakeInternalID returns 0. Serialized with the Get/Store below on the Hook FIFO
-						// worker — the off-FIFO Reset-vs-Store race stays fixed.)
-						sendBelow := bs.Streams.TakeSendBelowSinceTool(p.SessionID)
-						if sendBelow {
-							resetCompactAndScheduleDelete(bs, p.SessionID)
-						}
-						// f25 observability (codexnote: not behavior proof): distinguish the any-text union (had_text,
-						// wait-skip) from the placement signal (new_send_below, reset) in the raws.
-						logger.Info(fmt.Sprintf("compact reset decision: session=%s prompt=%s new_send_below=%v had_text=%v",
-							p.SessionID, p.PromptID, sendBelow, hadNewText))
 					}
 				}
 				// Send tool detail notification if configured
@@ -951,7 +999,7 @@ func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPaylo
 	// Round 8 observability: if a same-prompt MessageDisplay-final lands shortly AFTER a tool
 	// notification was sent (no pre-tool text was flushed first), log it as a residual inversion.
 	if p.Final && p.PromptID != "" {
-		if mark, ok := bs.Streams.GetLastToolNotify(p.SessionID); ok && mark.PromptID == p.PromptID {
+		if mark, ok := bs.Streams.GetAndClearLastToolNotify(p.SessionID); ok && mark.PromptID == p.PromptID {
 			if d := time.Since(mark.At); d < 3*time.Second {
 				logger.Info(fmt.Sprintf("late MD after tool notify: session=%s prompt=%s delay_ms=%d (residual: tool notification preceded this pre-tool text)",
 					p.SessionID, p.PromptID, d.Milliseconds()))

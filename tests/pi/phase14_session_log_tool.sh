@@ -43,7 +43,7 @@ printf '%s\n' "$LOG_OUTPUT" | sed 's/^/    /'
 echo "  === END DEBUG ==="
 
 # PRECONDITION: the tool line must have rendered (the bash tool call reached the transcript).
-printf '%s\n' "$LOG_OUTPUT" | grep -q "$MARK" || fail "pi Item B PRECONDITION: the bash tool line ($MARK) is not in the session log — cannot test the tool-detail render"
+grep -q "$MARK" <<< "$LOG_OUTPUT" || fail "pi Item B PRECONDITION: the bash tool line ($MARK) is not in the session log — cannot test the tool-detail render"
 
 # Item B: the tool detail must be the CLEAN command, NOT the raw arguments JSON ({"command":...}).
 set +eo pipefail

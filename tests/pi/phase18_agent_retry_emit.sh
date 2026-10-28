@@ -122,7 +122,7 @@ HARNESS
 
 if h_out=$(node "$WORK/harness.mjs" "$WORK/pi-ext.mts" 2>&1); then h_rc=0; else h_rc=$?; fi
 printf '%s\n' "$h_out" | sed 's/^/    /'
-if [ "$h_rc" -eq 0 ] && printf '%s\n' "$h_out" | grep -q "ALL PASS"; then
+if [ "$h_rc" -eq 0 ] && grep -q "ALL PASS" <<< "$h_out"; then
   pass "phase18: extension emits agent_retry only on a same-turn retry-after-error (5/5 scenarios)"
 else
   record_fail "phase18: agent_retry emission harness failed (rc=$h_rc)"

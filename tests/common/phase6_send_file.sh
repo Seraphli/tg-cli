@@ -23,7 +23,7 @@ EMPTY_BASE="$(basename "$EMPTY")"
 wait_log() {
   local pat="$1" max="$2" start="$3" i=0
   while [ "$i" -lt "$max" ]; do
-    if tail -n +"$((start + 1))" "$LOG_FILE" | grep -q "$pat"; then return 0; fi
+    if grep -q "$pat" <<< "$(tail -n +"$((start + 1))" "$LOG_FILE")"; then return 0; fi
     sleep 1; i=$((i + 1))
   done
   return 1
@@ -35,7 +35,7 @@ set +e
 OUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$SMALL" --caption "phase6 sync" --port "$TEST_PORT" 2>&1); RC=$?
 set -e
 echo "  DEBUG TC6-1: rc=$RC out=$OUT"
-if [ "$RC" -eq 0 ] && echo "$OUT" | grep -q "File sent" && wait_log "\[File\] File sent: $SMALL_BASE" 10 "$LB"; then
+if [ "$RC" -eq 0 ] && grep -q "File sent" <<< "$OUT" && wait_log "\[File\] File sent: $SMALL_BASE" 10 "$LB"; then
   pass "TC6-1 sync success: exit0 + 'File sent' + bot log [File] File sent"
 else
   fail "TC6-1 sync success: rc=$RC out=$OUT"
@@ -51,7 +51,7 @@ OUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$SMALL" --capti
 set -e
 T1=$(date +%s.%N)
 echo "  DEBUG TC6-2: rc=$RC elapsed=$(awk "BEGIN{printf \"%.2f\", $T1-$T0}")s out=$OUT"
-if [ "$RC" -eq 0 ] && echo "$OUT" | grep -q "queued" && ! echo "$OUT" | grep -q "File sent"; then
+if [ "$RC" -eq 0 ] && grep -q "queued" <<< "$OUT" && ! grep -q "File sent" <<< "$OUT"; then
   if wait_log "\[File\] File sent: $SMALL_BASE" 15 "$LB"; then
     pass "TC6-2 async: exit0 + 'queued' (not 'File sent') + bg upload logged [File] File sent"
   else
@@ -66,7 +66,7 @@ set +e
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file /nonexistent-phase6-xxxxx --port "$TEST_PORT" 2>"$ERRF"; RC=$?
 set -e
 ERR=$(cat "$ERRF"); echo "  DEBUG TC6-3: rc=$RC stderr=$ERR"
-if [ "$RC" -ne 0 ] && echo "$ERR" | grep -q "file not found"; then
+if [ "$RC" -ne 0 ] && grep -q "file not found" <<< "$ERR"; then
   pass "TC6-3 sync fail (CLI-side): non-zero exit + stderr 'file not found'"
 else
   fail "TC6-3 sync fail (CLI-side): rc=$RC stderr=$ERR"
@@ -78,7 +78,7 @@ set +e
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$BIG" --port "$TEST_PORT" 2>"$ERRF"; RC=$?
 set -e
 ERR=$(cat "$ERRF"); echo "  DEBUG TC6-4: rc=$RC stderr=$ERR"
-if [ "$RC" -ne 0 ] && echo "$ERR" | grep -qi "too large" && wait_log "\[File\] rejected: .*too large" 5 "$LB"; then
+if [ "$RC" -ne 0 ] && grep -qi "too large" <<< "$ERR" && wait_log "\[File\] rejected: .*too large" 5 "$LB"; then
   pass "TC6-4 sync fail (>50MB): non-zero exit + stderr 'too large' + bot log [File] rejected"
 else
   fail "TC6-4 sync fail (>50MB): rc=$RC stderr=$ERR"
@@ -90,7 +90,7 @@ set +e
 OUT=$(./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$EMPTY" --caption "phase6 async-fail" --async --port "$TEST_PORT" 2>&1); RC=$?
 set -e
 echo "  DEBUG TC6-5: rc=$RC out=$OUT"
-if [ "$RC" -eq 0 ] && echo "$OUT" | grep -q "queued" && wait_log "\[File\] send failed: $EMPTY_BASE" 20 "$LB"; then
+if [ "$RC" -eq 0 ] && grep -q "queued" <<< "$OUT" && wait_log "\[File\] send failed: $EMPTY_BASE" 20 "$LB"; then
   pass "TC6-5 async fail: exit0 + 'queued' + bg failure logged [File] send failed"
 else
   fail "TC6-5 async fail: rc=$RC out=$OUT (expected exit0 + 'queued' + bg [File] send failed)"
@@ -102,7 +102,7 @@ set +e
 ./tg-cli --config-dir "$TEST_CONFIG_DIR" send-file --file "$EMPTY" --port "$TEST_PORT" 2>"$ERRF"; RC=$?
 set -e
 ERR=$(cat "$ERRF"); echo "  DEBUG TC6-6: rc=$RC stderr=$ERR"
-if [ "$RC" -ne 0 ] && echo "$ERR" | grep -q "telegram send failed" && wait_log "\[File\] send failed: $EMPTY_BASE" 5 "$LB"; then
+if [ "$RC" -ne 0 ] && grep -q "telegram send failed" <<< "$ERR" && wait_log "\[File\] send failed: $EMPTY_BASE" 5 "$LB"; then
   pass "TC6-6 sync fail (bot-side): non-zero exit + stderr 'telegram send failed' + bot log [File] send failed"
 else
   fail "TC6-6 sync fail (bot-side): rc=$RC stderr=$ERR"

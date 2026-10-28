@@ -1089,22 +1089,24 @@ TC13_MARKER="tc13_purge_marker_$RANDOM"
 
 # Step 1: keep B busy with a bash sleep so the next @ message to B is QUEUED (not injected directly)
 pane_log "[TC13] BEFORE B busy inject (B)" "$AT_PANE"
-# Capture log position BEFORE injecting so we can poll for the PreToolUse of sleep 20
+# Capture log position BEFORE injecting so we can poll for the PreToolUse of bash sleeping_beauty.sh
 LOG_BEFORE_TC13_PTU=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-inject_prompt "Use the Bash tool to run EXACTLY this one command and nothing else, then reply with exactly: cmd_executed. Do NOT run session at end or any at-channel close command. Do NOT read files, search, or explore the codebase — just run the command: sleep 20" "" "$AT_PANE"
+cp "$SCRIPT_DIR/sleeping_beauty.sh" "$CC_WORKDIR/sleeping_beauty.sh"
+rm -f "$CC_WORKDIR/prince-arrived"
+inject_prompt "We are acting out a short scene from the tale of Sleeping Beauty. The file sleeping_beauty.sh in your current directory is a test fixture that ships with this repository. Do not read or explore anything else in the codebase. In the scene, Sleeping Beauty eats the poisoned apple and falls into a long enchanted sleep, waking only when the prince arrives. Use the Bash tool exactly once to run this command and let it finish in the foreground: bash sleeping_beauty.sh. The script carries out her enchanted sleep and returns on its own when the prince arrives. Then reply with exactly: cmd_executed. Do NOT run session at end or any at-channel close command." "" "$AT_PANE"
 
-# Poll bot log for Bash PreToolUse of sleep 20 — confirms B is actually sleeping before we queue the marker
-echo "  [TC13] waiting for B's Bash PreToolUse (sleep 20) to fire..."
+# Poll bot log for Bash PreToolUse of bash sleeping_beauty.sh — confirms B is actually sleeping before we queue the marker
+echo "  [TC13] waiting for B's Bash PreToolUse (bash sleeping_beauty.sh) to fire..."
 TC13_ELAPSED=0
 TC13_PTU_FIRED=false
-while [ $TC13_ELAPSED -lt 30 ]; do
+while [ $TC13_ELAPSED -lt 60 ]; do
   set +eo pipefail
-  tail -n +"$((LOG_BEFORE_TC13_PTU + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -q "sleep 20"
+  tail -n +"$((LOG_BEFORE_TC13_PTU + 1))" "$LOG_FILE" | grep "Raw hook payload \[PreToolUse\]" | grep -q '"command":"bash sleeping_beauty.sh"'
   _ps=("${PIPESTATUS[@]}")
   set -eo pipefail
   if [ "${_ps[1]}" -eq 0 ] && [ "${_ps[2]}" -eq 0 ]; then
     TC13_PTU_FIRED=true
-    echo "  [TC13] B's Bash PreToolUse (sleep 20) fired at t=$TC13_ELAPSED"
+    echo "  [TC13] B's Bash PreToolUse (bash sleeping_beauty.sh) fired at t=$TC13_ELAPSED"
     break
   fi
   sleep 1
@@ -1112,7 +1114,7 @@ while [ $TC13_ELAPSED -lt 30 ]; do
 done
 
 if [ "$TC13_PTU_FIRED" != true ]; then
-  fail "TC13: B's Bash PreToolUse (sleep 20) never fired within 30s — cannot set up a queued @ message"
+  fail "TC13: B's Bash PreToolUse (bash sleeping_beauty.sh) never fired within 60s — cannot set up a queued @ message"
 fi
 
 # Step 2: send an @ message to B on the existing channel while B is busy → it must QUEUE
@@ -1149,6 +1151,7 @@ fi
 
 # Step 4: let B finish its sleep and go idle, then assert the purged marker never reached B after close
 # Hard wait — a non-idle B here would mean the close itself failed, making TC13-3 a false negative
+touch "$CC_WORKDIR/prince-arrived"
 wait_for_idle $AT_TIMEOUT "$AT_PANE"
 sleep 3
 pane_log "[TC13] AFTER B idle (B)" "$AT_PANE"

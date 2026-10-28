@@ -47,7 +47,7 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
 
   # Rich migration (v9): AskUserQuestion is sent via sendRichMessage → the sent marker carries
   # fmt=rich on the same log line. Guards against reverting the AskQ send to legacy HTML mode.
-  if tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE" | grep -q "AskUserQuestion sent:.*fmt=rich" 2>/dev/null; then
+  if grep -q "AskUserQuestion sent:.*fmt=rich" <<< "$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")" 2>/dev/null; then
     pass "AskUserQuestion sent via rich message path (fmt=rich)"
   else
     fail "AskUserQuestion sent marker missing fmt=rich (expected rich message path)"

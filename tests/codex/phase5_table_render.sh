@@ -41,21 +41,21 @@ if [ "$TABLE_STOP_FOUND" = true ]; then
   # Assert native <table bordered striped> tag (Fix 5) in the rich body logged by "Notification sent ... body="
   NOTIF_BODY_LINE=$(echo "$NEW_LOGS" | grep "Notification sent.*Stop.*body=" | head -1 || true)
   echo "  DEBUG: NOTIF_BODY_LINE: ${NOTIF_BODY_LINE:0:200}"
-  if echo "$NOTIF_BODY_LINE" | grep -q "<table bordered striped>" 2>/dev/null; then
+  if grep -q "<table bordered striped>" <<< "$NOTIF_BODY_LINE" 2>/dev/null; then
     pass "Notification body contains native <table bordered striped> tag (rich inline table)"
   else
     fail "Notification body missing <table bordered striped> tag: $NOTIF_BODY_LINE"
   fi
 
   # Assert <td> cells present (verifies row content is rendered inline)
-  if echo "$NOTIF_BODY_LINE" | grep -q "<td>" 2>/dev/null; then
+  if grep -q "<td>" <<< "$NOTIF_BODY_LINE" 2>/dev/null; then
     pass "Notification body contains <td> cells (rich inline table cells)"
   else
     fail "Notification body missing <td> cells: $NOTIF_BODY_LINE"
   fi
 
   # Assert CJK content (小明, 北京) appears in the body
-  if echo "$NOTIF_BODY_LINE" | grep -q "小明" 2>/dev/null; then
+  if grep -q "小明" <<< "$NOTIF_BODY_LINE" 2>/dev/null; then
     pass "Notification body contains CJK text from table cell (小明)"
   else
     fail "Notification body missing CJK text: $NOTIF_BODY_LINE"

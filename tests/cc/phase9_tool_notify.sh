@@ -57,19 +57,19 @@ if [ "$TOOL_NOTIFY_FOUND" = true ]; then
     capture && /^\[[0-9]{4}-/ { capture=0 }
     capture { print }
   ')
-  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "🔧.*Bash" 2>/dev/null; then
+  if grep -q "🔧.*Bash" <<< "$TOOL_FULL_TEXT_REGION" 2>/dev/null; then
     pass "ToolUse TG message contains '🔧 Bash' header"
   else
     fail "ToolUse TG message does not contain '🔧 Bash' header"
   fi
 
   # TC8: ToolUse body uses collapsed <details> (no 'open' attribute) — rich format
-  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "<details>" 2>/dev/null; then
+  if grep -q "<details>" <<< "$TOOL_FULL_TEXT_REGION" 2>/dev/null; then
     pass "TC8: ToolUse notification uses <details> (collapsed rich details block)"
   else
     fail "TC8: ToolUse notification missing <details> element"
   fi
-  if printf '%s\n' "$TOOL_FULL_TEXT_REGION" | grep -q "<details open" 2>/dev/null; then
+  if grep -q "<details open" <<< "$TOOL_FULL_TEXT_REGION" 2>/dev/null; then
     fail "TC8: ToolUse <details> has 'open' attribute — expected collapsed (no 'open')"
   else
     pass "TC8: ToolUse <details> is collapsed (no 'open' attribute)"
