@@ -2,7 +2,8 @@
 # Deterministic test for build_codex_launch (codex custom-model launch string), exercising the FULL
 # shell/tmux send-keys quoting boundary with a fake `codex` argv-recorder. No network, no real codex.
 # Covers: all-3-set (custom provider argv incl name/base_url/wire_api; key via ENV inheritance, NOT argv);
-# zero vars (default, no warning); all 6 partial combos (default + warning); metacharacter preservation.
+# zero vars (default, no warning); all 6 partial combos (default + warning); metacharacter preservation;
+# `--disable shell_snapshot` in both branches (codex must not copy CODEX_API_KEY into shell_snapshots/*.sh).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -39,6 +40,16 @@ has()  { case "$2" in *"$3"*) ok "$1";; *) bad "$1 (missing [$3])";; esac; }
 hasnt(){ case "$2" in *"$3"*) bad "$1 (found [$3])";; *) ok "$1";; esac; }
 eq()   { [ "$2" = "$3" ] && ok "$1" || bad "$1 (got [$2] want [$3])"; }
 
+# kill_fake_server: kill the fake tmux server and wait until its process has exited. tmux keeps the server
+# running for about 0.5 s after kill-server returns, and a client that connects in that window fails with
+# "server exited unexpectedly", so the next run_launch's new-session would reach the exiting server.
+kill_fake_server() {
+  local spid i
+  spid=$(tmux -L "$FAKE_TMUX" display-message -p '#{pid}' 2>/dev/null) || return 0
+  tmux -L "$FAKE_TMUX" kill-server 2>/dev/null || true
+  for i in $(seq 1 100); do kill -0 "$spid" 2>/dev/null || return 0; sleep 0.05; done
+}
+
 # run_launch: correction #3 sequencing — the CODEX_* env is exported by the CALLER, THEN we create a fresh
 # unique tmux server (which inherits that env), THEN generate+send the command. Proves inheritance is real,
 # not accidental. Populates: LAUNCH (string), ARGV (recorded, newline-joined), KEY (present/absent),
@@ -46,12 +57,12 @@ eq()   { [ "$2" = "$3" ] && ok "$1" || bad "$1 (got [$2] want [$3])"; }
 run_launch() {
   rm -f "$ARGV_OUT" "$KEY_OUT" "$HOME_OUT" "$WORK/warn"
   LAUNCH="$(build_codex_launch 2>"$WORK/warn")"
-  tmux -L "$FAKE_TMUX" kill-server 2>/dev/null || true
+  kill_fake_server
   tmux -L "$FAKE_TMUX" new-session -d -s s "bash --norc --noprofile"
   tmux -L "$FAKE_TMUX" send-keys -t s "$LAUNCH"; tmux -L "$FAKE_TMUX" send-keys -t s Enter
   local i
   for i in $(seq 1 60); do [ -f "$ARGV_OUT" ] && break; sleep 0.1; done
-  tmux -L "$FAKE_TMUX" kill-server 2>/dev/null || true
+  kill_fake_server
   ARGV="$(cat "$ARGV_OUT" 2>/dev/null || true)"
   KEY="$(cat "$KEY_OUT" 2>/dev/null || true)"
   RCV_HOME="$(cat "$HOME_OUT" 2>/dev/null || true)"
@@ -68,6 +79,7 @@ has  "argv sets base_url (quoted TOML)"     "$ARGV" 'model_providers.custom.base
 has  "argv sets env_key"                    "$ARGV" 'model_providers.custom.env_key="CODEX_API_KEY"'
 has  "argv sets wire_api=responses"         "$ARGV" 'model_providers.custom.wire_api="responses"'
 has  "argv keeps --yolo --enable hooks"     "$ARGV" $'--yolo\n--enable\nhooks'
+has  "argv disables shell_snapshot"            "$ARGV" $'--disable\nshell_snapshot'
 eq   "API key present in codex ENV (inherited)" "$KEY" "present"
 hasnt "API key value ABSENT from argv"      "$ARGV" "$DUMMY_KEY"
 eq   "CODEX_HOME received by codex"         "$RCV_HOME" "$CODEX_HOME"
@@ -76,7 +88,7 @@ eq   "no warning when all 3 set"            "$WARN" ""
 echo "== Case 2: zero vars → default launch, NO warning =="
 unset CODEX_MODEL CODEX_BASE_URL CODEX_API_KEY
 run_launch
-eq   "default argv (no --model/-c)"         "$ARGV" $'--yolo\n--enable\nhooks'
+eq   "default argv (no --model/-c)"         "$ARGV" $'--yolo\n--enable\nhooks\n--disable\nshell_snapshot'
 hasnt "no --model in default"               "$ARGV" "--model"
 hasnt "no -c in default"                    "$ARGV" "-c"
 eq   "zero vars → NO warning"               "$WARN" ""
@@ -91,7 +103,7 @@ for combo in M B K MB MK BK; do
   case "$combo" in
     *K*) export CODEX_API_KEY="$DUMMY_KEY" ;; esac
   run_launch
-  eq  "partial[$combo] default argv"        "$ARGV" $'--yolo\n--enable\nhooks'
+  eq  "partial[$combo] default argv"        "$ARGV" $'--yolo\n--enable\nhooks\n--disable\nshell_snapshot'
   [ -n "$WARN" ] && ok "partial[$combo] warning emitted" || bad "partial[$combo] warning missing"
 done
 

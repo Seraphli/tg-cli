@@ -98,10 +98,13 @@ build_pi_launch() {
   printf '%s' "$q"
 }
 
-# _launch_pi_pane: create an isolated tmux session, export the pi env into it via `-e` (so the NewAPI
-# token never appears in argv), and start pi. Sets E2E_SESSION / E2E_PANE. $1=session name,
-# $2=session-dir (empty for hand launch). PI_OFFLINE=1 skips the one-time fd download so startup is
-# deterministic (verified: "fd not found. Offline mode enabled, skipping download.", no hang).
+# _launch_pi_pane: create an isolated tmux session and start pi. The NewAPI token is NOT passed with `-e`
+# (that would put it in the argv of the tmux client process): pi gets NEWAPI_E2E_KEY by inheriting the
+# environment of the test tmux server, which the harness process starts (start_bot) after the operator
+# exported it. PI_CODING_AGENT_DIR, PI_OFFLINE and DISABLE_AUTOUPDATER are set with `-e`; none is secret.
+# Sets E2E_SESSION / E2E_PANE. $1=session name, $2=session-dir (empty for hand launch). PI_OFFLINE=1 skips
+# the one-time fd download so startup is deterministic (verified: "fd not found. Offline mode enabled,
+# skipping download.", no hang).
 _launch_pi_pane() {
   local session_name="$1"
   local session_dir="${2:-}"
@@ -110,7 +113,6 @@ _launch_pi_pane() {
   rm -f "$TEST_CONFIG_DIR/sessions.json" 2>/dev/null || true
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
   $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 \
-    -e "NEWAPI_E2E_KEY=$NEWAPI_E2E_KEY" \
     -e "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR" \
     -e "PI_OFFLINE=1" \
     -e DISABLE_AUTOUPDATER=1

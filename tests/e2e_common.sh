@@ -760,8 +760,10 @@ EOF
   # Build the claude launch command for bot-launched (session new) CC — e.g. phase23's e2e-integ-agent,
   # which does NOT go through start_claude. Mirror start_claude: BROWSER=none + config dir + provider/model
   # env passthrough + configurable model, so a custom-model run also applies to session-new CC. Values are
-  # shell-quoted (printf %q). config.json is written via python3 (env-passed) so shell-escaped values with
-  # special chars can't break the JSON.
+  # shell-quoted (printf %q). The auth token and API key are NOT in this string (see cc_launch_cmd): the
+  # session-new pane gets them from the test tmux server environment, so config.json never holds them.
+  # config.json is written via python3 (env-passed) so shell-escaped values with special chars can't break
+  # the JSON.
   local cc_cmd
   cc_cmd="$(cc_launch_cmd --dangerously-skip-permissions)"
   # toolNotifyList = ALL knownTools (cmd/helpers/version.go) + AskUserQuestion + "Other", covering EVERY hook
@@ -775,17 +777,21 @@ EOF
 
 # cc_launch_cmd emits (to stdout, exactly ONE line, nothing else — callers use command substitution) the
 # canonical Claude Code launch command used by every CC session the suite starts. perm_flag ($1) is REQUIRED:
-# a missing arg fails early under set -u. It forwards the same nine provider/model env vars as the harness
-# (printf %q quoted so tokens/URLs with special chars cannot break or inject into the command), preserves the
-# ${ANTHROPIC_MODEL:-sonnet} fallback, and pins --tools to an allowlist that STRUCTURALLY removes the Agent
-# tool, so a model cannot spawn a background subagent regardless of the prompt. The allowlist literal lives
-# ONLY here.
+# a missing arg fails early under set -u. It forwards seven of the nine provider/model env vars as VAR=value
+# prefixes (printf %q quoted so URLs and model names with special chars cannot break or inject into the
+# command), preserves the ${ANTHROPIC_MODEL:-sonnet} fallback, and pins --tools to an allowlist that
+# STRUCTURALLY removes the Agent tool, so a model cannot spawn a background subagent regardless of the
+# prompt. The allowlist literal lives ONLY here.
+# ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are deliberately NOT put on the line: the line is typed into a
+# pane whose zsh appends it to the shell history, and it is stored as claudeCommand in config.json. CC gets
+# the two tokens by inheriting the environment of the test tmux server, which the harness process starts
+# (start_bot) after the operator exported them; every pane in that server, including the one the bot creates
+# for `session new`, carries them.
 cc_launch_cmd() {
   local perm_flag="$1"
   local prefix="BROWSER=none DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
   local _v
-  for _v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
-            ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+  for _v in ANTHROPIC_BASE_URL ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
             ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; do
     if [ -n "${!_v:-}" ]; then
       prefix="${prefix} ${_v}=$(printf '%q' "${!_v}")"

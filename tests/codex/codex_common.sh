@@ -19,6 +19,8 @@ codex_api_idle() {
 # it emits the default launch. The API key is NEVER placed on the command line — Codex reads it from the
 # inherited environment via env_key. Every token is printf %q-quoted so the inner TOML quotes survive the
 # send-keys -> pane-shell -> codex boundary intact (mirrors cc_common.sh's printf %q approach).
+# Both branches end with `--disable shell_snapshot`: codex 0.153.4 has that feature on by default and would
+# copy the shell environment, including CODEX_API_KEY, into $CODEX_HOME/shell_snapshots/*.sh.
 build_codex_launch() {
   local q
   if [ -n "${CODEX_MODEL:-}" ] && [ -n "${CODEX_BASE_URL:-}" ] && [ -n "${CODEX_API_KEY:-}" ]; then
@@ -33,14 +35,14 @@ build_codex_launch() {
       -c "model_providers.custom.base_url=$base_url_toml"
       -c 'model_providers.custom.env_key="CODEX_API_KEY"'
       -c 'model_providers.custom.wire_api="responses"'
-      --yolo --enable hooks
+      --yolo --enable hooks --disable shell_snapshot
     )
     printf -v q '%q ' "${argv[@]}"
   else
     if [ -n "${CODEX_MODEL:-}${CODEX_BASE_URL:-}${CODEX_API_KEY:-}" ]; then
       echo "[start_codex] custom-model NOT activated (need ALL of CODEX_MODEL/CODEX_BASE_URL/CODEX_API_KEY); using default codex model" >&2
     fi
-    printf -v q '%q ' codex --yolo --enable hooks
+    printf -v q '%q ' codex --yolo --enable hooks --disable shell_snapshot
   fi
   printf 'CODEX_HOME=%s %s' "$(printf %q "$CODEX_HOME")" "$q"
 }

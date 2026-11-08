@@ -16,10 +16,11 @@ start_claude() {
   $TMUX_TEST new-session -d -s "$E2E_SESSION" -x 220 -y 50 -c "$CC_WORKDIR" -e DISABLE_AUTOUPDATER=1
   E2E_PANE=$($TMUX_TEST list-panes -t "$E2E_SESSION" -F '#{pane_id}@#{socket_path}')
   export E2E_PANE
-  # Launch CC via the shared canonical builder cc_launch_cmd (defined in e2e_common.sh): it forwards the same
-  # nine provider/model env vars (printf %q quoted so tokens/URLs with special chars cannot break or inject
-  # into the command) and pins the --tools allowlist that structurally removes the Agent tool. perm_flag
-  # selects this session's permission mode.
+  # Launch CC via the shared canonical builder cc_launch_cmd (defined in e2e_common.sh): it forwards seven of
+  # the nine provider/model env vars (printf %q quoted so URLs and model names with special chars cannot break
+  # or inject into the command; the auth token and API key stay off the line and reach CC through the test
+  # tmux server environment) and pins the --tools allowlist that structurally removes the Agent tool.
+  # perm_flag selects this session's permission mode.
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
     "$(cc_launch_cmd "$perm_flag")"
   sleep 1
