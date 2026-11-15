@@ -31,6 +31,7 @@ func main() {
 	rootCmd.AddCommand(cmd.SendFileCmd)
 	rootCmd.AddCommand(cmd.CronCmd)
 	rootCmd.AddCommand(cmd.SessionCmd)
+	rootCmd.AddCommand(cmd.RouteCmd)
 	rootCmd.AddCommand(cmd.MailboxCmd)
 	rootCmd.AddCommand(cmd.TmuxManageCmd)
 	rootCmd.AddCommand(cmd.TmuxHookCmd)

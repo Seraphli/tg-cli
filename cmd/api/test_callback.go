@@ -205,7 +205,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "target required", http.StatusBadRequest)
 			return
 		}
-		chat, _, _ := helpers.ResolveChat(bs.SessionState, target)
+		chat, _, topicID := helpers.ResolveChat(bs.SessionState, target)
 		if chat == nil {
 			http.Error(w, "target not found", http.StatusNotFound)
 			return
@@ -223,7 +223,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				return
 			}
 		}
-		sent, err := handlers.SendCaptureReply(bs.Bot, chat, bs.Pages, content)
+		sent, err := handlers.SendCaptureReply(bs.Bot, chat, topicID, bs.Pages, content)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("send failed: %v", err), http.StatusInternalServerError)
 			return
@@ -295,7 +295,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, "invalid chat_id", http.StatusBadRequest)
 			return
 		}
-		sent, err := handlers.SendSettingsMenu(bs, &tele.Chat{ID: chatID})
+		sent, err := handlers.SendSettingsMenu(bs, &tele.Chat{ID: chatID}, 0)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("send failed: %v", err), http.StatusInternalServerError)
 			return
@@ -336,6 +336,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			SenderID     int64  `json:"sender_id"`
 			Text         string `json:"text"`
 			ReplyToMsgID int    `json:"reply_to_msg_id"`
+			TopicMessage bool   `json:"topic_message"`
 			MsgID        int    `json:"msg_id"`
 			Document     *struct {
 				FileID   string `json:"file_id"`
@@ -363,11 +364,12 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 			msgID = req.MsgID
 		}
 		msg := &tele.Message{
-			ID:       msgID,
-			Chat:     &tele.Chat{ID: req.ChatID, Type: tele.ChatType(chatType)},
-			Sender:   &tele.User{ID: req.SenderID},
-			ThreadID: req.TopicID,
-			Text:     req.Text,
+			ID:           msgID,
+			Chat:         &tele.Chat{ID: req.ChatID, Type: tele.ChatType(chatType)},
+			Sender:       &tele.User{ID: req.SenderID},
+			ThreadID:     req.TopicID,
+			Text:         req.Text,
+			TopicMessage: req.TopicMessage,
 		}
 		if req.ReplyToMsgID != 0 {
 			msg.ReplyTo = &tele.Message{ID: req.ReplyToMsgID, Chat: msg.Chat}

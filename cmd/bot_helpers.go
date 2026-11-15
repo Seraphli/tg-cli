@@ -151,7 +151,6 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 				}
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(richBody)), richBody))
 				logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, richText))
-				recordReplyTarget(bs, sentMsgID, sessionID, tmuxTarget, chat.ID)
 			}
 		} else {
 			nd.Body = chunks[0]
@@ -217,7 +216,6 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 				}
 				logger.Info(fmt.Sprintf("Notification sent to chat %s: %s [%s] tmux=%s body_len=%d body=%s", chatID, event, project, tmuxTarget, len([]rune(body)), body))
 				logger.Debug(fmt.Sprintf("TG message sent [%s] full_text:\n%s", event, text))
-				recordReplyTarget(bs, sentMsgID, sessionID, tmuxTarget, chat.ID)
 			}
 		} else {
 			nd.Body = chunks[0]
@@ -251,20 +249,6 @@ func sendEventNotification(bs *BotState, chat *tele.Chat, chatID, sessionID, eve
 		}
 	}
 	return sentMsgID
-}
-
-// recordReplyTarget records a single-chunk notification's msg_id -> tmux_target in the Pages store so a
-// later reply to it can resolve the target by msg_id. Rich Bot API 10.1 notifications leave the
-// Telegram Message .Text empty (their content is a rich_message field telebot does not model), so the
-// 📟-line text parse fails on reply — the Pages record is the fallback. Multi-chunk notifications
-// already persist a full PageEntry carrying TmuxTarget; this covers the single-chunk path. The entry
-// has no chunks/buttons so page/collapse callbacks never touch it; it is cleared with the session via
-// CleanupSession.
-func recordReplyTarget(bs *BotState, msgID int, sessionID, tmuxTarget string, chatID int64) {
-	if msgID == 0 || tmuxTarget == "" {
-		return
-	}
-	bs.Pages.Store(msgID, sessionID, &stores.PageEntry{TmuxTarget: tmuxTarget, ChatID: chatID})
 }
 
 var typingLogWriter io.Writer

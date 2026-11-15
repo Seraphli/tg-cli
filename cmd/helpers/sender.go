@@ -301,11 +301,11 @@ func RetrySendRich(b *tele.Bot, chat tele.Recipient, html string, o RichSendOpts
 		data, err := b.Raw("sendRichMessage", payload)
 		if err == nil && responseOK(data) {
 			sent, derr := decodeRichResponse(data)
-			mid := 0
+			mid, thread := 0, 0
 			if sent != nil {
-				mid = sent.ID
+				mid, thread = sent.ID, sent.ThreadID
 			}
-			logger.Info(fmt.Sprintf("TG send: chat=%s msg_id=%d text_len=%d rich=true", chat.Recipient(), mid, len([]rune(html))))
+			logger.Info(fmt.Sprintf("TG send: chat=%s msg_id=%d text_len=%d rich=true thread=%d", chat.Recipient(), mid, len([]rune(html)), thread))
 			// Archive on success (M2: re-read the recipient so a GroupError migration is reflected).
 			if reservedID != 0 && sent != nil {
 				finalChatID, _ := strconv.ParseInt(chat.Recipient(), 10, 64)
@@ -356,7 +356,12 @@ func RetrySendRich(b *tele.Bot, chat tele.Recipient, html string, o RichSendOpts
 			}
 			logger.Warn(fmt.Sprintf("RICH_FALLBACK method=sendRichMessage chat=%s err=%v", chat.Recipient(), err))
 			// Thread the reserved id (M1): the legacy fallback completes ID A, not a new ID B.
-			return sendReserved(b, chat, legacyHTML, reservedID, false, tele.ModeHTML)
+			legacyOpts := []interface{}{tele.ModeHTML}
+			if o.TopicID > 0 {
+				// telebot's *SendOptions REPLACES the options built so far (options.go:106-107), so the parse mode travels inside it.
+				legacyOpts = []interface{}{&tele.SendOptions{ParseMode: tele.ModeHTML, ThreadID: o.TopicID}}
+			}
+			return sendReserved(b, chat, legacyHTML, reservedID, false, legacyOpts...)
 		}
 		// Fix 21: business errors (4xx) fail immediately; network/transient errors retry indefinitely.
 		if isNonRetryable(err) {
@@ -495,11 +500,11 @@ func sendReserved(b *tele.Bot, to tele.Recipient, what interface{}, reservedID i
 	for {
 		msg, err = b.Send(to, what, opts...)
 		if err == nil {
-			mid := 0
+			mid, thread := 0, 0
 			if msg != nil {
-				mid = msg.ID
+				mid, thread = msg.ID, msg.ThreadID
 			}
-			logger.Info(fmt.Sprintf("TG send: chat=%s msg_id=%d text_len=%d rich=false", to.Recipient(), mid, editableTextLen(what)))
+			logger.Info(fmt.Sprintf("TG send: chat=%s msg_id=%d text_len=%d rich=false thread=%d", to.Recipient(), mid, editableTextLen(what), thread))
 			if reservedID != 0 && msg != nil {
 				finalChatID, _ := strconv.ParseInt(to.Recipient(), 10, 64)
 				if cerr := Archive.CompleteSend(reservedID, finalChatID, int64(msg.ID), false, editableString(what), ""); cerr != nil {

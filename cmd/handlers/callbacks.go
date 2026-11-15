@@ -491,42 +491,57 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "bind_select"}, func(c tele.Context) error {
+		// Answer first: a forum bind makes a createForumTopic request before the edit.
+		c.Respond()
 		data := strings.TrimSpace(c.Data())
 		num, err := strconv.Atoi(data)
 		if err != nil {
 			helpers.RetryEdit(bot, c.Message(), "❌ Invalid selection.", tele.ModeHTML)
-			return c.Respond()
+			return nil
 		}
 		val, ok := bs.BindMenuItems.LoadAndDelete(c.Message().ID)
 		if !ok {
 			helpers.RetryEdit(bot, c.Message(), "❌ Menu expired. Send /bot_bind again.", tele.ModeHTML)
-			return c.Respond()
+			return nil
 		}
 		ctx := val.(BindMenuContext)
 		idx := num - 1
 		if idx < 0 || idx >= len(ctx.Items) {
 			helpers.RetryEdit(bot, c.Message(), "❌ Selection out of range.", tele.ModeHTML)
-			return c.Respond()
+			return nil
 		}
 		item := ctx.Items[idx]
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
-			return c.Respond()
+		topicID := ctx.TopicID
+		head := "✅ Bound to this chat."
+		if ctx.Forum {
+			route, err := helpers.BindForumTopic(bot, item.Key, ctx.ChatID, ctx.Title)
+			if err != nil {
+				helpers.RetryEdit(bot, c.Message(), "❌ "+markdown.EscapeHTML(err.Error()), tele.ModeHTML)
+				return nil
+			}
+			topicID = route.TopicID
+			head = "✅ Bound to topic."
+			logger.Info(fmt.Sprintf("Route bound (menu, forum topic): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, topicID))
+		} else {
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
+				return nil
+			}
+			creds.NameRouteMap[item.Key] = config.NameRoute{ChatID: ctx.ChatID, TopicID: ctx.TopicID, Title: ctx.Title}
+			config.SaveCredentials(creds)
+			logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, ctx.TopicID))
 		}
-		creds.NameRouteMap[item.Key] = config.NameRoute{ChatID: ctx.ChatID, TopicID: ctx.TopicID}
-		config.SaveCredentials(creds)
 		topicStr := ""
-		if ctx.TopicID != 0 {
-			topicStr = fmt.Sprintf(", topic=%d", ctx.TopicID)
+		if topicID != 0 {
+			topicStr = fmt.Sprintf(", topic=%d", topicID)
 		}
-		logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, ctx.TopicID))
 		if IsSettingsMenu(bs, c.Message().ID) {
 			showSettingsRoutes(bot, bs, c.Message())
-			return c.Respond()
+			return nil
 		}
-		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("✅ Bound to this chat.\n🏷 %s → %d%s", markdown.EscapeHTML(item.Label), ctx.ChatID, topicStr), tele.ModeHTML)
-		return c.Respond()
+		helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("%s\n🏷 %s → %d%s", head, markdown.EscapeHTML(item.Label), ctx.ChatID, topicStr), tele.ModeHTML)
+		return nil
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "unbind_select"}, func(c tele.Context) error {
@@ -1049,7 +1064,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			if IsSettingsMenu(bs, c.Message().ID) {
 				appendBackButton(kb)
 			}
-			sent, err := helpers.RetrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), kb, tele.ModeHTML)
+			sent, err := helpers.RetrySend(bot, c.Chat(), chunks[0]+fmt.Sprintf("\n\n📄 1/%d", len(chunks)), inTopic(topicOf(c.Message()), kb, tele.ModeHTML)...)
 			if err != nil {
 				return err
 			}
@@ -1110,8 +1125,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "settings"}, func(c tele.Context) error {
+		// Answer first: a submenu render can take seconds and Telegram's callback timeout would leave the click without a reaction.
+		c.Respond()
 		RenderSettingsSubmenu(bs, c.Message(), c.Data())
-		return c.Respond()
+		return nil
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "settings_perm"}, func(c tele.Context) error {
@@ -1157,13 +1174,27 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		if len(sessions) == 0 {
 			return c.Respond(&tele.CallbackResponse{Text: "No active sessions"})
 		}
-		chatID := c.Message().Chat.ID
+		// Answer first: a supergroup needs a getChat request before the edit.
+		c.Respond()
+		chat := c.Message().Chat
 		topicID := c.Message().ThreadID
+		forum := false
+		if chat.Type == tele.ChatSuperGroup {
+			chatInfo, err := helpers.FetchChatInfo(bot, chat.ID)
+			if err != nil {
+				helpers.RetryEdit(bot, c.Message(), "❌ "+markdown.EscapeHTML(err.Error()), tele.ModeHTML)
+				return nil
+			}
+			forum = chatInfo.IsForum
+		}
 		sel := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		var items []BindMenuItem
 		idx := 1
 		for sid, info := range sessions {
+			if forum && info.Name == "" {
+				continue
+			}
 			key := sid
 			label := fmt.Sprintf("session:%s", sid[:8])
 			if info.Name != "" {
@@ -1178,11 +1209,15 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🔗 %d: %s%s", idx, label, cwdStr), "bind_select", fmt.Sprintf("%d", idx))))
 			idx++
 		}
+		if len(items) == 0 {
+			helpers.RetryEdit(bot, c.Message(), "❌ No named sessions to bind. Name a session first with /bot_name.", tele.ModeHTML)
+			return nil
+		}
 		sel.Inline(rows...)
 		appendBackButton(sel)
-		bs.BindMenuItems.Store(c.Message().ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
+		bs.BindMenuItems.Store(c.Message().ID, BindMenuContext{Items: items, ChatID: chat.ID, TopicID: topicID, Forum: forum, Title: chat.Title})
 		helpers.RetryEdit(bot, c.Message(), "Select a session to bind to this group:", sel, tele.ModeHTML)
-		return c.Respond()
+		return nil
 	})
 
 	// "vretry" callback: a per-engine retry button on the voice status message in its failed state.

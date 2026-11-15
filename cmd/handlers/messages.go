@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
@@ -21,6 +22,15 @@ import (
 	"github.com/Seraphli/tg-cli/internal/voice"
 	tele "gopkg.in/telebot.v3"
 )
+
+// isTopicRootReply reports whether msg was typed in a forum topic rather than sent as a real reply:
+// Telegram sets reply_to_message of such a message to the topic's creation message, whose id is the
+// topic's thread id. Its callers treat such a message as a message without a reply. TopicMessage is
+// required because message_thread_id also names a reply thread in a supergroup without topics, where
+// a reply to a notification keeps its reply path.
+func isTopicRootReply(msg *tele.Message) bool {
+	return msg.TopicMessage && msg.ThreadID != 0 && msg.ReplyTo != nil && msg.ReplyTo.ID == msg.ThreadID
+}
 
 // resolveGroupTarget finds the unique bound tmux target for a group/topic chat.
 func resolveGroupTarget(bs *types.BotState, chatID int64, topicID int) (string, injector.TmuxTarget, error) {
@@ -211,7 +221,8 @@ func updateAudioStatus(status *audioStatus, ticket int64, verb, engine string) {
 // message saying so and no buttons — configuredRetryEngines/buildRetryButtons UNCHANGED. replyToID/
 // threadID come from c's own message (for the vretry retry path, c is the synthetic context whose
 // ReplyTo/ThreadID were set from the original failure's captured payload, so a repeated failure keeps
-// carrying the SAME recovery target forward, exactly as today).
+// carrying the SAME recovery target forward, exactly as today). A topic-root ReplyTo (isTopicRootReply)
+// is no reply: replyToID stays 0, so the retry takes the no-reply path too.
 func failAudioStatus(status *audioStatus, c tele.Context, cfg config.AppConfig, err error) {
 	engines := configuredRetryEngines(cfg)
 	if len(engines) == 0 {
@@ -221,7 +232,7 @@ func failAudioStatus(status *audioStatus, c tele.Context, cfg config.AppConfig, 
 		return
 	}
 	replyToID := 0
-	if c.Message().ReplyTo != nil {
+	if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
 		replyToID = c.Message().ReplyTo.ID
 	}
 	markup := buildRetryButtons(engines, replyToID, c.Message().ThreadID)
@@ -349,7 +360,7 @@ func isAudioDocument(doc *tele.Document) bool {
 
 // downloadTGFile downloads a Telegram file to /tmp/tg-cli/uploads/.
 func downloadTGFile(bot *tele.Bot, fileID, fileName string) (string, error) {
-	dir := "/tmp/tg-cli/uploads"
+	dir := uploadsDir
 	os.MkdirAll(dir, 0755)
 	file, err := bot.FileByID(fileID)
 	if err != nil {
@@ -391,10 +402,43 @@ func restoreSpoilers(text string, entities []tele.MessageEntity) string {
 	return string(runes)
 }
 
-// resolveReplyTarget extracts and validates a tmux target from a reply-to notification message (its
-// 📟 line, or the Pages msg_id fallback for rich notifications whose .Text is empty).
+// uploadsDir is where downloadTGFile puts the files Telegram sends and withQuote puts a long quoted message (a
+// variable so that a test can point it at a temporary directory).
+var uploadsDir = "/tmp/tg-cli/uploads"
+
+// quoteMaxRunes is the Telegram text limit, the size of every legacy message; a rich message holds up to
+// RichMaxRunes (30000 by default).
+const quoteMaxRunes = 4096
+
+// withQuote returns text led by a quote of the replied-to message quoted: its lines marked with "> " when it
+// has at most quoteMaxRunes runes, otherwise one quote line naming a file in dir that holds all of it, so the
+// agent reads the file when it needs the whole message. The file is quote_<label>_<local time to the second as
+// YYYYMMDD-HHMMSS>.txt; label names the session the reply goes to, so two sessions replied to in the same
+// second get two files. When the file cannot be written the quote line says so; text is injected either way.
+func withQuote(text, quoted, dir, label string) string {
+	n := utf8.RuneCountInString(quoted)
+	if n <= quoteMaxRunes {
+		var lines []string
+		for _, line := range strings.Split(quoted, "\n") {
+			lines = append(lines, "> "+line)
+		}
+		return strings.Join(lines, "\n") + "\n\n" + text
+	}
+	path := filepath.Join(dir, fmt.Sprintf("quote_%s_%s.txt", label, time.Now().Format("20060102-150405")))
+	err := os.MkdirAll(dir, 0755)
+	if err == nil {
+		err = os.WriteFile(path, []byte(quoted), 0600)
+	}
+	if err != nil {
+		logger.Error(fmt.Sprintf("withQuote: saving the quoted message (%d characters) to %s failed: %v", n, path, err))
+		return fmt.Sprintf("> [quoted message, %d characters; saving it to a file failed: %v]\n\n%s", n, err, text)
+	}
+	return fmt.Sprintf("> [quoted message, %d characters: %s]\n\n%s", n, path, text)
+}
+
+// resolveReplyTarget extracts and validates a tmux target from a reply-to notification message (its 📟 line).
 func resolveReplyTarget(bs *types.BotState, replyTo *tele.Message) (injector.TmuxTarget, error) {
-	targetPtr, err := extractReplyTarget(bs, replyTo)
+	targetPtr, err := extractReplyTarget(replyTo)
 	if err != nil || targetPtr == nil {
 		logger.Debug(fmt.Sprintf("resolveReplyTarget: no target: %v", err))
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
@@ -522,7 +566,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	sendFeedback := func(tmuxTarget string) {
 		recordPending(bs, tmuxTarget, c.Message().Chat.ID, c.Message().ID)
 	}
-	if c.Message().ReplyTo == nil {
+	if c.Message().ReplyTo == nil || isTopicRootReply(c.Message()) {
 		if c.Chat().Type != "group" && c.Chat().Type != "supergroup" {
 			return nil
 		}
@@ -651,7 +695,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		default:
 			// Cancel perm via DoCancelPerm (msgID-based — safe for TG message paths, any non-AskQ tool is a PermReq)
 			doCancelPerm(bs, replyTo.ID)
-			targetPtr, err := extractReplyTarget(bs, replyTo)
+			targetPtr, err := extractReplyTarget(replyTo)
 			if err == nil && targetPtr != nil {
 				tmuxStr := injector.FormatTarget(*targetPtr)
 				if injector.SessionExists(*targetPtr) {
@@ -689,11 +733,11 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 	}
 	sendFeedback(injector.FormatTarget(target))
 	if replyTo.Text != "" && (c.Chat().Type == "group" || c.Chat().Type == "supergroup") {
-		var lines []string
-		for _, line := range strings.Split(replyTo.Text, "\n") {
-			lines = append(lines, "> "+line)
+		label := target.PaneID
+		if info := bs.SessionState.FindInfoByTarget(injector.FormatTarget(target)); info != nil && info.Name != "" {
+			label = info.Name
 		}
-		injectionText = strings.Join(lines, "\n") + "\n\n" + injectionText
+		injectionText = withQuote(injectionText, replyTo.Text, uploadsDir, label)
 	}
 	if err := InjectMessage(bs, injector.FormatTarget(target), injectionText, imgPath); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
@@ -862,7 +906,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("Not paired. Use /bot_pair first.")
 		}
-		if c.Message().ReplyTo == nil {
+		if c.Message().ReplyTo == nil || isTopicRootReply(c.Message()) {
 			if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
 				isCmd := strings.HasPrefix(c.Message().Text, "/bot_perm_") ||
 					c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||

@@ -140,9 +140,28 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 	return c.Reply(fmt.Sprintf("🔐 Switched to %s mode", finalMode))
 }
 
+// topicOf returns the forum topic m was typed in: its ThreadID when Telegram marks it a topic message, else 0. A
+// reply thread of a non-forum supergroup carries a ThreadID too, but sendMessage takes message_thread_id for forums only.
+func topicOf(m *tele.Message) int {
+	if m.TopicMessage {
+		return m.ThreadID
+	}
+	return 0
+}
+
+// inTopic puts topicID first in the options of a send, so a message that answers something typed in a forum
+// topic stays in that topic (topicID 0, the General topic or a plain chat, adds nothing). The *SendOptions
+// must come first: telebot's extractOptions replaces everything collected before it.
+func inTopic(topicID int, opts ...interface{}) []interface{} {
+	if topicID <= 0 {
+		return opts
+	}
+	return append([]interface{}{&tele.SendOptions{ThreadID: topicID}}, opts...)
+}
+
 // SendCaptureReply builds a pane-capture message (header + chunks + collapse button,
-// with pagination when multi-page), sends it, stores the PageEntry, and returns the sent message.
-// Shared by handleCaptureCommand (the /p TG path) and the /test/capture_message endpoint
+// with pagination when multi-page), sends it to topicID (0 = no topic), stores the PageEntry, and returns the
+// sent message. Shared by handleCaptureCommand (the /p TG path) and the /test/capture_message endpoint
 // so tests exercise the exact production message-building code.
 //
 // Capture is sent as a RICH message (Bot API 10.1, RetrySendRich) WITHOUT a <pre> code block: the raw
@@ -152,7 +171,7 @@ func handlePermCommand(c tele.Context, target injector.TmuxTarget) error {
 // that made SplitBody loop forever on large captures (the /p hang); escaping strips the raw '<'/'>'
 // so SplitBody sees no tags. The stored chunks are already escaped; collapsibleBody renders capture
 // (Rich) entries as-is (no <pre>).
-func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
+func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, topicID int, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
 	content = helpers.ShortenSeparators(content)
 	header := CaptureHeader
 	cfg, _ := config.LoadAppConfig()
@@ -169,7 +188,7 @@ func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheSto
 		kb := &tele.ReplyMarkup{}
 		kb.Inline(CaptureExtraRow(true, true))
 		text := header + chunks[0]
-		sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
+		sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{TopicID: topicID, Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +199,7 @@ func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, pages *stores.PageCacheSto
 	lastPage := len(chunks)
 	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{CaptureExtraRow(true, true)})
 	text := header + chunks[lastPage-1]
-	sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
+	sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{TopicID: topicID, Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +219,7 @@ func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.Tm
 	if content == "" {
 		return c.Reply("(empty pane)")
 	}
-	_, err = SendCaptureReply(c.Bot(), c.Chat(), bs.Pages, content)
+	_, err = SendCaptureReply(c.Bot(), c.Chat(), topicOf(c.Message()), bs.Pages, content)
 	return err
 }
 
@@ -427,7 +446,7 @@ func handleRestartCommand(bs *types.BotState, c tele.Context, target injector.Tm
 	}
 	name := backendDisplayName(helpers.DetectBackend(tmuxTarget))
 	paneLabel := notify.FormatPaneID(tmuxTarget)
-	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), fmt.Sprintf("🔄 Restarting %s session...\n📟 %s", name, paneLabel), tele.ModeHTML)
+	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), fmt.Sprintf("🔄 Restarting %s session...\n📟 %s", name, paneLabel), inTopic(topicOf(c.Message()), tele.ModeHTML)...)
 	if err != nil {
 		return err
 	}
@@ -444,7 +463,7 @@ func handleRestartCommand(bs *types.BotState, c tele.Context, target injector.Tm
 
 // handleUsageCommand handles /bot_usage.
 func handleUsageCommand(bs *types.BotState, c tele.Context) error {
-	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), "⏳ Fetching usage...", tele.ModeHTML)
+	msg, err := helpers.RetrySend(bs.Bot, c.Chat(), "⏳ Fetching usage...", inTopic(topicOf(c.Message()), tele.ModeHTML)...)
 	if err != nil {
 		return err
 	}
@@ -663,11 +682,11 @@ func CaptureExtraRow(isCapture, expanded bool) tele.Row {
 	return row
 }
 
-// SendSettingsMenu sends the top-level settings menu to chat, records it in
+// SendSettingsMenu sends the top-level settings menu to chat (topic topicID, 0 = no topic), records it in
 // SettingsMenuMsgs, and returns the sent message. Shared by the /bot_settings
 // handler and the /test/settings_message endpoint.
-func SendSettingsMenu(bs *types.BotState, chat *tele.Chat) (*tele.Message, error) {
-	sent, err := helpers.RetrySend(bs.Bot, chat, buildSettingsTopText(), buildSettingsTopMenu(), tele.ModeHTML)
+func SendSettingsMenu(bs *types.BotState, chat *tele.Chat, topicID int) (*tele.Message, error) {
+	sent, err := helpers.RetrySend(bs.Bot, chat, buildSettingsTopText(), inTopic(topicID, buildSettingsTopMenu(), tele.ModeHTML)...)
 	if err != nil {
 		return nil, err
 	}
@@ -913,7 +932,7 @@ func showSettingsPerm(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 	helpers.RetryEdit(bot, msg, fmt.Sprintf("🔒 <b>Permission Mode</b>\n📟 %s\nCurrent: %s", notify.FormatPaneID(tmuxStr), mode), menu, tele.ModeHTML)
 }
 
-func buildRoutesSections(bot *tele.Bot, bs *types.BotState) []string {
+func buildRoutesSections(bs *types.BotState) []string {
 	creds, _ := config.LoadCredentials()
 	sessions := bs.SessionState.All()
 	var sections []string
@@ -922,24 +941,18 @@ func buildRoutesSections(bot *tele.Bot, bs *types.BotState) []string {
 		lines = append(lines, "📋 Agent routes:")
 		for name, route := range creds.NameRouteMap {
 			chatName := fmt.Sprintf("%d", route.ChatID)
+			if route.Title != "" {
+				chatName = fmt.Sprintf("%s (%d)", markdown.EscapeHTML(route.Title), route.ChatID)
+			}
 			topicStr := ""
-			if ch, err := bot.ChatByID(route.ChatID); err == nil {
-				if ch.Title != "" {
-					chatName = fmt.Sprintf("%s (%d)", ch.Title, route.ChatID)
-				}
-				if ch.Type == tele.ChatSuperGroup {
-					if route.TopicID == 0 {
-						topicStr = ", topic=General"
-					} else {
-						topicStr = fmt.Sprintf(", topic=#%d", route.TopicID)
-					}
-				}
+			if route.TopicID != 0 {
+				topicStr = fmt.Sprintf(", topic=#%d", route.TopicID)
 			}
 			paneID := ""
 			if info := bs.SessionState.FindByName(name); info != nil {
 				paneID = " (" + notify.FormatPaneID(info.TmuxTarget) + ")"
 			}
-			lines = append(lines, fmt.Sprintf("  %s%s → %s%s", name, paneID, chatName, topicStr))
+			lines = append(lines, fmt.Sprintf("  %s%s → %s%s", markdown.EscapeHTML(name), paneID, chatName, topicStr))
 		}
 		sections = append(sections, strings.Join(lines, "\n"))
 	}
@@ -959,7 +972,7 @@ func buildRoutesSections(bot *tele.Bot, bs *types.BotState) []string {
 
 // showSettingsRoutes displays the route bindings sub-menu in the settings message.
 func showSettingsRoutes(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
-	sections := buildRoutesSections(bot, bs)
+	sections := buildRoutesSections(bs)
 	creds, _ := config.LoadCredentials()
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row

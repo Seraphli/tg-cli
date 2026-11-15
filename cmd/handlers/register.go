@@ -36,6 +36,8 @@ type BindMenuContext struct {
 	Items   []BindMenuItem
 	ChatID  int64
 	TopicID int
+	Forum   bool   // forum supergroup: only named sessions are listed and a bind gives the session its own topic
+	Title   string // title of the chat the menu was opened in, stored with the route
 }
 
 var builtinTools = []string{
@@ -142,33 +144,23 @@ func ScanCustomCommands() map[string]stores.CustomCmd {
 	return result
 }
 
-// extractReplyTarget resolves the tmux target from a replied-to notification message. It first parses
-// the 📟 line from the message text (plain/legacy notifications); when .Text is empty — rich Bot API
-// 10.1 notifications carry their content in a rich_message field telebot does not model, leaving .Text
-// blank — it falls back to the msg_id -> target record in the Pages store (written by recordReplyTarget
-// when the notification was sent). Returns an error when neither yields a target.
-func extractReplyTarget(bs *types.BotState, replyTo *tele.Message) (*injector.TmuxTarget, error) {
+// extractReplyTarget resolves the tmux target from a replied-to notification message by parsing the 📟 line
+// of its text. Rich Bot API 10.1 notifications carry their content in a rich_message field telebot does not
+// model; RichReplyPoller puts the header lines of such a message in .Payload and the rest in .Text, so one parse
+// of both covers legacy (empty .Payload) and rich notifications. Returns an error when there is no target.
+func extractReplyTarget(replyTo *tele.Message) (*injector.TmuxTarget, error) {
 	if replyTo == nil {
 		return nil, fmt.Errorf("no reply message")
 	}
-	if targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Text); err == nil && targetPtr != nil {
+	if targetPtr, err := helpers.ExtractTmuxTargetFromText(replyTo.Payload + "\n" + replyTo.Text); err == nil && targetPtr != nil {
 		return targetPtr, nil
-	}
-	if entry, ok := bs.Pages.Get(replyTo.ID); ok && entry.TmuxTarget != "" {
-		target, err := injector.ParseTarget(entry.TmuxTarget)
-		if err != nil {
-			return nil, err
-		}
-		logger.Debug(fmt.Sprintf("extractReplyTarget: resolved via Pages msg_id=%d target=%s", replyTo.ID, entry.TmuxTarget))
-		return &target, nil
 	}
 	return nil, fmt.Errorf("no tmux target in reply")
 }
 
-// resolveReplyTargetFromReply resolves + liveness-checks a tmux target from a reply-to notification
-// (its 📟 line, or the Pages msg_id fallback for rich notifications whose .Text is empty).
+// resolveReplyTargetFromReply resolves + liveness-checks a tmux target from a reply-to notification (its 📟 line).
 func resolveReplyTargetFromReply(bs *types.BotState, replyTo *tele.Message) (injector.TmuxTarget, error) {
-	targetPtr, err := extractReplyTarget(bs, replyTo)
+	targetPtr, err := extractReplyTarget(replyTo)
 	if err != nil || targetPtr == nil {
 		return injector.TmuxTarget{}, fmt.Errorf("no target found")
 	}
@@ -315,6 +307,13 @@ func Register(bs *types.BotState) {
 		}
 		logger.Info(fmt.Sprintf("Chat migration completed: %d → %d", from, to))
 		helpers.RetrySend(bot, &tele.Chat{ID: to}, fmt.Sprintf("✅ Chat migrated: %d → %d\nAll route bindings updated.", from, to), tele.ModeHTML)
+		return nil
+	})
+	// A group rename arrives as a new_chat_title service message: keep the stored route titles current.
+	bot.Handle(tele.OnNewGroupTitle, func(c tele.Context) error {
+		if err := config.SetChatTitle(c.Chat().ID, c.Message().NewGroupTitle); err != nil {
+			logger.Error(fmt.Sprintf("Failed to store new chat title: %v", err))
+		}
 		return nil
 	})
 	// Build TG→CC name mapping
@@ -480,7 +479,7 @@ func Register(bs *types.BotState) {
 		// Resolve target: reply-to or group
 		var target injector.TmuxTarget
 		var tmuxStr string
-		if c.Message().ReplyTo != nil {
+		if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
 			t, err := resolveReplyTargetFromReply(bs, c.Message().ReplyTo)
 			if err != nil {
 				if err.Error() == "no target found" {
@@ -560,7 +559,7 @@ func Register(bs *types.BotState) {
 			lines = append(lines, fmt.Sprintf("%d. %s %s — %s", i+1, prefix, markdown.EscapeHTML(helpers.TruncateStr(s.Summary, 500)), helpers.RelativeTime(s.Modified)))
 		}
 		text := strings.Join(lines, "\n")
-		_, err = helpers.RetrySend(bot, c.Chat(), text, kb, tele.ModeHTML)
+		_, err = helpers.RetrySend(bot, c.Chat(), text, inTopic(topicOf(c.Message()), kb, tele.ModeHTML)...)
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to send: %v", err))
 		}
@@ -599,7 +598,7 @@ func Register(bs *types.BotState) {
 			if err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 			}
-			creds.NameRouteMap[name] = config.NameRoute{ChatID: chatID, TopicID: topicID}
+			creds.NameRouteMap[name] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
 			if err := config.SaveCredentials(creds); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 			}
@@ -612,8 +611,8 @@ func Register(bs *types.BotState) {
 		}
 
 		// Mode 2: reply to notification — bind session from replied message
-		if c.Message().ReplyTo != nil {
-			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
+		if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
+			targetPtr, err := extractReplyTarget(c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -634,7 +633,7 @@ func Register(bs *types.BotState) {
 			if err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 			}
-			creds.NameRouteMap[key] = config.NameRoute{ChatID: chatID, TopicID: topicID}
+			creds.NameRouteMap[key] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
 			if err := config.SaveCredentials(creds); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 			}
@@ -651,12 +650,23 @@ func Register(bs *types.BotState) {
 		if len(sessions) == 0 {
 			return c.Reply("No active sessions to bind.")
 		}
+		forum := false
+		if c.Chat().Type == tele.ChatSuperGroup {
+			chatInfo, err := helpers.FetchChatInfo(bot, chatID)
+			if err != nil {
+				return c.Reply("❌ " + err.Error())
+			}
+			forum = chatInfo.IsForum
+		}
 		sel := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		var lines []string
 		var items []BindMenuItem
 		idx := 1
 		for sid, info := range sessions {
+			if forum && info.Name == "" {
+				continue
+			}
 			key := sid
 			label := fmt.Sprintf("session:%s", sid[:8])
 			if info.Name != "" {
@@ -672,10 +682,13 @@ func Register(bs *types.BotState) {
 			rows = append(rows, sel.Row(sel.Data(fmt.Sprintf("🔗 %d: %s", idx, label), "bind_select", fmt.Sprintf("%d", idx))))
 			idx++
 		}
+		if len(items) == 0 {
+			return c.Reply("❌ No named sessions to bind. Name a session first with /bot_name.")
+		}
 		sel.Inline(rows...)
 		sent, err := markedBotReply(bot, helpers.FloatMarker, time.Now, c.Message(), fmt.Sprintf("Select a session to bind to this chat:\n%s", strings.Join(lines, "\n")), sel)
 		if err == nil {
-			bs.BindMenuItems.Store(sent.ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID})
+			bs.BindMenuItems.Store(sent.ID, BindMenuContext{Items: items, ChatID: chatID, TopicID: topicID, Forum: forum, Title: c.Chat().Title})
 		}
 		return err
 	})
@@ -687,8 +700,8 @@ func Register(bs *types.BotState) {
 			return c.Reply("❌ Not paired.")
 		}
 		// Mode 1: reply to notification — unbind session from replied message
-		if c.Message().ReplyTo != nil {
-			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
+		if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
+			targetPtr, err := extractReplyTarget(c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -785,8 +798,8 @@ func Register(bs *types.BotState) {
 		}
 		// Resolve session: from replied message or single active session
 		var sessionID string
-		if c.Message().ReplyTo != nil {
-			targetPtr, err := extractReplyTarget(bs, c.Message().ReplyTo)
+		if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
+			targetPtr, err := extractReplyTarget(c.Message().ReplyTo)
 			if err != nil || targetPtr == nil {
 				return c.Reply("❌ No tmux session info (📟) found in the replied message.")
 			}
@@ -842,7 +855,7 @@ func Register(bs *types.BotState) {
 		}
 		sel.Inline(rows...)
 		appendDeleteButton(sel)
-		_, err := helpers.RetrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), sel, tele.ModeHTML)
+		_, err := helpers.RetrySend(bot, c.Chat(), "Select a session to name:\n"+strings.Join(lines, "\n"), inTopic(topicOf(c.Message()), sel, tele.ModeHTML)...)
 		return err
 	})
 
@@ -953,7 +966,7 @@ func Register(bs *types.BotState) {
 		if !pairing.IsAllowed(userID) && !pairing.IsAllowed(chatID) {
 			return c.Reply("❌ Not paired. Use /bot_pair first.")
 		}
-		_, err := SendSettingsMenu(bs, c.Chat())
+		_, err := SendSettingsMenu(bs, c.Chat(), topicOf(c.Message()))
 		return err
 	})
 

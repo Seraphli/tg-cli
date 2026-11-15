@@ -1,0 +1,67 @@
+{
+  "update_id": 745613305,
+  "message": {
+    "message_id": 16,
+    "from": {
+      "id": 8000001,
+      "is_bot": false,
+      "first_name": "UserFirst1",
+      "username": "placeholder_user1",
+      "language_code": "en"
+    },
+    "chat": {
+      "id": -1001234567890,
+      "title": "Test Forum",
+      "is_forum": true,
+      "type": "supergroup"
+    },
+    "date": 1794446699,
+    "reply_to_message": {
+      "message_id": 15,
+      "from": {
+        "id": 9000001,
+        "is_bot": true,
+        "first_name": "BotFirst1",
+        "username": "placeholder_bot1"
+      },
+      "chat": {
+        "id": -1001234567890,
+        "title": "Test Forum",
+        "is_forum": true,
+        "type": "supergroup"
+      },
+      "date": 1794445949,
+      "rich_message": {
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "💬 [R-c probe] Message"
+          },
+          {
+            "type": "details",
+            "summary": "📋 C:1%",
+            "blocks": [
+              {
+                "type": "paragraph",
+                "text": [
+                  "📂 ~",
+                  {
+                    "type": "bot_command",
+                    "text": "/probe",
+                    "bot_command": "probe"
+                  },
+                  "\n📟 %999@/tmp/tmux-1000/default\n🖥 probe"
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "text": "R-c probe: please reply to this message"
+          }
+        ]
+      }
+    },
+    "text": "hi"
+  }
+}

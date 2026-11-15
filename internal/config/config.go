@@ -11,9 +11,10 @@ import (
 )
 
 type NameRoute struct {
-	ChatID        int64 `json:"chatId"`
-	TopicID       int   `json:"topicId,omitempty"`
-	ToolNotifyOff bool  `json:"toolNotifyOff,omitempty"`
+	ChatID        int64  `json:"chatId"`
+	TopicID       int    `json:"topicId,omitempty"`
+	ToolNotifyOff bool   `json:"toolNotifyOff,omitempty"`
+	Title         string `json:"title,omitempty"` // chat title: stored at bind time, by the startup fill, overwritten by new_chat_title
 }
 
 type Credentials struct {
@@ -23,6 +24,7 @@ type Credentials struct {
 	NameRouteMap  map[string]NameRoute `json:"nameRouteMap,omitempty"`
 	APIToken      string               `json:"apiToken,omitempty"`
 	MailboxChatID int64                `json:"mailboxChatId,omitempty"`
+	ForumTopics   map[string]int       `json:"forumTopics,omitempty"` // "<chat id>|<session name>" -> forum topic (thread) id; independent of the current route
 }
 
 type PairingAllow struct {
@@ -79,7 +81,9 @@ func LoadCredentials() (Credentials, error) {
 				IDs:           []string{},
 				DefaultChatID: "",
 			},
-			Port: 12500,
+			Port:         12500,
+			NameRouteMap: map[string]NameRoute{},
+			ForumTopics:  map[string]int{},
 		}, nil
 	}
 	data, err := os.ReadFile(path)
@@ -98,6 +102,9 @@ func LoadCredentials() (Credentials, error) {
 	}
 	if creds.NameRouteMap == nil {
 		creds.NameRouteMap = make(map[string]NameRoute)
+	}
+	if creds.ForumTopics == nil {
+		creds.ForumTopics = make(map[string]int)
 	}
 	return creds, nil
 }
@@ -276,6 +283,52 @@ func MigrateChat(oldID, newID int64) error {
 		migrated = true
 	}
 	if !migrated {
+		return nil
+	}
+	return SaveCredentials(creds)
+}
+
+// ForumTopicKey is the ForumTopics key for a session name in a group.
+func ForumTopicKey(chatID int64, name string) string {
+	return strconv.FormatInt(chatID, 10) + "|" + name
+}
+
+// SetChatTitle stores title in every route whose chat id is chatID (new_chat_title service message).
+func SetChatTitle(chatID int64, title string) error {
+	creds, err := LoadCredentials()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for k, v := range creds.NameRouteMap {
+		if v.ChatID == chatID && v.Title != title {
+			v.Title = title
+			creds.NameRouteMap[k] = v
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return SaveCredentials(creds)
+}
+
+// FillEmptyTitles sets titles[chat id] on every route whose title is still empty. It reads the CURRENT
+// credentials file (the file has no lock, so the caller must never write back a copy read earlier).
+func FillEmptyTitles(titles map[int64]string) error {
+	creds, err := LoadCredentials()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for k, v := range creds.NameRouteMap {
+		if t := titles[v.ChatID]; v.Title == "" && t != "" {
+			v.Title = t
+			creds.NameRouteMap[k] = v
+			changed = true
+		}
+	}
+	if !changed {
 		return nil
 	}
 	return SaveCredentials(creds)

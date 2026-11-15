@@ -122,6 +122,15 @@ You will receive TG notifications when tmux sessions are created or closed:
 - `🟢 Tmux Session Created: %pane (session_name)` — a new tmux session was created
 - `🔴 Tmux Session Closed: %pane (session_name) [agent_name]` — a tmux session was closed (bot also cleans up stale session state)
 
+## Route Commands
+
+### Bind a session name to a chat
+```bash
+tg-cli route bind --name mybot --chat -1001234567890
+```
+
+Binds the session name to the chat through the running bot. In a forum supergroup (topics enabled) the session gets its own topic named after it: a topic already recorded for this group and name is reused, otherwise one is created (the bot needs the Manage Topics right in the group). Any other chat is bound whole. A bind replaces the old route directly; no topic is ever deleted. Output: `Route bound: mybot → -1001234567890, topic=77` (the topic part only when the route has a topic). If Telegram refuses (for example the bot cannot read the chat), the command prints Telegram's error text on stderr, exits 1, and nothing is stored.
+
 ## Remote Access (cloudflared)
 
 When using tg-cli across machines, expose the bot via cloudflared tunnel:
@@ -198,6 +207,13 @@ tg-cli mailbox send --self --to agentA --subject "Review Done" --text "Review co
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--name` | Yes | Agent name to watch |
+
+### route bind Flags
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--name` | Yes | Session name |
+| `--chat` | Yes | Chat id (negative for groups) |
+| `--port` | No | Bot HTTP port |
 
 ### mailbox send Flags
 | Flag | Required | Description |
