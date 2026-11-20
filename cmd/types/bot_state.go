@@ -40,11 +40,6 @@ type BotState struct {
 	PendingMsgStore *stores.PendingMsgStore
 	BusyStatus      *stores.BusyStatusStore
 
-	// f29 D: per-target previous running state for busy→idle 401 detection. Owned by the SERIAL
-	// runBusyTick loop (ticker-serialized, no lock needed); doubles as the once-per-stall dedup (rearm on
-	// false→true). Lazily initialized in runBusyTick.
-	BusyPrevRunning map[string]bool
-
 	LaunchPending         sync.Map
 	TmuxPaneCache         sync.Map
 	PendingExitKill       sync.Map

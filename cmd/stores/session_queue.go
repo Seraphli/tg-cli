@@ -202,15 +202,15 @@ type JobInput struct {
 	ArrivedAt time.Time
 }
 
-// DispatchWithMeta is Dispatch carrying the drain-lookahead metadata (JobInput).
-func (s *SessionEventStore) DispatchWithMeta(sessionID string, in JobInput, handler func() error) error {
+// DispatchWithMeta enqueues a job carrying the drain-lookahead metadata (JobInput) and returns without awaiting
+// the handler: the hook handler answers its HTTP request once the job is on the FIFO. sessionID=="" runs inline.
+func (s *SessionEventStore) DispatchWithMeta(sessionID string, in JobInput, handler func() error) {
 	if sessionID == "" {
-		return handler()
+		handler()
+		return
 	}
 	w := s.getOrCreate(sessionID)
-	done := make(chan error, 1)
-	w.enqueueBlocking(&sessionEventJob{label: in.Label, event: in.Event, promptID: in.PromptID, messageID: in.MessageID, index: in.Index, final: in.Final, delta: in.Delta, arrivedAt: in.ArrivedAt, handler: handler, done: done})
-	return <-done
+	w.enqueueBlocking(&sessionEventJob{label: in.Label, event: in.Event, promptID: in.PromptID, messageID: in.MessageID, index: in.Index, final: in.Final, delta: in.Delta, arrivedAt: in.ArrivedAt, handler: handler})
 }
 
 // DispatchAsync enqueues a job, blocking at the cap until admitted, and returns without awaiting the
@@ -222,16 +222,6 @@ func (s *SessionEventStore) DispatchAsync(sessionID, label string, handler func(
 	}
 	w := s.getOrCreate(sessionID)
 	w.enqueueBlocking(&sessionEventJob{label: label, handler: handler})
-}
-
-// DispatchAsyncWithMeta is DispatchAsync carrying the drain-lookahead metadata.
-func (s *SessionEventStore) DispatchAsyncWithMeta(sessionID, label, event, promptID string, arrivedAt time.Time, handler func() error) {
-	if sessionID == "" {
-		handler()
-		return
-	}
-	w := s.getOrCreate(sessionID)
-	w.enqueueBlocking(&sessionEventJob{label: label, event: event, promptID: promptID, arrivedAt: arrivedAt, handler: handler})
 }
 
 // TryDispatchAsync attempts a nonblocking enqueue to the session's worker queue.

@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -198,7 +199,8 @@ func ListProjectSessionsByDir(dir string, limit int, excludeID string) ([]Sessio
 
 // DetectBackend determines the CLI backend running in the tmux pane.
 // Returns "cc", "codex", or "" (unknown/exited). This is the live path: it reads the pane's current
-// command via tmux and, only for a "node" pane, resolves the real CLI via GetPaneCLICommand.
+// command via tmux and, only for a "node" pane or a version-number pane (a cc started from its version file),
+// resolves the real CLI via GetPaneCLICommand.
 func DetectBackend(tmuxTarget string) string {
 	return detectBackend(GetPaneCommand(tmuxTarget), func() string {
 		return GetPaneCLICommand(tmuxTarget)
@@ -206,9 +208,9 @@ func DetectBackend(tmuxTarget string) string {
 }
 
 // detectBackend maps a pane's current command to "cc"/"codex"/"" — the single backend switch shared by
-// the live path (DetectBackend, above) and the batched path (PaneState). cliCommand is a closure so it
-// is invoked ONLY for a "node" pane; claude/codex/other panes never trigger the extra pid fetch or the
-// ps call, so removing the duplication adds no exec on the live path.
+// the live path (DetectBackend, above). cliCommand is a closure so it is invoked ONLY for a "node" pane or a
+// version-number pane; claude/codex/pi/other panes never trigger the extra pid fetch or the ps call, so
+// removing the duplication adds no exec on the live path.
 func detectBackend(command string, cliCommand func() string) string {
 	switch command {
 	case "claude":
@@ -228,8 +230,19 @@ func detectBackend(command string, cliCommand func() string) string {
 			}
 		}
 	}
+	if versionCommand.MatchString(command) {
+		for _, token := range strings.Fields(cliCommand()) {
+			if strings.Contains(token, "/claude/versions/") {
+				return "cc"
+			}
+		}
+	}
 	return ""
 }
+
+// versionCommand matches the pane command of a cc started from its version file (.../claude/versions/2.1.319):
+// tmux shows the base name of argv[0], which is the version number.
+var versionCommand = regexp.MustCompile(`^\d+(\.\d+)+$`)
 
 func listSessionsFromDir(dir string, limit int, excludeID string) ([]SessionListEntry, error) {
 	entries, err := readDir(dir)

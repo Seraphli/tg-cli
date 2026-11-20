@@ -1,9 +1,11 @@
 package helpers
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
+	"github.com/Seraphli/tg-cli/internal/injector"
 )
 
 // TestTitleIsBusyCodex is the retargeted TestIsCodexBusyTitle: the same codex spinner-frame /
@@ -108,5 +110,52 @@ func TestStoreOrTitleBusyPi(t *testing.T) {
 	}
 	if got := storeOrTitleBusy(store, "codex", target2, codexIdleTitle); got != TitleIsBusy("codex", codexIdleTitle) {
 		t.Errorf("codex ignores store: storeOrTitleBusy = %v, want %v (== TitleIsBusy)", got, TitleIsBusy("codex", codexIdleTitle))
+	}
+}
+
+// TestBusyStateFor covers where the pane meets the stores and the title. cc: a done line reads idle at once
+// although a trailing MessageDisplay stamped CCActive after the Stop, and a pane that decides nothing reads
+// working while the stamp is fresh. codex: a compaction line reads compacting at the live status position only.
+// pi: a compaction line reads compacting whatever the store says, a normal turn keeps the store's answer.
+func TestBusyStateFor(t *testing.T) {
+	var body string
+	orig := captureViewport
+	defer func() { captureViewport = orig }()
+	captureViewport = func(ctx context.Context, target injector.TmuxTarget) (string, error) { return body, nil }
+	for _, c := range []struct {
+		name, backend, title, viewport string
+		piRunning                      bool
+		want                           stores.BusyState
+	}{
+		{"cc done line, CCActive fresh", "cc", "x", fixture(t, "idle-doneline.txt"), false, stores.BusyIdle},
+		{"cc no decision, CCActive fresh", "cc", "x", "no input box", false, stores.BusyWorking},
+		{"codex compacting", "codex", "⠙ proj", fixture(t, "../codex-busy/compacting-0160.txt"), false, stores.BusyCompacting},
+		{"codex normal turn, a compaction line in the history", "codex", "⠙ proj", fixture(t, "../codex-busy/working-quoted-0160.txt"), false, stores.BusyWorking},
+		{"pi manual compaction, no store entry", "pi", "π - proj", fixture(t, "../pi-busy/compacting-manual-085.txt"), false, stores.BusyCompacting},
+		{"pi automatic compaction, store running", "pi", "π - proj", fixture(t, "../pi-busy/compacting-auto-085.txt"), true, stores.BusyCompacting},
+		{"pi normal turn, store running", "pi", "π - proj", fixture(t, "../pi-busy/working-085.txt"), true, stores.BusyWorking},
+	} {
+		body = c.viewport
+		store := stores.NewHookRunningStateStore()
+		store.RecordCCActivity("%1")
+		if c.piRunning {
+			store.SetRunning("%1")
+		}
+		if got, _ := busyStateFor(context.Background(), store, c.backend, "%1", c.title); got != c.want {
+			t.Errorf("%s: busyStateFor = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestIsSessionRunning_StalledReadsRunning proves a stalled (waiting) and a compacting session read running to
+// the readers, from the stored state: the target has no pane, so a live read would answer idle.
+func TestIsSessionRunning_StalledReadsRunning(t *testing.T) {
+	store := stores.NewHookRunningStateStore()
+	target := "%99@/tmp/tg-cli-test-none"
+	for _, state := range []stores.BusyState{stores.BusyWaiting, stores.BusyCompacting} {
+		store.SetBusyState(target, state, "")
+		if !IsSessionRunning(store, target) {
+			t.Errorf("stored state %v: IsSessionRunning = false, want true", state)
+		}
 	}
 }

@@ -13,7 +13,6 @@ start_claude "e2e-cc-4" "--allow-dangerously-skip-permissions"
 
 # Record log position
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Send command that triggers Bash permission, with explicit instruction to output text first
 pane_log "[permission] BEFORE permission prompt"
@@ -75,9 +74,6 @@ if [ "$PERM_FOUND" = true ] && [ -n "$PERM_MSG_ID" ]; then
   else
     fail "TC9: Permission request sent marker missing fmt=rich (expected rich message path)"
   fi
-
-  # Typing continuity: inject → PreToolUse (text generation before tool call)
-  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase4"
 
   # Verify live 💬 Message (Stream send/edit) arrived BEFORE PermissionRequest — ordering under drain
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")

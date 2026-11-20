@@ -15,7 +15,6 @@ echo "Waiting for Codex to settle..."
 wait_for_idle
 
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Inject a long-output prompt to trigger pagination
 LONG_PROMPT="Without using any tools, write a comprehensive essay about the history and evolution of computer operating systems. Cover these topics in detail with at least 2 paragraphs each: 1) Early batch processing systems in the 1950s, 2) Time-sharing systems in the 1960s, 3) Unix and its philosophy, 4) The rise of personal computers and DOS/Windows, 5) Linux and open source movement, 6) Modern mobile operating systems iOS and Android, 7) Cloud operating systems and containers, 8) Future trends in OS design. You MUST write at least 1500 words total. Do not use any tools."
@@ -83,6 +82,3 @@ if [ "$PAGINATION_FOUND" = true ] && [ -n "$MSG_ID" ]; then
     fail "Bot did not log Codex callback page turn"
   fi
 fi
-
-# Typing continuity: inject -> Stop (long prompt, ~30s+ without tools)
-check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "codex/phase2"

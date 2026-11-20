@@ -20,7 +20,7 @@ type BusyStatusEntry struct {
 	SentAt      time.Time `json:"sent_at"`
 	LastEditAt  time.Time `json:"last_edit_at"`
 	LastFloatAt time.Time `json:"last_float_at"`
-	IdleSince   time.Time `json:"idle_since"`
+	State       BusyState `json:"state"` // the state the message shows
 }
 
 // BusyStatusStore persists and manages busy-status messages per (chatID, topicID) route.

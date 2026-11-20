@@ -14,7 +14,6 @@ start_codex "e2e-codex-3"
 wait_for_idle
 
 LOG_BEFORE_PERM=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Inject prompt that triggers Bash tool (Codex uses PreToolUse hook for permission)
 pane_log "[codex/pretool] BEFORE permission prompt"
@@ -43,9 +42,6 @@ pane_log "[codex/pretool] AFTER PreToolUse detected"
 
 if [ "$PRETOOL_FOUND" = true ]; then
   pass "Codex PreToolUse notification sent for Bash tool"
-
-  # Typing continuity: inject -> PreToolUse
-  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "codex/phase3"
 
   # Verify intermediate Update notification was sent before PreToolUse (if applicable)
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_PERM + 1))" "$LOG_FILE")

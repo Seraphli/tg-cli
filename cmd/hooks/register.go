@@ -56,10 +56,24 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 		// stamped onto the archive ts (RecordHookEventAt) so archive ORDER BY ts == arrival order even though
 		// event_id reflects drain-perturbed handler-execution order.
 		arrivedAt := time.Now()
-		// ENQUEUE IMMEDIATELY (S0 ordering reservation, rev 14 BLOCKER1): the SYNC metadata Dispatch onto the
-		// Hook FIFO is the per-session ordering reservation, done BEFORE any archive I/O — a slow SQLite write
-		// cannot reorder the reservation. ALL hooks (incl. MessageDisplay) are now serialized through this FIFO;
-		// the archive write, the MessageDisplay branch, re-register, prelude, and switch all run INSIDE the job.
+		// Decided at arrival, not when the job runs: the reply no longer waits for the job, so a turn-2 prompt can
+		// register (off the FIFO) before the Stop or UserPromptSubmit job of the earlier event runs, and a
+		// SessionStart of a new id on the same pane can drop the old id before its SessionEnd job runs. The cancels
+		// freeze only the prompts that exist now (FreezeWaitEntryOnDesktop is exactly-once); the same holds for PreToolUse of an earlier turn.
+		switch event {
+		case "Stop", "UserPromptSubmit":
+			CancelPendingWaitBySession(bs, p.SessionID, "", "", "")
+		case "PreToolUse":
+			// Skips this tool's own entry: its PermissionRequest can register before this PreToolUse arrives.
+			CancelPendingWaitBySession(bs, p.SessionID, p.ToolName, helpers.CanonicalToolInput(p.ToolInput), p.ToolUseID)
+		}
+		// SessionEnd of a session that is known now is handled even if a new id has dropped it when the job runs.
+		endKnown := event == "SessionEnd" && bs.SessionState.FindInfoByID(p.SessionID) != nil
+		// ENQUEUE IMMEDIATELY (S0 ordering reservation, rev 14 BLOCKER1): the Dispatch onto the Hook FIFO is the
+		// per-session ordering reservation, done BEFORE any archive I/O — a slow SQLite write cannot reorder the
+		// reservation — and the reply (200 below) follows the enqueue, not the job. ALL hooks (incl.
+		// MessageDisplay) are serialized through this FIFO; the archive write, the MessageDisplay branch,
+		// re-register, prelude, and switch all run INSIDE the job.
 		bs.SessionEvents.DispatchWithMeta(p.SessionID, stores.JobInput{
 			Label: "hook:" + event, Event: event, PromptID: p.PromptID,
 			MessageID: p.MessageID, Index: p.Index, Final: p.Final, Delta: p.Delta, ArrivedAt: arrivedAt,
@@ -150,11 +164,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					logger.Info(fmt.Sprintf("Session tracked: %s -> %s", p.SessionID, p.TmuxTarget))
 				}
 			case "SessionEnd":
-				// Skip sessions not in sessionState (temp usage sessions filtered at SessionStart were never added)
-				if p.SessionID != "" {
-					if bs.SessionState.FindInfoByID(p.SessionID) == nil {
-						break
-					}
+				// Skip sessions not in sessionState at arrival (temp usage sessions filtered at SessionStart were never added)
+				if p.SessionID != "" && !endKnown {
+					break
 				}
 				if p.TmuxTarget != "" {
 					bs.HookRunning.ClearCCActivity(p.TmuxTarget)
@@ -267,7 +279,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 			case "UserPromptSubmit":
-				CancelPendingWaitBySession(bs, p.SessionID, "", "", "")
+				if p.TmuxTarget != "" {
+					// A submit makes the session busy at once; the busy loop classifies it from the next tick.
+					bs.HookRunning.SetBusyState(p.TmuxTarget, stores.BusyWorking, "")
+				}
 				if p.SessionID != "" && p.TranscriptPath != "" {
 					lock := bs.SessionCounts.GetLock(p.SessionID)
 					lock.Lock()
@@ -293,40 +308,8 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					cb.TypingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 					bs.StopCooldown.Record(p.TmuxTarget)
 				}
-				CancelPendingWaitBySession(bs, p.SessionID, "", "", "")
 				if chat != nil {
 					body := p.LastAssistantMessage
-					// Auto-handle rate-limit popup
-					if strings.HasPrefix(strings.TrimSpace(body), "You've hit your limit · resets") {
-						logger.Info(fmt.Sprintf("Rate-limit detected in Stop body: session=%s target=%s body=%s", p.SessionID, p.TmuxTarget, body))
-						if p.TmuxTarget != "" {
-							t, parseErr := injector.ParseTarget(p.TmuxTarget)
-							if parseErr == nil {
-								time.Sleep(2 * time.Second)
-								injector.SendKeys(t, "1")
-								time.Sleep(500 * time.Millisecond)
-								injector.SendKeys(t, "Enter")
-								logger.Info(fmt.Sprintf("Rate-limit auto-handled: sent Enter to %s", p.TmuxTarget))
-							}
-						}
-						if chat != nil {
-							notifyText := fmt.Sprintf("⚠️ Rate limit detected\n📟 %s\n\nAuto-selected \"Stop and wait\"", notify.FormatPaneID(p.TmuxTarget))
-							var sendOpts []interface{}
-							if hookTopicID > 0 {
-								sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: hookTopicID})
-							}
-							// §F #3: route the rate-limit notification onto the Message FIFO (DispatchAsync — the
-							// msg_id is not reused).
-							rlChat := chat
-							rlText := notifyText
-							rlOpts := sendOpts
-							bs.MessageQueue.DispatchAsync(p.SessionID, "msg:rate-limit", func() error {
-								helpers.RetrySend(bs.Bot, rlChat, rlText, rlOpts...)
-								return nil
-							})
-						}
-						break
-					}
 					// Update session count for consistency with PreToolUse
 					if p.SessionID != "" && p.TranscriptPath != "" {
 						lock := bs.SessionCounts.GetLock(p.SessionID)
@@ -371,8 +354,8 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							if finalizeRes == stores.FinalizeSealedMismatch && body != "" {
 								// The sealed last stream entry carries an EARLIER message (a distinct post-tool text that
 								// raced Stop and was dropped). Direct-send the Stop authoritative text so it is not lost;
-								// the StreamFlush below still relabels the sealed entry and runs MarkStopped. The Hook FIFO
-								// serializes Stop before the late dropped MD, so this cannot double-send.
+								// the StreamFlush below still relabels the sealed entry and runs MarkStopped. A late MD of this
+								// reply (any cut, any order) lies inside LastStopBody, so stoppedMachine does not send it again.
 								directBody := body
 								directChat := chat
 								directChatID := chatID
@@ -458,6 +441,48 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						go cb.CheckSessionVersion(bs, p.TmuxTarget)
 					}
 				}
+			case "StopFailure":
+				// cc fires StopFailure INSTEAD of Stop when an API error ended the turn (after cc's own retries: up to
+				// about 3 minutes for a retryable kind). Like pi's agent_idle error arm it clears busy and sends the Run
+				// Error notification with the pane's error line, and does NOTHING else to the turn: no relabel or
+				// finalize of the last bubble, no StopCooldown, no CancelPendingWait and no ClearCCActivity (the next
+				// UserPromptSubmit cancels the waits and rotates the streams, the 4 s stamp expires by itself). The
+				// error kind is not read: every kind notifies.
+				if p.TmuxTarget != "" {
+					bs.HookRunning.SetIdle(p.TmuxTarget)
+					cb.TypingLog("state: event=StopFailure target=%s state=idle", p.TmuxTarget)
+				}
+				if chat != nil {
+					body := "⚠️ cc run error\n\n" + p.LastAssistantMessage
+					bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-error-notify", func() error {
+						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
+						return nil
+					})
+					// A weekly-window rate limit opens a popup and waits for a choice; the 5-hour window shows none and
+					// cc continues alone, so "1" + Enter go out only when the popup is on screen. A goroutine: the wait
+					// for the popup must not hold the Hook FIFO.
+					if p.Error == "rate_limit" && p.TmuxTarget != "" {
+						go func() {
+							t, err := injector.ParseTarget(p.TmuxTarget)
+							if err != nil || !helpers.WaitForPaneContent(t, "❯ 1. Stop and wait for limit to reset", 5*time.Second) {
+								return
+							}
+							injector.SendKeys(t, "1")
+							time.Sleep(500 * time.Millisecond)
+							injector.SendKeys(t, "Enter")
+							logger.Info(fmt.Sprintf("Rate-limit auto-handled: sent 1 + Enter to %s", p.TmuxTarget))
+							var sendOpts []interface{}
+							if hookTopicID > 0 {
+								sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: hookTopicID})
+							}
+							text := fmt.Sprintf("⚠️ Rate limit detected\n📟 %s\n\nAuto-selected \"Stop and wait\"", notify.FormatPaneID(p.TmuxTarget))
+							bs.MessageQueue.DispatchAsync(p.SessionID, "msg:rate-limit", func() error {
+								helpers.RetrySend(bs.Bot, chat, text, sendOpts...)
+								return nil
+							})
+						}()
+					}
+				}
 			case "agent_start":
 				// pi extension POSTs agent_start at run start (before the first tool call) to mark busy.
 				if p.TmuxTarget != "" {
@@ -525,9 +550,6 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.TmuxTarget != "" && bs.InjectQueue.HasItems(p.TmuxTarget) {
 					bs.InjectRoute.SignalEvent(p.TmuxTarget, "PreToolUse", p.ToolName)
 				}
-				// Round 8: skip THIS tool's own pending entry (async can register its PermissionRequest before
-				// this PreToolUse runs on the FIFO) — cancel only stale entries from earlier tools.
-				CancelPendingWaitBySession(bs, p.SessionID, p.ToolName, helpers.CanonicalToolInput(p.ToolInput), p.ToolUseID)
 				// Skip TG notifications for subagent tool calls
 				if p.AgentID != "" {
 					break
@@ -991,7 +1013,7 @@ func handleMessageDisplay(bs *types.BotState, cb Callbacks, p *helpers.HookPaylo
 		return // final-with-empty-delta IS still recorded
 	}
 	// Item 1 (busy TTL): stamp cc activity on every MD (delta + final) so the busy-OR read paths
-	// (IsSessionRunning/PaneState) can bridge spinner-less streaming pauses. pi also emits
+	// (the busy loop's cc classification) can bridge spinner-less streaming pauses. pi also emits
 	// MessageDisplay (different backend tag), so this is gated on backend==cc to avoid a stray entry.
 	if p.Backend == "cc" && p.TmuxTarget != "" {
 		bs.HookRunning.RecordCCActivity(p.TmuxTarget)

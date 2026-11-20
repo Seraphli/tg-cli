@@ -13,7 +13,6 @@ start_claude "e2e-cc-3"
 
 # Record log position before injecting long prompt
 LOG_BEFORE_PAGE=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 # Wait for Claude to settle after bot_hook
 echo "Waiting for Claude to settle..."
@@ -107,6 +106,3 @@ else
     fail "No bot activity after long prompt injection"
   fi
 fi
-
-# Typing continuity: inject → Stop (180-240 word prose, no tools)
-check_typing_continuity "$TYPING_LOG_BEFORE" "Stop" "phase3"

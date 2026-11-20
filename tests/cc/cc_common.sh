@@ -10,6 +10,7 @@ start_claude() {
     perm_flag="--permission-mode default $perm_flag"
   fi
   local install_trap="${3:-true}"
+  local model="${4:-}"
   E2E_SESSION="$session_name"
   export E2E_SESSION
   $TMUX_TEST kill-session -t "=$E2E_SESSION" 2>/dev/null || true
@@ -22,7 +23,7 @@ start_claude() {
   # tmux server environment) and pins the --tools allowlist that structurally removes the Agent tool.
   # perm_flag selects this session's permission mode.
   $TMUX_TEST send-keys -t "$E2E_SESSION" \
-    "$(cc_launch_cmd "$perm_flag")"
+    "$(cc_launch_cmd "$perm_flag" "$model")"
   sleep 1
   $TMUX_TEST send-keys -t "$E2E_SESSION" Enter
   echo "Waiting for Claude to start..."

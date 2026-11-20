@@ -353,7 +353,7 @@ func TestPublishAwaitBroadcastsPreBlockedAppender(t *testing.T) {
 	// Block an eligible MD appender at cap BEFORE await is published (no over-cap slot yet).
 	mdRan := make(chan struct{})
 	go func() {
-		s.DispatchAsyncWithMeta("sess", "md", "MessageDisplay", "P", base, func() error { close(mdRan); return nil })
+		s.DispatchWithMeta("sess", JobInput{Label: "md", Event: "MessageDisplay", PromptID: "P", ArrivedAt: base}, func() error { close(mdRan); return nil })
 	}()
 	// Confirm it is parked (queue stays at cap, MD not admitted).
 	time.Sleep(30 * time.Millisecond)

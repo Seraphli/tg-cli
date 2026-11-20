@@ -19,6 +19,7 @@ type HookPayload struct {
 	Project              string          `json:"project"`
 	Source               string          `json:"source"`
 	LastAssistantMessage string          `json:"last_assistant_message"`
+	Error                string          `json:"error"`
 	ErrorMessage         string          `json:"error_message"`
 	StopReason           string          `json:"stop_reason"`
 	AgentID              string          `json:"agent_id"`

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +14,12 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
+	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
+
+// liveBusyState classifies a session's pane; a variable so a test can answer without a live pane.
+var liveBusyState = helpers.LiveBusyState
 
 // busyDisplayName returns the session name, or the tmux pane-id (the part of TmuxTarget before
 // "@") when the name is empty, so an unnamed session still renders a meaningful busy label.
@@ -33,12 +37,11 @@ func busyDisplayName(name, tmuxTarget string) string {
 type busyAction int
 
 const (
-	busyNone        busyAction = iota
-	busyCreate                 // no entry, session running → create placeholder + send
-	busyRefloat                // running, message sent after SentAt → delete+resend to re-bottom
-	busyEdit                   // running, 15s since last edit → update elapsed
-	busyGraceStart             // just became idle → record IdleSince
-	busyGraceDelete            // idle >=2s → delete the status message
+	busyNone    busyAction = iota
+	busyCreate             // no entry, session running → create placeholder + send
+	busyRefloat            // running, message sent after SentAt → delete+resend to re-bottom
+	busyEdit               // running, 15s since last edit → update elapsed
+	busyDelete             // idle → delete the status message at the first idle tick
 )
 
 // isErrNotFoundToDelete reports whether err is the telebot "message to delete not found" error.
@@ -56,8 +59,9 @@ func isErrNotFoundToEdit(err error) bool {
 }
 
 // statusText builds the busy-status message body.
-// elapsed==0 renders as "(0s)"; elapsed>0 renders minutes+seconds like "2m15s" or "15s".
-func statusText(label string, elapsed time.Duration) string {
+// elapsed==0 renders as "(0s)"; elapsed>0 renders minutes+seconds like "2m15s" or "15s". Waiting renders the
+// cc stall banner text with the retry countdown copied from the pane; compacting renders its own text.
+func statusText(label string, elapsed time.Duration, state stores.BusyState, countdown string) string {
 	var dStr string
 	if elapsed <= 0 {
 		dStr = "0s"
@@ -70,6 +74,12 @@ func statusText(label string, elapsed time.Duration) string {
 		} else {
 			dStr = fmt.Sprintf("%ds", s)
 		}
+	}
+	switch state {
+	case stores.BusyWaiting:
+		return fmt.Sprintf("⚠️ [%s] Waiting for API response · retry in %s (%s)", label, countdown, dStr)
+	case stores.BusyCompacting:
+		return fmt.Sprintf("🗜️ [%s] Compacting conversation (%s)", label, dStr)
 	}
 	return fmt.Sprintf("⏳ [%s] Working… (%s)", label, dStr)
 }
@@ -95,17 +105,23 @@ func routeKey(chatID int64, topicID int) string {
 	return fmt.Sprintf("%d:%d", chatID, topicID)
 }
 
-// routeSnapshot holds the aggregated per-key routing state for one 1s tick.
+// routeSnapshot holds the per-key routing state for one 1s tick: how many registered sessions resolve to the
+// route, and the state, stall countdown and display name of the last one seen (the only one when sessions == 1).
 type routeSnapshot struct {
-	running bool
-	names   []string
+	sessions  int
+	state     stores.BusyState
+	countdown string
+	name      string
 }
 
 // decideBusyAction decides what the busy manager should do for a given key this tick.
-// e is nil when no persisted entry exists. running reflects whether ANY session is currently running
-// on this route. lastMark is the most recent FloatMarker timestamp. inBackoff means Telegram is
-// rate-limiting this chat. now is the current time.
-func decideBusyAction(e *stores.BusyStatusEntry, running bool, lastMark time.Time, inBackoff bool, now time.Time) busyAction {
+// e is nil when no persisted entry exists. state is what the message must show now: idle when the one session of
+// this route is not running (a route shared by two or more sessions never runs: it gets no message, like the
+// private chat), else working, waiting or compacting.
+// lastMark is the most recent FloatMarker timestamp. inBackoff means Telegram is rate-limiting this
+// chat. now is the current time.
+func decideBusyAction(e *stores.BusyStatusEntry, state stores.BusyState, lastMark time.Time, inBackoff bool, now time.Time) busyAction {
+	running := state != stores.BusyIdle
 	// No persisted entry.
 	if e == nil {
 		if running {
@@ -124,8 +140,9 @@ func decideBusyAction(e *stores.BusyStatusEntry, running bool, lastMark time.Tim
 		if lastMark.After(e.SentAt) && now.Sub(e.LastFloatAt) >= 2*time.Second && !inBackoff {
 			return busyRefloat
 		}
-		// Edit elapsed: 15s since last edit, no flood backoff.
-		if now.Sub(e.LastEditAt) >= 15*time.Second && !inBackoff {
+		// Edit: the shown state changed (working, waiting, compacting) this tick, or 15s since the last edit
+		// (refreshes the elapsed time and the countdown); no flood backoff.
+		if (e.State != state || now.Sub(e.LastEditAt) >= 15*time.Second) && !inBackoff {
 			return busyEdit
 		}
 		return busyNone
@@ -134,17 +151,12 @@ func decideBusyAction(e *stores.BusyStatusEntry, running bool, lastMark time.Tim
 	if e.MsgID == 0 {
 		return busyNone
 	}
-	if e.IdleSince.IsZero() {
-		return busyGraceStart
-	}
-	if now.Sub(e.IdleSince) >= 2*time.Second {
-		return busyGraceDelete
-	}
-	return busyNone
+	return busyDelete
 }
 
 // startBusyIndicatorLoop runs the dedicated 1s busy-status management loop. It is NOT folded
-// into the 3s typing loop (a 3s tick gives 3-6s grace; the spec requires 2-3s → 1s tick).
+// into the 3s typing loop: a 3s tick would delete the status message up to 3 s after the session goes idle; the
+// 1s tick deletes it within 1 s.
 func startBusyIndicatorLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -158,119 +170,55 @@ func startBusyIndicatorLoop(ctx context.Context, bs *BotState) {
 	}
 }
 
-// oauth401Signatures are the exact CC strings printed on an OAuth 401 (token revoked), observed in
-// production 2026-07-19. They are Anthropic-CC-specific, so they self-scope to CC panes (a codex pane
-// never matches) — no backend gating is needed.
-var oauth401Signatures = []string{"Please run /login", "401 OAuth access token has been revoked"}
-
-// tail401Lines bounds the pane region matched for a 401 signature to the last N lines, so a historical
-// 401 scrolled up in the full capture (CapturePane uses -S -) is not re-matched after the session
-// re-logs in and rearms.
-const tail401Lines = 30
-
-// matches401 returns the pane-tail line(s) that contain a 401 signature (verbatim, trimmed, de-duplicated,
-// in order). An empty result means no 401 in the bounded tail.
-func matches401(paneTail string) []string {
-	lines := strings.Split(paneTail, "\n")
-	if len(lines) > tail401Lines {
-		lines = lines[len(lines)-tail401Lines:]
-	}
-	var matched []string
-	seen := make(map[string]bool)
-	for _, ln := range lines {
-		for _, sig := range oauth401Signatures {
-			if strings.Contains(ln, sig) {
-				trimmed := strings.TrimSpace(ln)
-				if trimmed != "" && !seen[trimmed] {
-					seen[trimmed] = true
-					matched = append(matched, trimmed)
-				}
-				break
-			}
-		}
-	}
-	return matched
-}
-
-// shouldWarn401OnTransition reports whether a target's running-state change warrants a 401 pane check: it
-// fires ONCE on a true→false (busy→idle) transition and never otherwise. This doubles as the once-per-stall
-// dedup — staying idle is false→false (no re-warn) and resuming is false→true (rearm for the next stall).
-func shouldWarn401OnTransition(prevRunning, running bool) bool {
-	return prevRunning && !running
-}
-
-// detect401AndWarn captures the pane for target and, if its bounded tail shows a 401 signature, sends ONE
-// TG warning to the session's chat/topic carrying the verbatim matched line(s) + the pane id. Called from
-// runBusyTick on a busy→idle transition. The send is plain text (the bot has no default ParseMode, so no
-// HTML escaping), routed async on the Message FIFO so it never blocks the 1s tick.
-func detect401AndWarn(bs *BotState, target string) {
-	t, err := injector.ParseTarget(target)
-	if err != nil {
-		return
-	}
-	pane, err := injector.CapturePane(t)
-	if err != nil {
-		return
-	}
-	matched := matches401(pane)
-	if len(matched) == 0 {
-		return
-	}
-	chat, _, topicID := resolveChat(bs, target)
+// notifyCodexTurnError sends ONE Run Error notification when the codex turn that just ended carries an error in
+// its rollout file: codex has no hook at an error turn end, so the file is the only source. Called from
+// runBusyTick on the busy→idle change of a codex session (once per turn); the read and the send run on the
+// Message FIFO so a slow disk never delays the 1s tick. A rollout that cannot be read sends nothing and writes
+// one warn line.
+func notifyCodexTurnError(bs *BotState, sid string, info stores.SessionInfo) {
+	chat, chatID, topicID := resolveChat(bs, info.TmuxTarget)
 	if chat == nil {
 		return
 	}
-	sid, _ := bs.SessionState.FindByTarget(target)
-	// ⚠️ leads the verbatim CC 401 line(s) (kept as a contiguous block); the 📟 line identifies the session
-	// by its FULL target form including the @socket path (e.g. "%3@/tmp/tmux-1000/default"). LONG form is
-	// intentional (boss ruling): distinct tmux servers are distinguished ONLY by their socket path, so the
-	// short pane id ("%3") is ambiguous across servers — the 📟 line must carry the full target EVERYWHERE.
-	// This supersedes the earlier short-form (t.PaneID) change. Verbatim, no invented phrasing (boss ruling).
-	notifyText := "⚠️ " + strings.Join(matched, "\n") + "\n📟 " + target
-	logger.Info(fmt.Sprintf("401 detected on busy→idle: target=%s sid=%s matched=%q", target, sid, matched))
-	c, txt, tid := chat, notifyText, topicID
-	bs.MessageQueue.DispatchAsync(sid, "msg:401-warning", func() error {
-		var opts []interface{}
-		if tid > 0 {
-			opts = append(opts, &tele.SendOptions{ThreadID: tid})
+	bs.MessageQueue.DispatchAsync(sid, "msg:agent-error-notify", func() error {
+		msg, err := helpers.CodexTurnError(info.TranscriptPath)
+		if err != nil {
+			logger.Warn(fmt.Sprintf("codex run error check: session %s: %v", sid, err))
 		}
-		helpers.RetrySend(bs.Bot, c, txt, opts...)
+		if msg != "" {
+			sendEventNotification(bs, chat, chatID, sid, "AgentError", filepath.Base(info.CWD), info.CWD, info.TmuxTarget, "⚠️ codex run error\n\n"+msg, "", info.Name, topicID)
+		}
 		return nil
 	})
 }
 
 // runBusyTick executes one 1s tick of the busy indicator manager.
 func runBusyTick(bs *BotState) {
-	cfg, err := config.LoadAppConfig()
-	if err != nil {
-		logger.Warn("busy indicator: LoadAppConfig failed: " + err.Error())
-		return
-	}
 	now := time.Now()
 
-	// f29 D: lazily init the per-target busy→idle transition map (owned by this serial loop).
-	if bs.BusyPrevRunning == nil {
-		bs.BusyPrevRunning = make(map[string]bool)
-	}
 	seenTargets := make(map[string]bool)
 
-	// Build per-key route snapshot from live sessions.
+	// Build per-key route snapshot from live sessions. This loop classifies every session once per tick and
+	// stores the state (the UserPromptSubmit hook also stores working at once); every other place reads the
+	// stored value.
+	privateChat := pairing.GetDefaultChatID()
 	snapshot := make(map[string]*routeSnapshot)
-	for _, info := range bs.SessionState.All() {
+	for sid, info := range bs.SessionState.All() {
 		target := info.TmuxTarget
-		running := helpers.IsSessionRunning(bs.HookRunning, target)
+		prev, _ := bs.HookRunning.GetBusyState(target)
+		state, countdown := liveBusyState(bs.HookRunning, target)
+		bs.HookRunning.SetBusyState(target, state, countdown)
 		seenTargets[target] = true
 
-		// f29 D: on a busy→idle transition, capture the pane tail and warn ONCE if it shows a 401
-		// signature. Runs independent of the BusyStatus/route action logic below (and of the per-key
-		// config-off return), per-target so a route with another running pane cannot mask this one.
-		if shouldWarn401OnTransition(bs.BusyPrevRunning[target], running) {
-			detect401AndWarn(bs, target)
+		// A codex turn that ended on an API error leaves no hook: its rollout file holds the error.
+		if prev != stores.BusyIdle && state == stores.BusyIdle && info.Backend == "codex" {
+			notifyCodexTurnError(bs, sid, info)
 		}
-		bs.BusyPrevRunning[target] = running
 
 		chat, _, topic := resolveChat(bs, target)
-		if chat == nil {
+		// The private chat (the paired user's own chat) gets no busy status message: a stored one is deleted at the
+		// first idle tick like any route with nothing running.
+		if chat == nil || strconv.FormatInt(chat.ID, 10) == privateChat {
 			continue
 		}
 		key := routeKey(chat.ID, topic)
@@ -279,16 +227,16 @@ func runBusyTick(bs *BotState) {
 			rs = &routeSnapshot{}
 			snapshot[key] = rs
 		}
-		if running {
-			rs.running = true
-			rs.names = append(rs.names, busyDisplayName(info.Name, target))
-		}
+		rs.sessions++
+		rs.state, rs.countdown, rs.name = state, countdown, busyDisplayName(info.Name, target)
 	}
-	// f29 D: drop transition-map entries for targets no longer in SessionState (dead sessions).
-	for target := range bs.BusyPrevRunning {
-		if !seenTargets[target] {
-			delete(bs.BusyPrevRunning, target)
-		}
+	// Drop the stored state of targets no longer in SessionState (dead sessions).
+	bs.HookRunning.PruneBusyStates(seenTargets)
+
+	cfg, err := config.LoadAppConfig()
+	if err != nil {
+		logger.Warn("busy indicator: LoadAppConfig failed: " + err.Error())
+		return
 	}
 
 	// Key set = UNION of snapshot keys and persisted keys so removed sessions still drive
@@ -321,13 +269,16 @@ func runBusyTick(bs *BotState) {
 			}
 
 			rs := snapshot[key]
-			running := rs != nil && rs.running
-			label := ""
-			if rs != nil && len(rs.names) > 0 {
-				sorted := make([]string, len(rs.names))
-				copy(sorted, rs.names)
-				sort.Strings(sorted)
-				label = strings.Join(sorted, ", ")
+			// A route shared by two or more registered sessions gets no busy status message (like the private
+			// chat): it never runs, so a stored message is deleted at the first idle tick.
+			shown := stores.BusyIdle
+			if rs != nil && rs.sessions == 1 {
+				shown = rs.state
+			}
+			running := shown != stores.BusyIdle
+			label, countdown := "", ""
+			if running {
+				label, countdown = rs.name, rs.countdown
 			}
 
 			// Config off: drive all persisted statuses to deletion, never create new ones.
@@ -346,16 +297,6 @@ func runBusyTick(bs *BotState) {
 				return
 			}
 
-			// Clear IdleSince on the running path to avoid grace-delete flicker when busy resumes.
-			if ep != nil && running && !ep.IdleSince.IsZero() {
-				ep.IdleSince = time.Time{}
-				tmp := *ep
-				bs.BusyStatus.Update(tmp)
-				if epUpdated, ok := bs.BusyStatus.Get(chatID, topicID); ok {
-					ep = &epUpdated
-				}
-			}
-
 			lastMark := time.Time{}
 			if helpers.FloatMarker != nil {
 				lastMark = helpers.FloatMarker.LastMark(chatID, topicID)
@@ -365,7 +306,7 @@ func runBusyTick(bs *BotState) {
 				inBackoff = helpers.FloodBackoff.InBackoff(chatID, now)
 			}
 
-			action := decideBusyAction(ep, running, lastMark, inBackoff, now)
+			action := decideBusyAction(ep, shown, lastMark, inBackoff, now)
 
 			switch action {
 			case busyCreate:
@@ -375,7 +316,7 @@ func runBusyTick(bs *BotState) {
 					return
 				}
 				sent, sendErr := helpers.RetrySendNoFloat(bs.Bot, &tele.Chat{ID: chatID},
-					statusText(label, 0),
+					statusText(label, 0, shown, countdown),
 					&tele.SendOptions{DisableNotification: true, ThreadID: topicID})
 				if sendErr != nil || sent == nil {
 					// Non-retryable or nil: remove the placeholder so the next tick can retry.
@@ -398,6 +339,7 @@ func runBusyTick(bs *BotState) {
 					SentAt:      sentNow,
 					LastEditAt:  sentNow,
 					LastFloatAt: sentNow,
+					State:       shown,
 				}
 				bs.BusyStatus.Update(e)
 				logger.Info(fmt.Sprintf("busy status sent chat=%d topic=%d msg_id=%d label=%q", chatID, topicID, sent.ID, label))
@@ -413,7 +355,7 @@ func runBusyTick(bs *BotState) {
 				// Proceed: either deleted ok or already-gone (both are fine for resend).
 				elapsed := now.Sub(ep.StartedAt)
 				sent, sendErr := helpers.RetrySendNoFloat(bs.Bot, &tele.Chat{ID: chatID},
-					statusText(label, elapsed),
+					statusText(label, elapsed, shown, countdown),
 					&tele.SendOptions{DisableNotification: true, ThreadID: topicID})
 				if sendErr != nil || sent == nil {
 					// Resend failed: remove the entry so next tick starts fresh.
@@ -431,13 +373,14 @@ func runBusyTick(bs *BotState) {
 				ep.SentAt = sentNow
 				ep.LastFloatAt = sentNow
 				ep.LastEditAt = sentNow
+				ep.State = shown
 				bs.BusyStatus.Update(*ep)
 				logger.Info(fmt.Sprintf("busy status re-floated chat=%d topic=%d new_msg_id=%d label=%q", chatID, topicID, sent.ID, label))
 
 			case busyEdit:
 				elapsed := now.Sub(ep.StartedAt)
 				busyMsg := makeBusyMsg(chatID, topicID, ep.MsgID)
-				_, editErr := helpers.RetryEdit(bs.Bot, busyMsg, statusText(label, elapsed))
+				_, editErr := helpers.RetryEdit(bs.Bot, busyMsg, statusText(label, elapsed, shown, countdown))
 				if editErr != nil {
 					if isErrNotFoundToEdit(editErr) {
 						// Message was externally deleted; recreate next tick.
@@ -449,23 +392,19 @@ func runBusyTick(bs *BotState) {
 					return
 				}
 				ep.LastEditAt = now
+				ep.State = shown
 				bs.BusyStatus.Update(*ep)
 				logger.Info(fmt.Sprintf("busy status edited chat=%d topic=%d msg_id=%d elapsed=%v", chatID, topicID, ep.MsgID, elapsed))
 
-			case busyGraceStart:
-				ep.IdleSince = now
-				bs.BusyStatus.Update(*ep)
-				logger.Info(fmt.Sprintf("busy status grace start chat=%d topic=%d msg_id=%d", chatID, topicID, ep.MsgID))
-
-			case busyGraceDelete:
+			case busyDelete:
 				busyMsg := makeBusyMsg(chatID, topicID, ep.MsgID)
 				delErr := bs.Bot.Delete(busyMsg)
 				if delErr == nil || isErrNotFoundToDelete(delErr) {
 					bs.BusyStatus.Delete(chatID, topicID)
-					logger.Info(fmt.Sprintf("busy status deleted chat=%d topic=%d msg_id=%d (idle grace expired)", chatID, topicID, ep.MsgID))
+					logger.Info(fmt.Sprintf("busy status deleted chat=%d topic=%d msg_id=%d (session idle)", chatID, topicID, ep.MsgID))
 				} else {
 					// Retain entry; the 1s loop retries because the key remains in the persisted set.
-					logger.Warn(fmt.Sprintf("busy status grace delete failed (retained, retry next tick) chat=%d topic=%d msg_id=%d err=%v", chatID, topicID, ep.MsgID, delErr))
+					logger.Warn(fmt.Sprintf("busy status delete failed (retained, retry next tick) chat=%d topic=%d msg_id=%d err=%v", chatID, topicID, ep.MsgID, delErr))
 				}
 
 			case busyNone:

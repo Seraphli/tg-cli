@@ -1,8 +1,8 @@
 # cc-busy classifier fixtures
 
 `manifest.tsv` drives `TestCCBusyFromViewportFixtures` (cmd/helpers/cc_busy_test.go). It is pure
-tab-separated data — one row per fixture, `<filename>` TAB `<verdict>`, where `<verdict>` is `busy`
-or `idle`. Keeping it free of comment lines gives every row the same field count, so it renders as a
+tab-separated data — one row per fixture, `<filename>` TAB `<verdict>`, where `<verdict>` is `busy`,
+`idle`, `waiting` or `compacting`. Keeping it free of comment lines gives every row the same field count, so it renders as a
 table in web git viewers. The test asserts `ccBusyFromViewport` returns the listed verdict for each
 fixture and requires at least 17 data rows (a guard against a silently-empty fixture directory).
 

@@ -307,64 +307,6 @@ func ListPanes(session string) ([]string, error) {
 	return lines, nil
 }
 
-// PaneInfo holds the per-pane fields fetched by one batched list-panes call.
-type PaneInfo struct {
-	Command string // #{pane_current_command}
-	PID     string // #{pane_pid}
-	Title   string // #{pane_title}
-}
-
-// parsePaneList parses the TAB-separated output of `list-panes -a` with the format
-// "#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}" into a map keyed by pane_id.
-// pane_title is LAST because titles may contain spaces and non-ASCII; SplitN(line,"\t",4) keeps the
-// whole remainder (including spaces) as the title. Splitting on whitespace would corrupt every
-// multi-word title, so this must stay a TAB split. Lines with fewer than 4 fields are skipped.
-func parsePaneList(out string) map[string]PaneInfo {
-	m := make(map[string]PaneInfo)
-	for _, line := range strings.Split(out, "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 4 {
-			continue
-		}
-		m[parts[0]] = PaneInfo{Command: parts[1], PID: parts[2], Title: parts[3]}
-	}
-	return m
-}
-
-// paneListCmd builds the single `list-panes -a` command for one tmux socket. It is a package-level var
-// so a test can replace it to assert ListPanesBatch issues exactly one exec per DISTINCT socket with the
-// exact flags and format string. Production always uses this default.
-var paneListCmd = func(socket string) *exec.Cmd {
-	return tmuxCmd(TmuxTarget{Socket: socket}, "list-panes", "-a", "-F",
-		"#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}")
-}
-
-// ListPanesBatch fetches every pane's command, pid and title in ONE `list-panes -a` call per DISTINCT
-// tmux socket among targets, returning a map keyed by FormatTarget(target). It replaces the old
-// per-pane fan-out (GetPaneTitle + GetPaneCommand + #{pane_pid}) that issued 3-4 tmux execs per
-// session per tick. A pane absent from every socket's output is simply not in the map (callers treat
-// that as "gone"). A socket whose list-panes call errors contributes no entries.
-func ListPanesBatch(targets []TmuxTarget) map[string]PaneInfo {
-	sockets := make(map[string]struct{})
-	for _, t := range targets {
-		sockets[t.Socket] = struct{}{}
-	}
-	result := make(map[string]PaneInfo)
-	for socket := range sockets {
-		out, err := paneListCmd(socket).Output()
-		if err != nil {
-			continue
-		}
-		for paneID, info := range parsePaneList(string(out)) {
-			result[FormatTarget(TmuxTarget{PaneID: paneID, Socket: socket})] = info
-		}
-	}
-	return result
-}
-
 // NamedSessionExists checks if a tmux session with the given name exists.
 func NamedSessionExists(name string) bool {
 	return globalTmuxCmd("has-session", "-t", name).Run() == nil

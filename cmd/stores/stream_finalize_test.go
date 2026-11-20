@@ -210,8 +210,9 @@ func armedInOrder(s *StreamStore, sid, messageID string) bool {
 }
 
 // TestAppendExisting_PostStop covers the post-Stop state machine returns (commit 18): a known-sealed id is a
-// drop, a delta that verbatim-matches the Stop body is a sticky STOP-COPY drop (never armed), and a genuinely-
-// new delta requests arming (NeedsArm), then streams (ArmedProgress) and completes (ArmedComplete) once armed.
+// drop, a delta that lies inside the Stop body is a held STOP-COPY drop (never armed) until a later delta of
+// the same id carries text outside it (NeedsArm), and a genuinely-new delta requests arming (NeedsArm), then
+// streams (ArmedProgress) and completes (ArmedComplete) once armed.
 func TestAppendExisting_PostStop(t *testing.T) {
 	s := NewStreamStore()
 	sid := "s-poststop"
@@ -230,9 +231,9 @@ func TestAppendExisting_PostStop(t *testing.T) {
 	if armedInOrder(s, sid, "m2copy") {
 		t.Fatal("(b) STOP-COPY placeholder must never be armed (absent from ss.Order)")
 	}
-	// (b') a later delta of the STOP-COPY id is still dropped without re-matching (sticky, no storage).
-	if h, d, post := s.AppendExisting(sid, "m2copy", "", 1, "BRAND NEW", true); !h || !d || post != PostStopDrop {
-		t.Fatalf("(b') STOP-COPY sticky: want dropped + PostStopDrop, got %v %v %v", h, d, post)
+	// (b') a later delta of the held id that is NOT in the Stop body makes the message NEW (arming requested).
+	if h, d, post := s.AppendExisting(sid, "m2copy", "", 1, "BRAND NEW", true); !h || d || post != PostStopNeedsArm {
+		t.Fatalf("(b') held copy + new text: want NeedsArm, got %v %v %v", h, d, post)
 	}
 	// (c) new id, different content, non-final → genuinely-new message requests arming.
 	if h, d, post := s.AppendExisting(sid, "m3new", "", 0, "part1", false); !h || d || post != PostStopNeedsArm {

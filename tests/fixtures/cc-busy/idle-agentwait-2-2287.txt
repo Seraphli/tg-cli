@@ -1,0 +1,15 @@
+Reviewing the current file before making the change.
+Read a couple of files to confirm the surrounding context.
+The update looks straightforward; applying it now.
+
+
+✻ Waiting for 2 background agents to finish
+
+
+  1 tasks (0 done, 1 in progress, 0 open)
+  ◼ Reviewing the sample build pipeline of the demo service while the nightly checks run, reading the changelog and the config files, comparing the generated output with the stored copy, listin…
+                                                                                                                                                                                         ◐ medium · /effort
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ctrl+t to hide tasks · ← for agents · ↓ to manage

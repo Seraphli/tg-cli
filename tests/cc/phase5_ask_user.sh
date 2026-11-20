@@ -13,7 +13,6 @@ start_claude "e2e-cc-5"
 wait_for_idle
 
 LOG_BEFORE_AQ=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 
 pane_log "[ask_user] BEFORE sending AskUserQuestion prompt"
 
@@ -69,9 +68,6 @@ if [ "$AQ_FOUND" = true ] && [ -n "$AQ_MSG_ID" ]; then
   else
     fail "AskUserQuestion question message not found in log"
   fi
-
-  # Typing continuity: inject → PreToolUse (text generation before AskUserQuestion)
-  check_typing_continuity "$TYPING_LOG_BEFORE" "PreToolUse" "phase5"
 
   # Verify live 💬 Message (Stream send/edit) arrived BEFORE AskUserQuestion buttons — ordering under drain
   NEW_LOGS=$(tail -n +"$((LOG_BEFORE_AQ + 1))" "$LOG_FILE")

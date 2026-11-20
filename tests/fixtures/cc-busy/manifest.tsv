@@ -18,4 +18,11 @@ idle-live-pct15.txt	idle
 busy-labeled-border.txt	busy
 idle-labeled-border.txt	idle
 busy-flambeing.txt	busy
-busy-apiwait.txt	busy
+busy-apiwait.txt	waiting
+busy-chinese-title.txt	busy
+busy-stophook-2287.txt	busy
+compacting-2287.txt	compacting
+compacting-2261.txt	compacting
+retry-econnreset.txt	waiting
+retry-hang-0s.txt	waiting
+busy-stophook-cutoff-2287.txt	busy

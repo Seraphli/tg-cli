@@ -27,16 +27,6 @@ func orderCountOf(s *StreamStore, sid, mid string) int {
 	return n
 }
 
-func storedDeltaCount(s *StreamStore, sid, mid string) int {
-	ss := s.Session(sid)
-	ss.DataMu.Lock()
-	defer ss.DataMu.Unlock()
-	if e := ss.Msgs[mid]; e != nil {
-		return len(e.Deltas)
-	}
-	return 0
-}
-
 func classOf(s *StreamStore, sid, mid string) StopClass {
 	ss := s.Session(sid)
 	ss.DataMu.Lock()
@@ -83,63 +73,40 @@ func stopSession(s *StreamStore, sid, body string) {
 	s.MarkStopped(sid)
 }
 
-// --- P1 paragraph matcher ---
+// --- P1 classification: a copy is held until text outside the Stop body arrives; NEW is sticky ---
 
-func TestParagraphRunContained(t *testing.T) {
-	body := "Para one line1\nPara one line2\n\nPara two\n\nPara three"
-	cases := []struct {
-		name  string
-		inner string
-		outer string
-		want  bool
-	}{
-		{"prefix run", "Para one line1\nPara one line2", body, true},
-		{"middle run", "Para two", body, true},
-		{"suffix run", "Para two\n\nPara three", body, true},
-		{"multi-paragraph run", "Para one line1\nPara one line2\n\nPara two", body, true},
-		{"full equality", body, body, true},
-		{"non-aligned partial paragraph", "Para one line1", body, false},
-		{"discontiguous run", "Para one line1\nPara one line2\n\nPara three", body, false},
-		{"not present", "Totally different", body, false},
-		{"CRLF normalization", "Para two\r\n\r\nPara three", body, true},
-		{"lone CR normalization", "Para two\r\rPara three", body, true},
-		{"empty inner", "", body, false},
-		{"whitespace inner", "   \n  ", body, false},
-		{"empty outer", "Para two", "", false},
-		{"inner longer than outer", body + "\n\nextra", body, false},
-	}
-	for _, c := range cases {
-		if got := paragraphRunContained(c.inner, c.outer); got != c.want {
-			t.Errorf("%s: paragraphRunContained(%q,...)=%v want %v", c.name, c.inner, got, c.want)
-		}
-	}
-}
-
-// --- P1 sticky classification ---
-
-// (i) first non-empty delta contained → STOP-COPY: this and ALL subsequent deltas (incl. non-matching) dropped,
-// nothing stored/armed, no ss.Order distortion.
-func TestSticky_StopCopy_DropsAll(t *testing.T) {
+// (i) every non-empty delta contained in the Stop body → provisional STOP-COPY: held (stored, never armed, no
+// ss.Order distortion); a later delta that is NOT in the Stop body turns the message NEW for good and arms it.
+func TestSticky_StopCopy_HeldUntilNewText(t *testing.T) {
 	s := NewStreamStore()
 	sid := "s"
 	stopSession(s, sid, "AUTHORITATIVE BODY")
 	orderBefore := orderLen(s, sid)
 
-	if h, d, post := s.AppendExisting(sid, "mc", "Tc", 0, "AUTHORITATIVE BODY", false); !h || !d || post != PostStopDrop {
+	if h, d, post := s.AppendExisting(sid, "mc", "Tc", 0, "AUTHORITATIVE", false); !h || !d || post != PostStopDrop {
 		t.Fatalf("classify stop-copy: want drop+PostStopDrop, got %v %v %v", h, d, post)
 	}
-	// a later NON-matching delta of the SAME id is still dropped without re-matching (sticky).
-	if h, d, post := s.AppendExisting(sid, "mc", "Tc", 1, "now totally different content", true); !h || !d || post != PostStopDrop {
-		t.Fatalf("stop-copy sticky: want drop+PostStopDrop, got %v %v %v", h, d, post)
+	if classOf(s, sid, "mc") != StopClassStopCopy || armedInOrder(s, sid, "mc") || orderLen(s, sid) != orderBefore {
+		t.Fatal("a held copy must stay out of ss.Order")
 	}
-	if classOf(s, sid, "mc") != StopClassStopCopy {
-		t.Fatal("mc must be classified StopCopy")
+	if h, d, post := s.AppendExisting(sid, "mc", "Tc", 1, " BODY", true); !h || !d || post != PostStopDrop {
+		t.Fatalf("a delta inside the Stop body keeps the message held, got %v %v %v", h, d, post)
 	}
-	if armedInOrder(s, sid, "mc") || orderLen(s, sid) != orderBefore {
-		t.Fatalf("STOP-COPY must never enter ss.Order (before=%d after=%d)", orderBefore, orderLen(s, sid))
+	if h, d, post := s.AppendExisting(sid, "mn2", "Tc", 0, "AUTHORITATIVE", false); !h || !d || post != PostStopDrop {
+		t.Fatalf("second message: want held, got %v %v %v", h, d, post)
 	}
-	if n := storedDeltaCount(s, sid, "mc"); n != 0 {
-		t.Fatalf("STOP-COPY placeholder must store no deltas, got %d", n)
+	if _, d, post := s.AppendExisting(sid, "mn2", "Tc", 1, " and more", true); d || post != PostStopNeedsArm {
+		t.Fatalf("text not in the Stop body: want NeedsArm, got dropped=%v post=%v", d, post)
+	}
+	if classOf(s, sid, "mn2") != StopClassNew || assembledOf(s, sid, "mn2") != "AUTHORITATIVE and more" {
+		t.Fatalf("NEW message must keep the held delta, got %q", assembledOf(s, sid, "mn2"))
+	}
+	// every piece inside the Stop body, but the message as a whole is not (the pieces swapped) → NEW.
+	if h, d, post := s.AppendExisting(sid, "mn3", "Tc", 0, "BODY", false); !h || !d || post != PostStopDrop {
+		t.Fatalf("third message: want held, got %v %v %v", h, d, post)
+	}
+	if _, d, post := s.AppendExisting(sid, "mn3", "Tc", 1, "AUTHORITATIVE", true); d || post != PostStopNeedsArm {
+		t.Fatalf("pieces inside the Stop body but joined text outside it: want NeedsArm, got dropped=%v post=%v", d, post)
 	}
 }
 

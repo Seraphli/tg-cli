@@ -114,31 +114,60 @@ func CleanupPendingState(
 	logger.Info(fmt.Sprintf("Stale pending cleanup: msg_id=%d uuid=%s reason=%s", msgID, uuid, reason))
 }
 
-// IsSessionRunning checks if a CLI session is actively running by examining the tmux pane.
+// IsSessionRunning reports whether the stored busy state of the session is anything but idle: working, waiting
+// or compacting. The 1 s busy loop (runBusyTick) stores it from the pane and the UserPromptSubmit hook stores
+// working at once; this makes no tmux call.
 func IsSessionRunning(hookRunning *stores.HookRunningStateStore, tmuxTarget string) bool {
+	state, _ := hookRunning.GetBusyState(tmuxTarget)
+	return state != stores.BusyIdle
+}
+
+// LiveBusyState classifies the session's pane now (title, backend, and the viewport of a cc, a pi or a busy
+// codex pane) and stores nothing. Only the 1 s busy loop (which stores the result) and the unregistered-target
+// branch of /session/idle (no stored entry can exist yet) call it. A closed pane (empty title) is idle before
+// DetectBackend, so it costs no further tmux call.
+func LiveBusyState(hookRunning *stores.HookRunningStateStore, tmuxTarget string) (stores.BusyState, string) {
 	title := GetPaneTitle(tmuxTarget)
 	if title == "" {
-		return false // dead/closed pane -> idle, BEFORE the store
+		return stores.BusyIdle, ""
 	}
-	backend := DetectBackend(tmuxTarget) // LIVE detection, at call time
-	if backend == "cc" {
-		return ccBusyFromContent(context.Background(), tmuxTarget) || hookRunning.CCActive(tmuxTarget, stores.CCBusyTTL)
+	return busyStateFor(context.Background(), hookRunning, DetectBackend(tmuxTarget), tmuxTarget, title)
+}
+
+// busyStateFor is the per-backend classification, unit-testable without a live pane: cc by the pane rules
+// (ccBusyFromContent), pi by the hook store, codex by the pane title; a compaction is read from the pane for codex
+// (only while its title spinner shows, so an idle pane costs no capture) and pi (every tick), and wins.
+func busyStateFor(ctx context.Context, hookRunning *stores.HookRunningStateStore, backend, tmuxTarget, title string) (stores.BusyState, string) {
+	switch backend {
+	case "cc":
+		return ccBusyFromContent(ctx, hookRunning, tmuxTarget)
+	case "codex":
+		if TitleIsBusy(backend, title) {
+			if viewport, _ := capturePane(ctx, tmuxTarget); codexCompacting(viewport) {
+				return stores.BusyCompacting, ""
+			}
+		}
+	case "pi":
+		if viewport, _ := capturePane(ctx, tmuxTarget); piCompacting(viewport) {
+			return stores.BusyCompacting, ""
+		}
 	}
-	return storeOrTitleBusy(hookRunning, backend, tmuxTarget, title)
+	if storeOrTitleBusy(hookRunning, backend, tmuxTarget, title) {
+		return stores.BusyWorking, ""
+	}
+	return stores.BusyIdle, ""
 }
 
 // storeOrTitleBusy is pure and unit-testable without a live tmux pane: the store is
 // passed in, never a package var. For a pi target it consults the run-state store
 // first (return running when known); every other backend uses the title path.
 //
-// NORMATIVE (do not reorder): the pi branch is gated on THIS-TICK backend detection — either the LIVE
-// DetectBackend(target) == "pi" (the IsSessionRunning path) OR the batched detectBackend(info.Command,
-// children) snapshot computed on the same tick (the PaneState typing-tick path). Both are current-tick
-// (NOT any stored/remembered backend), and the classifier sits AFTER the title == "" guard in each caller.
-// When the pi process dies, pane_current_command is no longer "pi" -> detection returns "" -> the store is
-// bypassed -> the pane reads idle (the dead-pi self-heal holds on BOTH paths). A remembered backend would
-// keep it busy forever. The title == "" guard first means a closed/dead pane returns idle regardless of the
-// store. No timeout/reaper. No package var, no nil fallback — a required param fails loud if misused rather
+// NORMATIVE (do not reorder): the pi branch is gated on THIS-TICK backend detection — the LIVE
+// DetectBackend(target) == "pi" (the LiveBusyState path), NOT any stored/remembered backend — and the
+// classifier sits AFTER the title == "" guard in LiveBusyState. When the pi process dies,
+// pane_current_command is no longer "pi" -> detection returns "" -> the store is bypassed -> the pane
+// reads idle (the dead-pi self-heal). A remembered backend would keep it busy forever. The title == ""
+// guard first means a closed/dead pane returns idle regardless of the store. No timeout/reaper. No package var, no nil fallback — a required param fails loud if misused rather
 // than silently degrading pi to the title path.
 func storeOrTitleBusy(hookRunning *stores.HookRunningStateStore, backend, target, title string) bool {
 	if backend == "pi" {
@@ -149,9 +178,8 @@ func storeOrTitleBusy(hookRunning *stores.HookRunningStateStore, backend, target
 	return TitleIsBusy(backend, title)
 }
 
-// TitleIsBusy is the pane-title busy classifier. cc no longer routes through here on the live path
-// (IsSessionRunning) or the batched path (PaneState) — both now delegate cc classification to the content
-// classifier ccBusyFromContent (viewport box+spinner scan). The cc arm below is RETAINED solely for the
+// TitleIsBusy is the pane-title busy classifier. cc no longer routes through here (LiveBusyState delegates
+// cc classification to the content classifier ccBusyFromContent: viewport box + spinner scan). The cc arm below is RETAINED solely for the
 // /session/idle start_codex readiness contract and the unit tests; codex (braille) and the pi run-state
 // store path are unchanged. It trims first: tmux #{pane_title} can carry surrounding whitespace and BOTH
 // rules are PREFIX rules, so leading whitespace would silently defeat them. cc is busy unless the title

@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -36,71 +35,36 @@ import (
 func startTypingLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-	var cancelPrev context.CancelFunc
 	for {
 		select {
 		case <-ctx.Done():
-			if cancelPrev != nil {
-				cancelPrev()
-			}
 			return
 		case <-ticker.C:
-			// Cancel previous batch (don't wait for slow HTTP)
-			if cancelPrev != nil {
-				cancelPrev()
-			}
-			tickCtx, cancel := context.WithCancel(ctx)
-			cancelPrev = cancel
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				continue
-			}
-			// f29 round-13 Item 9: fetch every pane's title/command/pid in ONE `list-panes -a` per tmux
-			// socket BEFORE the per-session loop, instead of 3-4 tmux execs per session inside each
-			// goroutine. When the tmux binary's page cache was poisoned (2026-08-01) those per-session execs
-			// all hung in D state, each pinning an OS thread, and the bot died of fatal thread exhaustion.
-			// Batching caps the tmux fan-out at one exec per socket per tick regardless of session count.
-			sessions := bs.SessionState.All()
-			targets := make([]injector.TmuxTarget, 0, len(sessions))
-			for _, info := range sessions {
-				if t, perr := injector.ParseTarget(info.TmuxTarget); perr == nil {
-					targets = append(targets, t)
-				}
-			}
-			paneMap := injector.ListPanesBatch(targets)
-			// f29 round-13 Item 9 extension: resolve every "node" pane's real backend from ONE batched
-			// `ps -e` per tick instead of one `ps --ppid` per node pane (`ps --ppid` still walks all of
-			// /proc, so it grew linearly with codex session count — the last per-session exec in the tick).
-			// Skips ps entirely when no pane is running "node".
-			paneChildren := helpers.ResolvePaneChildren(paneMap)
-			var sentChats sync.Map
-			for _, info := range sessions {
-				go func(tickCtx context.Context, info stores.SessionInfo) {
-					title, paneRunning := helpers.PaneState(tickCtx, info.TmuxTarget, paneMap, paneChildren, bs.HookRunning)
-					if !paneRunning {
-						typingLog("tick: target=%s title=%q paneRunning=false sent=false", info.TmuxTarget, title)
-						if bs.InjectQueue.HasItems(info.TmuxTarget) {
-							// R10-item2: run flushInjectQueue in a PLAIN goroutine (NOT DispatchAsync onto the Hook
-							// FIFO). flushInjectQueue -> deliverInjectQueue -> SafeInjectText does a synchronous
-							// inject:safe Dispatch onto the SAME per-session Hook FIFO; running it ON that FIFO
-							// self-deadlocks. Off the FIFO the ArmRoute exactly-once claim still prevents double-inject.
-							go flushInjectQueue(bs, info.TmuxTarget, "")
-						}
-						return
-					}
-					// Check if this tick was cancelled (next tick arrived)
-					if tickCtx.Err() != nil {
-						typingLog("tick: target=%s title=%q paneRunning=true cancelled=true", info.TmuxTarget, title)
-						return
-					}
-					typingLog("tick: target=%s title=%q paneRunning=true sending=true", info.TmuxTarget, title)
-					key := sendTypingForTarget(bs.Bot, info, &creds, nil)
-					if key != 0 {
-						sentChats.Store(key, true)
-					}
-				}(tickCtx, info)
+			if creds, err := config.LoadCredentials(); err == nil {
+				typingTick(bs, &creds)
 			}
 		}
+	}
+}
+
+// typingTick is one 3s tick: it reads the stored busy state of every session (written by the 1s busy loop,
+// no tmux call). A working, waiting or compacting session gets Telegram's typing action again (it lasts 5s at
+// most per the Bot API); an idle session with queued items starts flushInjectQueue.
+func typingTick(bs *BotState, creds *config.Credentials) {
+	for _, info := range bs.SessionState.All() {
+		if state, _ := bs.HookRunning.GetBusyState(info.TmuxTarget); state == stores.BusyIdle {
+			typingLog("tick: target=%s paneRunning=false sent=false", info.TmuxTarget)
+			if bs.InjectQueue.HasItems(info.TmuxTarget) {
+				// R10-item2: run flushInjectQueue in a PLAIN goroutine (NOT DispatchAsync onto the Hook
+				// FIFO). flushInjectQueue -> deliverInjectQueue -> SafeInjectText does a synchronous
+				// inject:safe Dispatch onto the SAME per-session Hook FIFO; running it ON that FIFO
+				// self-deadlocks. Off the FIFO the ArmRoute exactly-once claim still prevents double-inject.
+				go flushInjectQueue(bs, info.TmuxTarget, "")
+			}
+			continue
+		}
+		typingLog("tick: target=%s paneRunning=true sending=true", info.TmuxTarget)
+		go sendTypingForTarget(bs.Bot, info, creds, nil)
 	}
 }
 
@@ -208,6 +172,7 @@ func runBot(cmd *cobra.Command, args []string) {
 	rt := &pollStampRoundTripper{base: base, watch: pollWatch, now: time.Now}
 	pref := tele.Settings{
 		Token:  creds.BotToken,
+		URL:    os.Getenv("TG_CLI_TELEGRAM_URL"),
 		Poller: handlers.NewIncomingLogPoller(&handlers.RichReplyPoller{Timeout: 10 * time.Second}),
 		Client: &http.Client{Timeout: 10 * time.Minute, Transport: rt},
 	}

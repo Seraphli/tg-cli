@@ -38,7 +38,6 @@ fi
 
 # Send a simple command to trigger hook
 LOG_BEFORE_HELLO=$(wc -l < "$LOG_FILE")
-TYPING_LOG_BEFORE=$(wc -l < "$TYPING_LOG_FILE" 2>/dev/null || echo 0)
 pane_log "[bot_hook] BEFORE 'say hello' prompt"
 inject_prompt "say hello"
 echo "Command sent, waiting for hook to trigger..."
@@ -95,6 +94,3 @@ if [ -n "$CONTEXT_LOG" ]; then
 else
   pass "Context window usage absent (statusline not triggered in short session — OK)"
 fi
-
-# Typing continuity skipped for phase2: "say hello" runs < 3s (shorter than tick interval),
-# not enough time for typing loop to fire. Real typing tests are in phase2/3/4.

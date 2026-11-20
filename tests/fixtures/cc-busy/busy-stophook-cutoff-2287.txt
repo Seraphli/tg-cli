@@ -1,0 +1,13 @@
+Reviewing the current file before making the change.
+Read a couple of files to confirm the surrounding context.
+The update looks straightforward; applying it now.
+
+
+✻ Reviewing the sample build pipeline of the demo service while the nightly checks run, reading the changelog and the config files, comparing the generated output with the stored copy, listing the o… (
+running Stop hooks… 0/2)
+  ⎿  ◼ Reviewing the sample build pipeline of the demo service while the nightly checks run, reading the changelog and the config files, comparing the generated output with the stored copy, listin…
+                                                                                                                                                                                         ◐ medium · /effort
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks · ← for agents

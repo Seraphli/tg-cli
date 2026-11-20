@@ -70,6 +70,3 @@ if tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | grep '"backend":"codex"\|backend
 else
   fail "Session backend=codex not found in bot log"
 fi
-
-# Typing continuity: skipped for phase1 (short "say hello" runs < 3s)
-echo "  Note: typing continuity skipped (short prompt, < tick interval)"

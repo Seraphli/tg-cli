@@ -48,8 +48,10 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 
 		// If a target was specified but no registered session matched, check the
 		// tmux target directly (works before the session is registered, e.g. during
-		// codex startup). "idle" here means a known CLI (cc/codex) is up and not
-		// busy — NOT merely "nothing busy". IsSessionRunning returns false both when
+		// codex startup). This is the one place outside the 1s busy loop that still
+		// classifies a pane: no stored state can exist for an unregistered pane.
+		// "idle" here means a known CLI (cc/codex) is up and not
+		// busy — NOT merely "nothing busy". LiveBusyState returns idle both when
 		// a CLI is idle AND when no CLI is running yet (empty title / unknown
 		// backend), so gate on a detected backend + non-empty title; otherwise a
 		// not-yet-started pane would be falsely reported idle and callers polling for
@@ -59,7 +61,8 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			backend := helpers.DetectBackend(targetFilter)
 			var idle bool
 			if title != "" && backend != "" {
-				idle = !helpers.IsSessionRunning(bs.HookRunning, targetFilter)
+				state, _ := helpers.LiveBusyState(bs.HookRunning, targetFilter)
+				idle = state == stores.BusyIdle
 			} else if title != "" {
 				idle = !helpers.TitleIsBusy("codex", title)
 			}

@@ -398,147 +398,6 @@ wait_for_pane_content() {
   return 1
 }
 
-# Check typing continuity between inject and end event.
-# Usage: check_typing_continuity <typing_log_before> <end_event> <label>
-#   end_event: "Stop" or "PreToolUse"
-check_typing_continuity() {
-  local typing_log_before="$1"
-  local end_event="$2"
-  local label="$3"
-  local new_entries
-  new_entries=$(tail -n +"$((typing_log_before + 1))" "$TYPING_LOG_FILE")
-  # Find T1 (UserPromptSubmit) and T2 (end_event) timestamps
-  local t1_ts t2_ts
-  t1_ts=$(echo "$new_entries" | grep "state: event=UserPromptSubmit" | head -1 | grep -oP '^\[\K[^]]+' || true)
-  t2_ts=$(echo "$new_entries" | grep "state: event=$end_event" | head -1 | grep -oP '^\[\K[^]]+' || true)
-  if [ -z "$t1_ts" ] || [ -z "$t2_ts" ]; then
-    fail "[$label] Typing: missing state timestamps (T1=${t1_ts:-none} T2=${t2_ts:-none})"
-    return
-  fi
-  local t1_epoch t2_epoch
-  t1_epoch=$(date -d "$t1_ts" +%s 2>/dev/null || echo 0)
-  t2_epoch=$(date -d "$t2_ts" +%s 2>/dev/null || echo 0)
-  # Busy segments from the BOT log busy-status lifecycle, anchored to [T1,T2] but with ONE exception at
-  # the start: a busy status is "showing at T1" if it was sent before T1, not yet closed (no grace
-  # start/deleted for it) before T1, and has further activity (edited/re-floated/grace start/deleted) at
-  # or after T1 -- t1_epoch/t2_epoch come from the CLI's own UserPromptSubmit/end-event hook (codex, in
-  # the failing run), not from the 1s busy-status tick that reads the CLI's pane (cmd/bot_busy.go:32,
-  # cmd/helpers/session.go:118-128); the two are independent clocks with nothing ordering them; without
-  # this exception a "sent" landing a moment before T1 is silently dropped and the turn shows zero busy
-  # coverage even though it was busy the whole time. The liveness check guards against picking up an
-  # ABANDONED status from an earlier phase that was never closed (619/1776 "sent" lines across preserved
-  # logs have no close at all). Matching is by sequence order (most recent sent at/before T1, then any
-  # busy line at/after T1 before the next sent) rather than by msg_id: a re-floated line logs only its
-  # new_msg_id (cmd/bot_busy.go:435), so msg_id matching would miss a status that re-floats after T1
-  # before its first edit; sequence order also matches the function's existing one-route-per-phase
-  # assumption. Once a segment is open (pre-seeded below, or opened in-window further down), it continues
-  # through edited/re-floated, ends at "busy status grace start" (the bot idle signal; fallback
-  # "deleted"); a later "sent" opens a new segment. Segments come from bot.log only, so typing.log gains
-  # no new coupling. E2E per-run isolation => one active CC route per phase, so every busy-status line
-  # belongs to this turn's route (no route arg threaded through the callers).
-  local seg_starts=() seg_ends=() busy_seconds=0 cur_start=""
-  local pre_epoch="" pre_closed="false" pre_touched="false" pre_in_lifecycle="false"
-  while IFS= read -r bl; do
-    if [ -z "$bl" ]; then continue; fi
-    local pts pepoch
-    pts=$(echo "$bl" | grep -oP '^\[\K[^]]+' || true)
-    if [ -z "$pts" ]; then continue; fi
-    pepoch=$(date -d "$pts" +%s 2>/dev/null || echo "")
-    if [ -z "$pepoch" ]; then continue; fi
-    if grep -q "busy status sent" <<< "$bl"; then
-      if [ "$pepoch" -le "$t1_epoch" ]; then
-        pre_epoch="$pepoch"; pre_closed="false"; pre_touched="false"; pre_in_lifecycle="true"
-      else
-        pre_in_lifecycle="false"
-      fi
-    elif [ "$pre_in_lifecycle" = "true" ] && grep -qE "busy status (edited|re-floated|grace start|deleted)" <<< "$bl"; then
-      if [ "$pepoch" -le "$t1_epoch" ]; then
-        if grep -qE "busy status (grace start|deleted)" <<< "$bl"; then
-          pre_closed="true"; pre_in_lifecycle="false"
-        fi
-      else
-        pre_touched="true"
-      fi
-    fi
-  done <<< "$(grep -E 'busy status (sent|edited|re-floated|grace start|deleted)' "$LOG_FILE" 2>/dev/null || true)"
-  if [ -n "$pre_epoch" ] && [ "$pre_closed" = "false" ] && [ "$pre_touched" = "true" ]; then
-    cur_start="$pre_epoch"
-  fi
-  while IFS= read -r bl; do
-    if [ -z "$bl" ]; then continue; fi
-    local bts bepoch
-    bts=$(echo "$bl" | grep -oP '^\[\K[^]]+' || true)
-    if [ -z "$bts" ]; then continue; fi
-    bepoch=$(date -d "$bts" +%s 2>/dev/null || echo "")
-    if [ -z "$bepoch" ]; then continue; fi
-    if [ "$bepoch" -lt "$t1_epoch" ] || [ "$bepoch" -gt "$t2_epoch" ]; then continue; fi
-    if grep -q "busy status sent" <<< "$bl"; then
-      if [ -z "$cur_start" ]; then cur_start="$bepoch"; fi
-    elif grep -qE "busy status (grace start|deleted)" <<< "$bl"; then
-      if [ -n "$cur_start" ]; then
-        seg_starts+=("$cur_start"); seg_ends+=("$bepoch")
-        busy_seconds=$((busy_seconds + bepoch - cur_start)); cur_start=""
-      fi
-    fi
-  done <<< "$(grep -E 'busy status (sent|edited|re-floated|grace start|deleted)' "$LOG_FILE" 2>/dev/null || true)"
-  # A segment still open at end_event (no grace start/deleted before T2) closes at T2.
-  if [ -n "$cur_start" ]; then
-    seg_starts+=("$cur_start"); seg_ends+=("$t2_epoch")
-    busy_seconds=$((busy_seconds + t2_epoch - cur_start))
-  fi
-  local nseg=${#seg_starts[@]}
-  if [ "$nseg" -eq 0 ]; then
-    fail "[$label] Typing continuity: no busy segment found in [T1,T2] — busy detection never engaged"
-    return
-  fi
-  # Typing SEND ATTEMPTS (sending=true; parsing UNCHANGED). The tick line is logged before the HTTP
-  # sendChatAction call, so a transient send failure does not create a gap — only a missed attempt would.
-  # Count + max-gap are scoped INSIDE busy segments; gaps spanning segment boundaries (the by-design idle
-  # islands) are not asserted.
-  local typing_timestamps
-  typing_timestamps=$(echo "$new_entries" | grep 'tick:.*sending=true' | grep -oP '^\[\K[^]]+' || true)
-  local count=0 max_gap=0 i
-  local seg_prev=()
-  for ((i = 0; i < nseg; i++)); do seg_prev[$i]=""; done
-  if [ -n "$typing_timestamps" ]; then
-    while IFS= read -r ts; do
-      local epoch
-      epoch=$(date -d "$ts" +%s 2>/dev/null || echo "")
-      if [ -z "$epoch" ]; then continue; fi
-      for ((i = 0; i < nseg; i++)); do
-        if [ "$epoch" -ge "${seg_starts[$i]}" ] && [ "$epoch" -le "${seg_ends[$i]}" ]; then
-          count=$((count + 1))
-          if [ -n "${seg_prev[$i]}" ]; then
-            local gap=$((epoch - seg_prev[i]))
-            if [ "$gap" -gt "$max_gap" ]; then max_gap=$gap; fi
-          fi
-          seg_prev[$i]="$epoch"
-          break
-        fi
-      done
-    done <<< "$typing_timestamps"
-  fi
-  # Expected count: accumulated busy seconds / 3 with margin of 2 (same slack), replacing whole-duration.
-  local expected=1
-  if [ "$busy_seconds" -gt 0 ]; then
-    expected=$((busy_seconds / 3 - 2))
-    if [ "$expected" -lt 1 ]; then expected=1; fi
-  fi
-  if [ "$count" -ge "$expected" ]; then
-    pass "[$label] Typing continuity: $count actions in ${busy_seconds}s busy across $nseg segment(s) (expected >= $expected)"
-  else
-    fail "[$label] Typing continuity: $count actions in ${busy_seconds}s busy across $nseg segment(s) (expected >= $expected)"
-  fi
-  # Max gap check within segments (only meaningful with >= 2 in-segment entries).
-  if [ "$count" -ge 2 ]; then
-    if [ "$max_gap" -le 5 ]; then
-      pass "[$label] Typing gap: max ${max_gap}s intra-segment (<= 5s)"
-    else
-      fail "[$label] Typing gap: max ${max_gap}s intra-segment (> 5s)"
-    fi
-  fi
-}
-
 # validate_phase_log: after a CC phase completes, validate that phase's bot-log slice for
 #   V1 - hook raw-payload completeness (every "Raw hook payload [E]:" has a JSON body; MessageDisplay too)
 #   V2 - TG message content completeness (stream full_text non-empty; no truncated "Notification sent" body)
@@ -781,7 +640,9 @@ EOF
 # prefixes (printf %q quoted so URLs and model names with special chars cannot break or inject into the
 # command), preserves the ${ANTHROPIC_MODEL:-sonnet} fallback, and pins --tools to an allowlist that
 # STRUCTURALLY removes the Agent tool, so a model cannot spawn a background subagent regardless of the
-# prompt. The allowlist literal lives ONLY here.
+# prompt. The allowlist literal lives ONLY here. An optional second argument names the model of ONE session
+# (a model that does not exist, to end a turn on an API error); it is never read from or exported to the
+# environment, so the cc process holds no ANTHROPIC_ variable for it.
 # ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are deliberately NOT put on the line: the line is typed into a
 # pane whose zsh appends it to the shell history, and it is stored as claudeCommand in config.json. CC gets
 # the two tokens by inheriting the environment of the test tmux server, which the harness process starts
@@ -789,6 +650,7 @@ EOF
 # for `session new`, carries them.
 cc_launch_cmd() {
   local perm_flag="$1"
+  local model="${2:-${ANTHROPIC_MODEL:-sonnet}}"
   local prefix="BROWSER=none DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR=$TEST_CLAUDE_CONFIG_DIR"
   local _v
   for _v in ANTHROPIC_BASE_URL ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
@@ -797,7 +659,7 @@ cc_launch_cmd() {
       prefix="${prefix} ${_v}=$(printf '%q' "${!_v}")"
     fi
   done
-  printf '%s\n' "$prefix claude --model ${ANTHROPIC_MODEL:-sonnet} $perm_flag --setting-sources user --no-chrome --tools \"Bash,Read,AskUserQuestion,TaskList\""
+  printf '%s\n' "$prefix claude --model $model $perm_flag --setting-sources user --no-chrome --tools \"Bash,Read,AskUserQuestion,TaskList\""
 }
 
 cleanup_sessions() {

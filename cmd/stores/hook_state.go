@@ -11,12 +11,32 @@ import (
 // CCBusyTTL bridges spinner-less streaming pauses between cc MessageDisplay deltas (phase31 TC-b).
 const CCBusyTTL = 4 * time.Second
 
+// BusyState is the stored busy state of one session: idle, working, waiting or compacting. The 1 s busy
+// loop stores it once per tick and the UserPromptSubmit hook stores working at once; every other place reads
+// the stored value instead of the pane.
+type BusyState int
+
+const (
+	BusyIdle BusyState = iota
+	BusyWorking
+	BusyWaiting    // cc stall banner: no data from the API for 20 s
+	BusyCompacting // the CLI compacts the conversation (manual /compact or automatic), read from the pane
+)
+
+// busyEntry is the stored state plus, for BusyWaiting, the retry countdown copied from the pane.
+type busyEntry struct {
+	state     BusyState
+	countdown string
+}
+
 // HookRunningStateStore tracks whether CC is running based on hook events.
-// PreToolUse sets running; Stop sets idle. More reliable than pane title checks.
+// PreToolUse sets running; Stop sets idle. More reliable than pane title checks. It also holds the
+// BusyState the 1 s busy loop stored for every session.
 type HookRunningStateStore struct {
 	mu         sync.RWMutex
 	state      map[string]bool      // tmuxTarget → true=running, false=idle
 	ccActivity map[string]time.Time // tmuxTarget → last cc MessageDisplay time
+	busy       map[string]busyEntry // tmuxTarget → stored busy state
 }
 
 // NewHookRunningStateStore creates an empty HookRunningStateStore.
@@ -24,6 +44,7 @@ func NewHookRunningStateStore() *HookRunningStateStore {
 	return &HookRunningStateStore{
 		state:      make(map[string]bool),
 		ccActivity: make(map[string]time.Time),
+		busy:       make(map[string]busyEntry),
 	}
 }
 
@@ -73,6 +94,33 @@ func (h *HookRunningStateStore) IsRunning(tmuxTarget string) (bool, bool) {
 	defer h.mu.RUnlock()
 	running, known := h.state[tmuxTarget]
 	return running, known
+}
+
+// SetBusyState stores the state (and the stall countdown) for tmuxTarget: the busy loop's classification, or
+// working from the UserPromptSubmit hook.
+func (h *HookRunningStateStore) SetBusyState(tmuxTarget string, state BusyState, countdown string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.busy[tmuxTarget] = busyEntry{state, countdown}
+}
+
+// GetBusyState returns the stored state and countdown of tmuxTarget; a target no tick has seen reads idle.
+func (h *HookRunningStateStore) GetBusyState(tmuxTarget string) (BusyState, string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	e := h.busy[tmuxTarget]
+	return e.state, e.countdown
+}
+
+// PruneBusyStates drops the stored state of every target that is not in keep.
+func (h *HookRunningStateStore) PruneBusyStates(keep map[string]bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for target := range h.busy {
+		if !keep[target] {
+			delete(h.busy, target)
+		}
+	}
 }
 
 // StopCooldownStore records the last Stop event time per target to prevent

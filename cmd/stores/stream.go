@@ -56,20 +56,20 @@ type StreamEntry struct {
 	// SUCCESSFUL enqueue. The ticker paragraph alignment (F5) skips an entry whose newly-aligned body would not
 	// exceed it, so the rendered body never shrinks. Guarded by DataMu.
 	RenderedLen int
-	// StopClass is the sticky post-Stop classification (commit 18) of an entry CREATED by the post-Stop state
-	// machine while ss.Stopped. Decided exactly once at the first non-empty delta: StopCopy (a verbatim
-	// paragraph run of the authoritative Stop body — every delta dropped, never armed) or New (a genuinely new
-	// message — streamed progressively once armed). Unclassified until then. Irrelevant for entries created by
-	// the normal AppendDelta path (they are armed from birth and never consult it).
+	// StopClass is the post-Stop classification (commit 18) of an entry CREATED by the post-Stop state machine
+	// while ss.Stopped. StopCopy is provisional: while every non-empty delta and the contiguous text so far lie
+	// inside the authoritative Stop body the entry is held (stored, never armed, nothing sent); the first text
+	// outside it makes the entry New, and New is sticky (streamed whole once armed). Unclassified until the first
+	// non-empty delta. Irrelevant for entries created by the normal AppendDelta path (armed from birth).
 	StopClass StopClass
 }
 
-// StopClass is the sticky classification of a post-Stop MessageDisplay entry (commit 18).
+// StopClass is the classification of a post-Stop MessageDisplay entry (commit 18): StopCopy is provisional, New is sticky.
 type StopClass int
 
 const (
 	StopClassUnclassified StopClass = iota // no non-empty delta seen yet (or a normal pre-Stop entry)
-	StopClassStopCopy                      // verbatim paragraph run of the Stop body → drop every delta, never arm
+	StopClassStopCopy                      // every delta so far lies inside the Stop body → held, never armed
 	StopClassNew                           // genuinely new post-Stop message → stream progressively once armed
 )
 
@@ -112,8 +112,8 @@ type SessionStream struct {
 	Stopped       bool // turn closed; drop late deltas
 	StopRequested bool
 	// LastStopBody is the trimmed authoritative Stop body (set by FinalizeLastWithText). Used for
-	// content-dedup of a late MessageDisplay after Stop: a post-Stop MD whose content equals this was
-	// already delivered by the Stop send (incl. the round-7 SealedMismatch direct-send), so it is dropped.
+	// content-dedup of a late MessageDisplay after Stop: post-Stop MD text that lies inside this was
+	// already delivered by the Stop send (incl. the round-7 SealedMismatch direct-send), so it is not sent again.
 	LastStopBody string
 	// NewTextSinceTool is set when any assistant text arrives since the last tool (a new bubble AND a
 	// continuation delta — both set sites). The PreToolUse FIFO handler consumes it (TakeNewTextSinceTool) to
@@ -243,9 +243,9 @@ func recordClosedTurns(ss *SessionStream) {
 
 // Post-Stop late-MessageDisplay design (commit 18) — residuals (accepted tradeoffs):
 //
-//	(a) a NEW message whose first non-empty fragment verbatim-matches a paragraph run of the authoritative
-//	    Stop body is classified STOP-COPY and dropped WHOLE (boss-accepted homogeneity tradeoff — dedup wins
-//	    over the rare case of a genuinely-new message that happens to start with the Stop body verbatim).
+//	(a) a message whose deltas all stay inside the authoritative Stop body (wherever cc cut them) is held to the
+//	    end and never sent; the first text outside the Stop body makes it NEW for good and its whole assembled
+//	    text is sent.
 //	(b) no cross-turn tombstone is recorded if no late MD of that turn arrives before Rotate (maybeTombstone
 //	    fires only on observation in the stopped handler).
 //	(c) incomplete late entries are cleared at Rotate (existing lifecycle — Rotate wipes ss.Msgs/ss.Order).
@@ -256,7 +256,7 @@ type PostStopAction int
 
 const (
 	PostStopNone          PostStopAction = iota // not a post-Stop delta — use (handled, dropped) normally
-	PostStopDrop                                // classified STOP-COPY → dropped whole (INFO "dropped (stop-copy)")
+	PostStopDrop                                // STOP-COPY (held) → nothing sent now (INFO "dropped (stop-copy)")
 	PostStopDefer                               // empty delta on an unclassified placeholder → nothing to render yet
 	PostStopNeedsArm                            // a NEW entry gained content → caller ResolveChats then ArmStopped
 	PostStopArmedComplete                       // an ARMED entry became complete → caller StreamFlush(sessionID, true)
@@ -311,9 +311,10 @@ func (s *StreamStore) AppendExisting(sessionID, messageID, turnID string, index 
 // under the caller's ss.DataMu hold (DataMu-only: NO ResolveChat, NO I/O):
 //   - known & Sealed              → drop (late/duplicate on an armed-then-sealed or pre-Stop sealed entry).
 //   - armed (in ss.Order) & unsealed → append; ArmedComplete if now complete, else ArmedProgress (P4/P5).
-//   - unknown / unarmed placeholder → PER-MESSAGE STICKY CLASSIFICATION (P1) on the first NON-EMPTY delta:
-//     STOP-COPY (a paragraph run of LastStopBody) → drop every delta, never arm (no storage);
-//     NEW → store the delta and request arming once the assembled text is non-empty (P2);
+//   - unknown / unarmed placeholder → PER-MESSAGE CLASSIFICATION (P1), re-judged on each NON-EMPTY delta until NEW:
+//     STOP-COPY (the delta and the contiguous text so far lie inside LastStopBody) → held: stored, never armed;
+//     NEW (any text outside LastStopBody; sticky, it never goes back to STOP-COPY) → request arming once the
+//     assembled text is non-empty (P2);
 //     empty/whitespace deltas defer (record index/FinalIdx continuity only, never classify, never Dirty).
 //
 // On the first observation of a late turn_id it records the turn tombstone (P6, recordClosedTurns semantics).
@@ -343,33 +344,22 @@ func stoppedMachine(ss *SessionStream, messageID, turnID string, index int, delt
 		ss.Msgs[messageID] = e
 	}
 	maybeTombstone(ss, turnID)
-	if e.StopClass == StopClassStopCopy {
-		return true, true, PostStopDrop // sticky: every delta of a STOP-COPY id is dropped, no storage
-	}
-	if e.StopClass == StopClassUnclassified {
-		if strings.TrimSpace(delta) == "" {
-			// Empty/whitespace delta: record index/FinalIdx continuity ONLY (never classify, never Dirty). An
-			// all-empty message stays a permanent no-op.
-			e.Deltas[index] = delta
-			if final {
-				e.FinalIdx = index
-			}
-			return true, false, PostStopDefer
-		}
-		// First NON-EMPTY delta → classify exactly once (P1).
-		if paragraphRunContained(delta, ss.LastStopBody) {
-			e.StopClass = StopClassStopCopy // verbatim Stop-body run → drop this and every later delta (no storage)
-			return true, true, PostStopDrop
-		}
-		e.StopClass = StopClassNew
-	}
-	// StopClassNew (just classified or continuing an unarmed NEW entry): store the delta; request arming once
-	// the assembled text is non-empty (P2). Do NOT set Dirty — an UNARMED entry is never rendered (order-gated),
-	// so it never wakes the ticker; ArmStopped sets Dirty at arm time.
 	e.Deltas[index] = delta
 	if final {
 		e.FinalIdx = index
 	}
+	if e.StopClass != StopClassNew {
+		if strings.TrimSpace(delta) == "" {
+			return true, false, PostStopDefer
+		}
+		text, _ := e.AssembledText()
+		if stopCopy(delta, ss.LastStopBody) && (strings.TrimSpace(text) == "" || stopCopy(text, ss.LastStopBody)) {
+			e.StopClass = StopClassStopCopy
+			return true, true, PostStopDrop
+		}
+		e.StopClass = StopClassNew
+	}
+	// Request arming once the assembled text is non-empty (P2); no Dirty: an UNARMED entry is never rendered.
 	if text, _ := e.AssembledText(); strings.TrimSpace(text) != "" {
 		return true, false, PostStopNeedsArm
 	}
@@ -446,56 +436,13 @@ func (s *StreamStore) DropStopped(sessionID, messageID string) {
 	ss.Order = newOrder
 }
 
-// splitParagraphs normalizes CRLF/lone-CR to LF, then splits on blank-line boundaries into TrimSpace'd
-// paragraphs (empty input → nil). Used by the post-Stop STOP-COPY matcher (P1).
-func splitParagraphs(s string) []string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	var paras []string
-	var cur []string
-	flush := func() {
-		if len(cur) > 0 {
-			if p := strings.TrimSpace(strings.Join(cur, "\n")); p != "" {
-				paras = append(paras, p)
-			}
-			cur = nil
-		}
-	}
-	for _, ln := range strings.Split(s, "\n") {
-		if strings.TrimSpace(ln) == "" {
-			flush()
-		} else {
-			cur = append(cur, ln)
-		}
-	}
-	flush()
-	return paras
-}
-
-// paragraphRunContained reports whether inner is a CONTIGUOUS paragraph run of outer (P1 matcher). Both are
-// normalized + split by splitParagraphs; empty inner or outer → false.
-func paragraphRunContained(inner, outer string) bool {
-	ip := splitParagraphs(inner)
-	op := splitParagraphs(outer)
-	if len(ip) == 0 || len(op) == 0 || len(ip) > len(op) {
-		return false
-	}
-	for start := 0; start+len(ip) <= len(op); start++ {
-		match := true
-		for k := range ip {
-			if ip[k] != op[start+k] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
+// stopCopy reports whether delta is text the Stop message already carries: after line-ending normalization the
+// trimmed delta is a substring of the Stop body. cc cuts a message into deltas anywhere (inside a paragraph,
+// inside a line) and they arrive in any order, so a copy does not align to paragraphs.
+func stopCopy(delta, stopBody string) bool {
+	nl := strings.NewReplacer("\r\n", "\n", "\r", "\n")
+	d := strings.TrimSpace(nl.Replace(delta))
+	return d != "" && strings.Contains(nl.Replace(stopBody), d)
 }
 
 // Rotate clears the current turn's entries for a NEW user turn but KEEPS the ClosedTurns tombstone,
