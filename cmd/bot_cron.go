@@ -188,7 +188,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
-			return resolveChat(bs, t)
+			return helpers.ResolveChat(bs.SessionState, t)
 		},
 		FormatPaneID: notify.FormatPaneID,
 	}
@@ -210,7 +210,7 @@ func executeInjectJob(job *stores.CronJob, bs *BotState) {
 // bounded plain-text fallback is sent (a short fixed message + the job id prefix; the oversized
 // CronName/body is NOT reused) — no pagination, no loop.
 func sendCronNotification(bs *BotState, job *stores.CronJob, rawBody, tmuxTarget string) {
-	chat, chatIDStr, topicID := resolveChat(bs, tmuxTarget)
+	chat, chatIDStr, topicID := helpers.ResolveChat(bs.SessionState, tmuxTarget)
 	if chat == nil {
 		return
 	}

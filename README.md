@@ -127,12 +127,27 @@ Interactive setup for whisper.cpp model download and language configuration.
     "ids": ["123456"],
     "defaultChatId": "123456"
   },
-  "port": 12500,
-  "nameRouteMap": {
-    "agent-name": {"chatID": 123456, "topicID": 0}
-  }
+  "port": 12500
 }
 ```
+
+### Routes (`~/.tg-cli/routes.json`)
+
+Session bindings, written by `/bot_bind`, `/bot_unbind`, `tg-cli route bind` and the settings menu:
+
+```json
+{
+  "nameRouteMap": {
+    "agent-name": {"chatId": -1001234567890, "topicId": 0}
+  },
+  "forumTopics": {"-1001234567890|agent-name": 7},
+  "mailboxChatId": -1001234567891
+}
+```
+
+The bot reads `credentials.json` and `routes.json` once at start and keeps them in memory; it does not re-read them on its own. After a hand edit run `tg-cli reload` right away: a binding the bot saves in between (a bind, an unbind, a title change) overwrites the hand edit. The bot token, the port and the API token (`apiToken`) still need a restart. The first start of a bot that finds the bindings in `credentials.json` moves them to `routes.json` and keeps the old file as `credentials.json.pre-routes`.
+
+To go back to a bot that predates `routes.json`: stop the bot, copy `credentials.json.pre-routes` over `credentials.json` (the copy replaces the whole file, so pairing approvals and route changes made after the migration are lost), delete `routes.json`, start the old binary. If `routes.json` stays, a later start of the new bot keeps it, ignores the bindings the old binary wrote into `credentials.json` and logs a warning.
 
 ### App Config (`~/.tg-cli/config.json`)
 

@@ -273,9 +273,9 @@ func typingLog(format string, args ...interface{}) {
 
 // sendTypingForTarget sends typing action for a specific session target.
 // Returns the chatID key used (for dedup tracking), or 0 if not sent.
-func sendTypingForTarget(bot *tele.Bot, info stores.SessionInfo, creds *config.Credentials, sentChats map[int64]bool) int64 {
+func sendTypingForTarget(bot *tele.Bot, info stores.SessionInfo, routes *config.Routes, sentChats map[int64]bool) int64 {
 	if info.Name != "" {
-		if route, ok := creds.NameRouteMap[info.Name]; ok {
+		if route, ok := routes.NameRouteMap[info.Name]; ok {
 			key := route.ChatID*1000 + int64(route.TopicID)
 			if sentChats != nil && sentChats[key] {
 				return 0
@@ -313,34 +313,6 @@ func sendTypingForTarget(bot *tele.Bot, info stores.SessionInfo, creds *config.C
 	}
 	typingLog("Typing sent: chat=%d target=%s", chatID, info.TmuxTarget)
 	return chatID
-}
-
-func resolveChat(bs *BotState, tmuxTarget string) (*tele.Chat, string, int) {
-	creds, err := config.LoadCredentials()
-	if err == nil && tmuxTarget != "" {
-		sid, found := bs.SessionState.FindByTarget(tmuxTarget)
-		if found {
-			info := bs.SessionState.FindInfoByTarget(tmuxTarget)
-			// Priority 1: name route
-			if info != nil && info.Name != "" {
-				if route, ok := creds.NameRouteMap[info.Name]; ok {
-					logger.Info(fmt.Sprintf("Route resolved: name=%s → chat=%d topic=%d (name route)", info.Name, route.ChatID, route.TopicID))
-					return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
-				}
-			}
-			// Priority 2: session ID route
-			if route, ok := creds.NameRouteMap[sid]; ok {
-				logger.Info(fmt.Sprintf("Route resolved: sessionID=%s → chat=%d topic=%d (session route)", sid[:8], route.ChatID, route.TopicID))
-				return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
-			}
-		}
-	}
-	chatIDStr := pairing.GetDefaultChatID()
-	if chatIDStr == "" {
-		return nil, "", 0
-	}
-	chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
-	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
 }
 
 // cleanStaleRoutes is a no-op. Routes are permanent — never delete NameRouteMap entries automatically.
@@ -451,7 +423,7 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	}
 	merged := strings.Join(texts, "\n")
 	logger.Info(fmt.Sprintf("flushInjectQueue: merging %d items for target=%s merged_len=%d mode=%d", len(items), tmuxTarget, len(merged), mode))
-	chat, _, _ := resolveChat(bs, tmuxTarget)
+	chat, _, _ := helpers.ResolveChat(bs.SessionState, tmuxTarget)
 	if injectID == "" {
 		injectID = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
 	}
@@ -491,7 +463,7 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 		SessionEvents:    bs.SessionEvents,
 		PendingMsgStore:  bs.PendingMsgStore,
 		ResolveChat: func(t string) (*tele.Chat, string, int) {
-			return resolveChat(bs, t)
+			return helpers.ResolveChat(bs.SessionState, t)
 		},
 		FormatPaneID:   notify.FormatPaneID,
 		Force:          force,
@@ -555,7 +527,7 @@ func checkSessionVersion(bs *BotState, tmuxTarget string) {
 }
 
 func sendVersionNotification(bs *BotState, tmuxTarget, current, latest string) {
-	chat, _, topicID := resolveChat(bs, tmuxTarget)
+	chat, _, topicID := helpers.ResolveChat(bs.SessionState, tmuxTarget)
 	if chat == nil {
 		return
 	}

@@ -140,19 +140,22 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				})
 				// Migrate route BEFORE Add() — Add() removes stale same-pane sessions
 				if p.TmuxTarget != "" && p.SessionID != "" {
-					creds, credErr := config.LoadCredentials()
-					if credErr == nil {
-						allSessions := bs.SessionState.All()
-						for oldSID, oldInfo := range allSessions {
-							if oldInfo.TmuxTarget == p.TmuxTarget && oldSID != p.SessionID {
-								if route, ok := creds.NameRouteMap[oldSID]; ok {
-									creds.NameRouteMap[p.SessionID] = route
-									delete(creds.NameRouteMap, oldSID)
-									config.SaveCredentials(creds)
-									logger.Info(fmt.Sprintf("Route migrated: old=%s new=%s pane=%s", oldSID[:8], p.SessionID[:8], p.TmuxTarget))
+					for oldSID, oldInfo := range bs.SessionState.All() {
+						if oldInfo.TmuxTarget == p.TmuxTarget && oldSID != p.SessionID {
+							migrated := false
+							err := config.UpdateRoutes(func(routes *config.Routes) bool {
+								route, ok := routes.NameRouteMap[oldSID]
+								if ok {
+									routes.NameRouteMap[p.SessionID] = route
+									delete(routes.NameRouteMap, oldSID)
 								}
-								break
+								migrated = ok
+								return ok
+							})
+							if err == nil && migrated {
+								logger.Info(fmt.Sprintf("Route migrated: old=%s new=%s pane=%s", oldSID[:8], p.SessionID[:8], p.TmuxTarget))
 							}
+							break
 						}
 					}
 				}

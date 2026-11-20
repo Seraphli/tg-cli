@@ -816,9 +816,9 @@ func showSettingsToolNotify(bot *tele.Bot, bs *types.BotState, msg *tele.Message
 	var textParts []string
 	textParts = append(textParts, "🔔 <b>Tool Notifications</b>")
 	if msg.Chat.Type == tele.ChatGroup || msg.Chat.Type == tele.ChatSuperGroup {
-		creds, _ := config.LoadCredentials()
+		routes, _ := config.LoadRoutes()
 		routeFound := false
-		for key, route := range creds.NameRouteMap {
+		for key, route := range routes.NameRouteMap {
 			if route.ChatID == msg.Chat.ID {
 				routeFound = true
 				// Shorten label to fit alongside other buttons in one row
@@ -933,13 +933,13 @@ func showSettingsPerm(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 }
 
 func buildRoutesSections(bs *types.BotState) []string {
-	creds, _ := config.LoadCredentials()
+	routes, _ := config.LoadRoutes()
 	sessions := bs.SessionState.All()
 	var sections []string
-	if len(creds.NameRouteMap) > 0 {
+	if len(routes.NameRouteMap) > 0 {
 		var lines []string
 		lines = append(lines, "📋 Agent routes:")
-		for name, route := range creds.NameRouteMap {
+		for name, route := range routes.NameRouteMap {
 			chatName := fmt.Sprintf("%d", route.ChatID)
 			if route.Title != "" {
 				chatName = fmt.Sprintf("%s (%d)", markdown.EscapeHTML(route.Title), route.ChatID)
@@ -973,12 +973,12 @@ func buildRoutesSections(bs *types.BotState) []string {
 // showSettingsRoutes displays the route bindings sub-menu in the settings message.
 func showSettingsRoutes(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 	sections := buildRoutesSections(bs)
-	creds, _ := config.LoadCredentials()
+	routes, _ := config.LoadRoutes()
 	menu := &tele.ReplyMarkup{}
 	var rows []tele.Row
 	var keys []string
 	idx := 1
-	for name := range creds.NameRouteMap {
+	for name := range routes.NameRouteMap {
 		keys = append(keys, name)
 		rows = append(rows, menu.Row(menu.Data(fmt.Sprintf("🗑 Unbind: %s", name), "unbind_select", fmt.Sprintf("%d", idx))))
 		idx++
@@ -1003,30 +1003,30 @@ func showSettingsRoutes(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
 	helpers.RetryEdit(bot, msg, text, menu, tele.ModeHTML)
 }
 
-func buildMailboxContent(chatType tele.ChatType, chatID int64, creds config.Credentials) (string, *tele.ReplyMarkup) {
+func buildMailboxContent(chatType tele.ChatType, chatID int64, routes config.Routes) (string, *tele.ReplyMarkup) {
 	menu := &tele.ReplyMarkup{}
 	if chatType == tele.ChatGroup || chatType == tele.ChatSuperGroup {
-		if creds.MailboxChatID == chatID {
+		if routes.MailboxChatID == chatID {
 			menu.Inline(menu.Row(menu.Data("✅ Bound (click to unbind)", "mailbox_unbind")))
 			return fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: ✅ Bound as mailbox group\nChat ID: %d", chatID), menu
 		}
-		if creds.MailboxChatID != 0 {
+		if routes.MailboxChatID != 0 {
 			menu.Inline(menu.Row(menu.Data("📬 Re-bind to this group", "mailbox_bind")))
-			return fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: Bound to another group (%d)\nChat ID: %d", creds.MailboxChatID, chatID), menu
+			return fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: Bound to another group (%d)\nChat ID: %d", routes.MailboxChatID, chatID), menu
 		}
 		menu.Inline(menu.Row(menu.Data("📬 Bind as mailbox group", "mailbox_bind")))
 		return fmt.Sprintf("📬 <b>Mailbox Group</b>\nStatus: No mailbox group set\nChat ID: %d", chatID), menu
 	}
-	if creds.MailboxChatID != 0 {
-		return fmt.Sprintf("📬 <b>Mailbox</b>\nBound to chat %d", creds.MailboxChatID), menu
+	if routes.MailboxChatID != 0 {
+		return fmt.Sprintf("📬 <b>Mailbox</b>\nBound to chat %d", routes.MailboxChatID), menu
 	}
 	return "📬 <b>Mailbox</b>\nNo mailbox group bound. Open /bot_settings → 📬 Mailbox in a group to bind it.", menu
 }
 
 // showSettingsMailbox displays the mailbox binding settings sub-menu in the settings message.
 func showSettingsMailbox(bot *tele.Bot, bs *types.BotState, msg *tele.Message) {
-	creds, _ := config.LoadCredentials()
-	text, menu := buildMailboxContent(msg.Chat.Type, msg.Chat.ID, creds)
+	routes, _ := config.LoadRoutes()
+	text, menu := buildMailboxContent(msg.Chat.Type, msg.Chat.ID, routes)
 	appendBackButton(menu)
 	helpers.RetryEdit(bot, msg, text, menu, tele.ModeHTML)
 }

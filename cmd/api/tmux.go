@@ -12,12 +12,12 @@ import (
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
+	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
 
 func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 	bot := bs.Bot
-	creds := bs.Creds
 	mux.HandleFunc("/tmux/list", func(w http.ResponseWriter, r *http.Request) {
 		out, err := injector.GlobalTmuxCmd("list-panes", "-a", "-F",
 			"#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_current_path} #{pane_pid} #{pane_current_command}").Output()
@@ -137,7 +137,7 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 				}
 			}
 			if notifyChat == nil {
-				chatID, err := strconv.ParseInt(creds.PairingAllow.DefaultChatID, 10, 64)
+				chatID, err := strconv.ParseInt(pairing.GetDefaultChatID(), 10, 64)
 				if err == nil {
 					notifyChat = &tele.Chat{ID: chatID}
 				}
@@ -177,7 +177,7 @@ func registerTmux(mux *http.ServeMux, bs *types.BotState) {
 				}
 			}
 			if notifyChat == nil {
-				chatID, err := strconv.ParseInt(creds.PairingAllow.DefaultChatID, 10, 64)
+				chatID, err := strconv.ParseInt(pairing.GetDefaultChatID(), 10, 64)
 				if err == nil {
 					notifyChat = &tele.Chat{ID: chatID}
 				}

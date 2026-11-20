@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,13 +19,17 @@ type NameRoute struct {
 }
 
 type Credentials struct {
-	BotToken      string               `json:"botToken"`
-	PairingAllow  PairingAllow         `json:"pairingAllow"`
-	Port          int                  `json:"port"`
+	BotToken     string       `json:"botToken"`
+	PairingAllow PairingAllow `json:"pairingAllow"`
+	Port         int          `json:"port"`
+	APIToken     string       `json:"apiToken,omitempty"`
+}
+
+// Routes is routes.json: the session bindings.
+type Routes struct {
 	NameRouteMap  map[string]NameRoute `json:"nameRouteMap,omitempty"`
-	APIToken      string               `json:"apiToken,omitempty"`
-	MailboxChatID int64                `json:"mailboxChatId,omitempty"`
 	ForumTopics   map[string]int       `json:"forumTopics,omitempty"` // "<chat id>|<session name>" -> forum topic (thread) id; independent of the current route
+	MailboxChatID int64                `json:"mailboxChatId,omitempty"`
 }
 
 type PairingAllow struct {
@@ -40,10 +45,6 @@ func GetConfigDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".tg-cli")
-}
-
-func GetCredentialsPath() string {
-	return filepath.Join(GetConfigDir(), "credentials.json")
 }
 
 // UpgradeFlagPath returns the path of the upgrade-in-progress sentinel file.
@@ -67,61 +68,6 @@ func UpgradeFlagActive() bool {
 func ensureConfigDir() error {
 	dir := GetConfigDir()
 	return os.MkdirAll(dir, 0755)
-}
-
-func LoadCredentials() (Credentials, error) {
-	if err := ensureConfigDir(); err != nil {
-		return Credentials{}, err
-	}
-	path := GetCredentialsPath()
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return Credentials{
-			BotToken: "",
-			PairingAllow: PairingAllow{
-				IDs:           []string{},
-				DefaultChatID: "",
-			},
-			Port:         12500,
-			NameRouteMap: map[string]NameRoute{},
-			ForumTopics:  map[string]int{},
-		}, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Credentials{}, err
-	}
-	var creds Credentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return Credentials{}, err
-	}
-	if creds.PairingAllow.IDs == nil {
-		creds.PairingAllow.IDs = []string{}
-	}
-	if creds.Port == 0 {
-		creds.Port = 12500
-	}
-	if creds.NameRouteMap == nil {
-		creds.NameRouteMap = make(map[string]NameRoute)
-	}
-	if creds.ForumTopics == nil {
-		creds.ForumTopics = make(map[string]int)
-	}
-	return creds, nil
-}
-
-func SaveCredentials(creds Credentials) error {
-	if err := ensureConfigDir(); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(creds, "", "  ")
-	if err != nil {
-		return err
-	}
-	path := GetCredentialsPath()
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-	return nil
 }
 
 type AppConfig struct {
@@ -264,28 +210,30 @@ func UpdateAppConfigCache(cfg AppConfig) {
 	appConfigCache.Store(&cfg)
 }
 
-// MigrateChat updates all credential references from oldID to newID.
+// MigrateChat changes oldID to newID in every route and in the default chat. The two files are two changes: if the
+// second fails the first stays, and the next send to the old id raises the same migration again.
 func MigrateChat(oldID, newID int64) error {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return err
-	}
-	migrated := false
-	for k, v := range creds.NameRouteMap {
-		if v.ChatID == oldID {
-			v.ChatID = newID
-			creds.NameRouteMap[k] = v
-			migrated = true
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	routesErr := routesStore.update(func(r *Routes) bool {
+		changed := false
+		for k, v := range r.NameRouteMap {
+			if v.ChatID == oldID {
+				v.ChatID = newID
+				r.NameRouteMap[k] = v
+				changed = true
+			}
 		}
-	}
-	if creds.PairingAllow.DefaultChatID == strconv.FormatInt(oldID, 10) {
-		creds.PairingAllow.DefaultChatID = strconv.FormatInt(newID, 10)
-		migrated = true
-	}
-	if !migrated {
-		return nil
-	}
-	return SaveCredentials(creds)
+		return changed
+	})
+	credsErr := credsStore.update(func(c *Credentials) bool {
+		if c.PairingAllow.DefaultChatID != strconv.FormatInt(oldID, 10) {
+			return false
+		}
+		c.PairingAllow.DefaultChatID = strconv.FormatInt(newID, 10)
+		return true
+	})
+	return errors.Join(routesErr, credsErr)
 }
 
 // ForumTopicKey is the ForumTopics key for a session name in a group.
@@ -295,43 +243,33 @@ func ForumTopicKey(chatID int64, name string) string {
 
 // SetChatTitle stores title in every route whose chat id is chatID (new_chat_title service message).
 func SetChatTitle(chatID int64, title string) error {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return err
-	}
-	changed := false
-	for k, v := range creds.NameRouteMap {
-		if v.ChatID == chatID && v.Title != title {
-			v.Title = title
-			creds.NameRouteMap[k] = v
-			changed = true
+	return UpdateRoutes(func(r *Routes) bool {
+		changed := false
+		for k, v := range r.NameRouteMap {
+			if v.ChatID == chatID && v.Title != title {
+				v.Title = title
+				r.NameRouteMap[k] = v
+				changed = true
+			}
 		}
-	}
-	if !changed {
-		return nil
-	}
-	return SaveCredentials(creds)
+		return changed
+	})
 }
 
-// FillEmptyTitles sets titles[chat id] on every route whose title is still empty. It reads the CURRENT
-// credentials file (the file has no lock, so the caller must never write back a copy read earlier).
+// FillEmptyTitles sets titles[chat id] on every route whose title is still empty. It changes the CURRENT routes, so
+// a change made while the caller fetched the titles is kept.
 func FillEmptyTitles(titles map[int64]string) error {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return err
-	}
-	changed := false
-	for k, v := range creds.NameRouteMap {
-		if t := titles[v.ChatID]; v.Title == "" && t != "" {
-			v.Title = t
-			creds.NameRouteMap[k] = v
-			changed = true
+	return UpdateRoutes(func(r *Routes) bool {
+		changed := false
+		for k, v := range r.NameRouteMap {
+			if t := titles[v.ChatID]; v.Title == "" && t != "" {
+				v.Title = t
+				r.NameRouteMap[k] = v
+				changed = true
+			}
 		}
-	}
-	if !changed {
-		return nil
-	}
-	return SaveCredentials(creds)
+		return changed
+	})
 }
 
 func SaveAppConfig(cfg AppConfig) error {

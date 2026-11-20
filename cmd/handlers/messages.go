@@ -34,9 +34,9 @@ func isTopicRootReply(msg *tele.Message) bool {
 
 // resolveGroupTarget finds the unique bound tmux target for a group/topic chat.
 func resolveGroupTarget(bs *types.BotState, chatID int64, topicID int) (string, injector.TmuxTarget, error) {
-	creds, _ := config.LoadCredentials()
+	routes, _ := config.LoadRoutes()
 	var targets []string
-	for key, route := range creds.NameRouteMap {
+	for key, route := range routes.NameRouteMap {
 		if route.ChatID != chatID {
 			continue
 		}
@@ -73,7 +73,7 @@ func resolveGroupTarget(bs *types.BotState, chatID int64, topicID int) (string, 
 		}
 	}
 	if len(targets) == 0 && topicID != 0 {
-		for key, route := range creds.NameRouteMap {
+		for key, route := range routes.NameRouteMap {
 			if route.ChatID != chatID || route.TopicID != 0 {
 				continue
 			}

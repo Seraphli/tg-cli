@@ -269,7 +269,6 @@ func NewIncomingLogPoller(inner tele.Poller) tele.Poller {
 // Register registers all Telegram bot handlers.
 func Register(bs *types.BotState) {
 	bot := bs.Bot
-	_ = bs.Creds
 	// Track command usage for menu auto-sorting
 	bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
@@ -594,12 +593,10 @@ func Register(bs *types.BotState) {
 		// Mode 1: /bot_bind <name> — bind by name
 		name := strings.TrimSpace(c.Message().Payload)
 		if name != "" {
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-			}
-			creds.NameRouteMap[name] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
-			if err := config.SaveCredentials(creds); err != nil {
+			if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+				routes.NameRouteMap[name] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
+				return true
+			}); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 			}
 			topicStr := ""
@@ -629,12 +626,10 @@ func Register(bs *types.BotState) {
 				key = info.Name
 				keyLabel = info.Name
 			}
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-			}
-			creds.NameRouteMap[key] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
-			if err := config.SaveCredentials(creds); err != nil {
+			if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+				routes.NameRouteMap[key] = config.NameRoute{ChatID: chatID, TopicID: topicID, Title: c.Chat().Title}
+				return true
+			}); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to save binding: %v", err))
 			}
 			topicStr := ""
@@ -711,29 +706,27 @@ func Register(bs *types.BotState) {
 				return c.Reply("❌ Session not found for that pane.")
 			}
 			info := bs.SessionState.FindInfoByTarget(tmuxStr)
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-			}
 			// Try unbind by name first, then by session ID
 			var unboundKey string
-			if info != nil && info.Name != "" {
-				if _, ok := creds.NameRouteMap[info.Name]; ok {
-					delete(creds.NameRouteMap, info.Name)
-					unboundKey = info.Name
+			if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+				if info != nil && info.Name != "" {
+					if _, ok := routes.NameRouteMap[info.Name]; ok {
+						delete(routes.NameRouteMap, info.Name)
+						unboundKey = info.Name
+					}
 				}
-			}
-			if unboundKey == "" {
-				if _, ok := creds.NameRouteMap[sid]; ok {
-					delete(creds.NameRouteMap, sid)
-					unboundKey = fmt.Sprintf("session:%s", sid[:8])
+				if unboundKey == "" {
+					if _, ok := routes.NameRouteMap[sid]; ok {
+						delete(routes.NameRouteMap, sid)
+						unboundKey = fmt.Sprintf("session:%s", sid[:8])
+					}
 				}
+				return unboundKey != ""
+			}); err != nil {
+				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
 			}
 			if unboundKey == "" {
 				return c.Reply("❌ No route binding found for this session.")
-			}
-			if err := config.SaveCredentials(creds); err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
 			}
 			logger.Info(fmt.Sprintf("Route unbound (reply): key=%s by user=%s", unboundKey, userID))
 			return c.Reply(fmt.Sprintf("✅ Unbound: %s", unboundKey))
@@ -741,26 +734,26 @@ func Register(bs *types.BotState) {
 		// With arg: direct delete
 		name := strings.TrimSpace(c.Message().Payload)
 		if name != "" {
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
-			}
-			if _, ok := creds.NameRouteMap[name]; !ok {
-				return c.Reply(fmt.Sprintf("❌ No route binding found for name: %s", name))
-			}
-			delete(creds.NameRouteMap, name)
-			if err := config.SaveCredentials(creds); err != nil {
+			found := false
+			if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+				_, found = routes.NameRouteMap[name]
+				delete(routes.NameRouteMap, name)
+				return found
+			}); err != nil {
 				return c.Reply(fmt.Sprintf("❌ Failed to save: %v", err))
+			}
+			if !found {
+				return c.Reply(fmt.Sprintf("❌ No route binding found for name: %s", name))
 			}
 			logger.Info(fmt.Sprintf("Route unbound (name): name=%s by user=%s", name, userID))
 			return c.Reply(fmt.Sprintf("✅ Unbound agent name: %s", name))
 		}
 		// No arg: show inline buttons listing NameRouteMap entries
-		creds, err := config.LoadCredentials()
+		routes, err := config.LoadRoutes()
 		if err != nil {
 			return c.Reply(fmt.Sprintf("❌ Failed to load config: %v", err))
 		}
-		if len(creds.NameRouteMap) == 0 {
+		if len(routes.NameRouteMap) == 0 {
 			return c.Reply("No agent name route bindings to unbind.")
 		}
 		sel := &tele.ReplyMarkup{}
@@ -768,7 +761,7 @@ func Register(bs *types.BotState) {
 		var lines []string
 		var keys []string
 		idx := 1
-		for n, route := range creds.NameRouteMap {
+		for n, route := range routes.NameRouteMap {
 			topicStr := ""
 			if route.TopicID != 0 {
 				topicStr = fmt.Sprintf(" topic=%d", route.TopicID)
@@ -894,8 +887,8 @@ func Register(bs *types.BotState) {
 				if info.Name == "" {
 					continue
 				}
-				creds, _ := config.LoadCredentials()
-				if route, ok := creds.NameRouteMap[info.Name]; ok && route.ChatID == chatIDInt {
+				routes, _ := config.LoadRoutes()
+				if route, ok := routes.NameRouteMap[info.Name]; ok && route.ChatID == chatIDInt {
 					if checkSessionVersionByTarget(bs, info.TmuxTarget) {
 						found = true
 					}

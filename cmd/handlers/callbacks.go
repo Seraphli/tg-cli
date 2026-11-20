@@ -523,13 +523,13 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			head = "✅ Bound to topic."
 			logger.Info(fmt.Sprintf("Route bound (menu, forum topic): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, topicID))
 		} else {
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
+			if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+				routes.NameRouteMap[item.Key] = config.NameRoute{ChatID: ctx.ChatID, TopicID: ctx.TopicID, Title: ctx.Title}
+				return true
+			}); err != nil {
+				helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save binding: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 				return nil
 			}
-			creds.NameRouteMap[item.Key] = config.NameRoute{ChatID: ctx.ChatID, TopicID: ctx.TopicID, Title: ctx.Title}
-			config.SaveCredentials(creds)
 			logger.Info(fmt.Sprintf("Route bound (menu): key=%s → chat=%d topic=%d", item.Key, ctx.ChatID, ctx.TopicID))
 		}
 		topicStr := ""
@@ -563,13 +563,13 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 			return c.Respond()
 		}
 		name := keys[idx]
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to load config: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
+		if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			delete(routes.NameRouteMap, name)
+			return true
+		}); err != nil {
+			helpers.RetryEdit(bot, c.Message(), fmt.Sprintf("❌ Failed to save: %s", markdown.EscapeHTML(err.Error())), tele.ModeHTML)
 			return c.Respond()
 		}
-		delete(creds.NameRouteMap, name)
-		config.SaveCredentials(creds)
 		logger.Info(fmt.Sprintf("Route unbound (menu/name): name=%s", name))
 		if IsSettingsMenu(bs, c.Message().ID) {
 			showSettingsRoutes(bot, bs, c.Message())
@@ -718,18 +718,20 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 
 	bot.Handle(&tele.Btn{Unique: "tools_route_toggle"}, func(c tele.Context) error {
 		key := c.Callback().Data
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
-		}
-		route, ok := creds.NameRouteMap[key]
-		if !ok {
-			return c.Respond(&tele.CallbackResponse{Text: "❌ Route not found"})
-		}
-		route.ToolNotifyOff = !route.ToolNotifyOff
-		creds.NameRouteMap[key] = route
-		if err := config.SaveCredentials(creds); err != nil {
+		var route config.NameRoute
+		found := false
+		if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			if route, found = routes.NameRouteMap[key]; !found {
+				return false
+			}
+			route.ToolNotifyOff = !route.ToolNotifyOff
+			routes.NameRouteMap[key] = route
+			return true
+		}); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
+		}
+		if !found {
+			return c.Respond(&tele.CallbackResponse{Text: "❌ Route not found"})
 		}
 		status := "ON"
 		if route.ToolNotifyOff {
@@ -1077,12 +1079,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 
 	bot.Handle(&tele.InlineButton{Unique: "mailbox_bind"}, func(c tele.Context) error {
 		chatID := c.Message().Chat.ID
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
-		}
-		creds.MailboxChatID = chatID
-		if err := config.SaveCredentials(creds); err != nil {
+		if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			routes.MailboxChatID = chatID
+			return true
+		}); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		logger.Info(fmt.Sprintf("Mailbox group bound: chat=%d", chatID))
@@ -1100,12 +1100,10 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 	})
 
 	bot.Handle(&tele.InlineButton{Unique: "mailbox_unbind"}, func(c tele.Context) error {
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to load config"})
-		}
-		creds.MailboxChatID = 0
-		if err := config.SaveCredentials(creds); err != nil {
+		if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			routes.MailboxChatID = 0
+			return true
+		}); err != nil {
 			return c.Respond(&tele.CallbackResponse{Text: "❌ Failed to save"})
 		}
 		logger.Info("Mailbox group unbound")

@@ -16,16 +16,16 @@ func useTempConfig(t *testing.T) {
 	t.Cleanup(func() { config.ConfigDir = old })
 }
 
-// seedRoutes writes credentials holding exactly the given routes.
+// seedRoutes writes routes.json holding exactly the given routes.
 func seedRoutes(t *testing.T, routes map[string]config.NameRoute) {
 	t.Helper()
-	creds, err := config.LoadCredentials()
+	stored, err := config.LoadRoutes()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadRoutes: %v", err)
 	}
-	creds.NameRouteMap = routes
-	if err := config.SaveCredentials(creds); err != nil {
-		t.Fatalf("SaveCredentials: %v", err)
+	stored.NameRouteMap = routes
+	if err := config.SaveRoutes(stored); err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
 	}
 }
 
@@ -42,13 +42,12 @@ func TestFillEmptyRouteTitles(t *testing.T) {
 	s.On("getChat", func(p map[string]interface{}) tgfake.Reply {
 		if first {
 			first = false
-			creds, err := config.LoadCredentials()
+			err := config.UpdateRoutes(func(r *config.Routes) bool {
+				r.NameRouteMap["delta"] = config.NameRoute{ChatID: -100444}
+				return true
+			})
 			if err != nil {
-				t.Errorf("LoadCredentials in script: %v", err)
-			}
-			creds.NameRouteMap["delta"] = config.NameRoute{ChatID: -100444}
-			if err := config.SaveCredentials(creds); err != nil {
-				t.Errorf("SaveCredentials in script: %v", err)
+				t.Errorf("UpdateRoutes in script: %v", err)
 			}
 		}
 		switch p["chat_id"] {
@@ -61,11 +60,11 @@ func TestFillEmptyRouteTitles(t *testing.T) {
 		return tgfake.Reply{Err: "Bad Request: chat not found"}
 	})
 	FillEmptyRouteTitles(context.Background(), bot)
-	creds, err := config.LoadCredentials()
+	stored, err := config.LoadRoutes()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadRoutes: %v", err)
 	}
-	r := creds.NameRouteMap
+	r := stored.NameRouteMap
 	if r["alpha"].Title != "Alpha Group" || r["beta"].Title != "" || r["gamma"].Title != "Kept" {
 		t.Fatalf("titles after first run: %+v", r)
 	}

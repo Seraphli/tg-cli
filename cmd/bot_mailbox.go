@@ -430,12 +430,12 @@ func (ms *mailboxStore) send(bot *tele.Bot, from, to, subject, text string, file
 		Read:      false,
 	}
 	// Post to TG mailbox channel if configured
-	creds, err := config.LoadCredentials()
+	routes, err := config.LoadRoutes()
 	if err == nil && bot != nil {
-		if creds.MailboxChatID == 0 {
+		if routes.MailboxChatID == 0 {
 			logger.Info("Mailbox channel not configured")
 		} else {
-			channel := &tele.Chat{ID: creds.MailboxChatID}
+			channel := &tele.Chat{ID: routes.MailboxChatID}
 			timestampStr := msg.Timestamp.Format(time.RFC3339)
 			if fileData != nil {
 				// Attachment path: plain-text caption with status at body end,
@@ -590,7 +590,7 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 		// Send TG notification to target agent's chat
 		targetInfo := bs.SessionState.FindByName(to)
 		if targetInfo != nil {
-			chat, _, topicID := resolveChat(bs, targetInfo.TmuxTarget)
+			chat, _, topicID := helpers.ResolveChat(bs.SessionState, targetInfo.TmuxTarget)
 			if chat != nil {
 				timestampStr := time.Now().Format(time.RFC3339)
 				chunks := buildMailboxChunks("📥 Mail Received", from, to, timestampStr, msgID, subject, text, "")
@@ -604,7 +604,7 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 		// Notify sender's chat
 		fromInfo := bs.SessionState.FindByName(from)
 		if fromInfo != nil {
-			fromChat, _, fromTopicID := resolveChat(bs, fromInfo.TmuxTarget)
+			fromChat, _, fromTopicID := helpers.ResolveChat(bs.SessionState, fromInfo.TmuxTarget)
 			if fromChat != nil {
 				timestampStr := time.Now().Format(time.RFC3339)
 				chunks := buildMailboxChunks("📤 Mail Sent", from, to, timestampStr, msgID, subject, text, "")
@@ -632,10 +632,10 @@ func registerMailboxAPI(mux *http.ServeMux, bs *BotState) {
 		select {
 		case msgs := <-ch:
 			// Edit TG messages with read receipts
-			mailboxCreds, _ := config.LoadCredentials()
-			if mailboxCreds.MailboxChatID != 0 {
+			mailboxRoutes, _ := config.LoadRoutes()
+			if mailboxRoutes.MailboxChatID != 0 {
 				for _, msg := range msgs {
-					editTGReadReceipt(bot, msg, mailboxCreds.MailboxChatID)
+					editTGReadReceipt(bot, msg, mailboxRoutes.MailboxChatID)
 				}
 			}
 			// Move messages from unread to read

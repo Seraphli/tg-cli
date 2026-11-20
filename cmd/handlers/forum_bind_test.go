@@ -123,18 +123,18 @@ func methodsDuring(s *tgfake.Server, f func()) []string {
 	return s.Methods()[n:]
 }
 
-func loadCreds(t *testing.T) config.Credentials {
+func loadRoutes(t *testing.T) config.Routes {
 	t.Helper()
-	creds, err := config.LoadCredentials()
+	routes, err := config.LoadRoutes()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadRoutes: %v", err)
 	}
-	return creds
+	return routes
 }
 
 func wantRoute(t *testing.T, name string, want config.NameRoute) {
 	t.Helper()
-	if got := loadCreds(t).NameRouteMap[name]; got != want {
+	if got := loadRoutes(t).NameRouteMap[name]; got != want {
 		t.Errorf("route %q = %+v, want %+v", name, got, want)
 	}
 }
@@ -150,7 +150,7 @@ func TestForumBind_CreatesTopicAndRecords(t *testing.T) {
 			t.Errorf("createForumTopic params = %v, want name=alpha chat_id=-1001234567890", p)
 		}
 		wantRoute(t, "alpha", config.NameRoute{ChatID: forumChat.ID, TopicID: 77, Title: "Test Forum"})
-		if got := loadCreds(t).ForumTopics[config.ForumTopicKey(forumChat.ID, "alpha")]; got != 77 {
+		if got := loadRoutes(t).ForumTopics[config.ForumTopicKey(forumChat.ID, "alpha")]; got != 77 {
 			t.Errorf("ForumTopics record = %d, want 77", got)
 		}
 	}
@@ -197,7 +197,7 @@ func TestForumBind_ReuseAfterLeaving(t *testing.T) {
 	}
 	bindAlpha(plainChat, 4100)
 	wantRoute(t, "alpha", config.NameRoute{ChatID: plainChat.ID, TopicID: 0, Title: "Plain Group"})
-	if got := loadCreds(t).ForumTopics[config.ForumTopicKey(forumChat.ID, "alpha")]; got != 77 {
+	if got := loadRoutes(t).ForumTopics[config.ForumTopicKey(forumChat.ID, "alpha")]; got != 77 {
 		t.Errorf("ForumTopics record after leaving = %d, want 77", got)
 	}
 	if n := s.Count("createForumTopic"); n != 1 {
@@ -222,24 +222,24 @@ func TestForumBind_Failures(t *testing.T) {
 		if text := callText(lastCall(t, s, "editMessageText")); text != want {
 			t.Errorf("last edit text = %q, want %q", text, want)
 		}
-		creds := loadCreds(t)
-		if _, ok := creds.NameRouteMap["alpha"]; ok || len(creds.ForumTopics) != 0 {
-			t.Errorf("failed bind stored data: routes=%v topics=%v", creds.NameRouteMap, creds.ForumTopics)
+		routes := loadRoutes(t)
+		if _, ok := routes.NameRouteMap["alpha"]; ok || len(routes.ForumTopics) != 0 {
+			t.Errorf("failed bind stored data: routes=%v topics=%v", routes.NameRouteMap, routes.ForumTopics)
 		}
 	})
 }
 
 func TestBuildRoutesSections_NoGetChat(t *testing.T) {
 	s, bot, bs := forumBindEnv(t)
-	creds := loadCreds(t)
-	creds.NameRouteMap = map[string]config.NameRoute{
+	routes := loadRoutes(t)
+	routes.NameRouteMap = map[string]config.NameRoute{
 		"alpha":   {ChatID: -1001234567890, TopicID: 77, Title: "Test Forum"},
 		"beta":    {ChatID: -1009999000002},
 		"gamma":   {ChatID: -1009999000003, Title: "Other"},
 		"dev&ops": {ChatID: -1009999000004, Title: "R&D"},
 	}
-	if err := config.SaveCredentials(creds); err != nil {
-		t.Fatalf("SaveCredentials: %v", err)
+	if err := config.SaveRoutes(routes); err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
 	}
 	lines := strings.Split(buildRoutesSections(bs)[0], "\n")
 	if lines[0] != "📋 Agent routes:" {
@@ -271,14 +271,14 @@ func TestBuildRoutesSections_NoGetChat(t *testing.T) {
 
 func TestNewGroupTitle(t *testing.T) {
 	_, bot, _ := forumBindEnv(t)
-	creds := loadCreds(t)
-	creds.NameRouteMap = map[string]config.NameRoute{
+	routes := loadRoutes(t)
+	routes.NameRouteMap = map[string]config.NameRoute{
 		"alpha": {ChatID: forumChat.ID, Title: "Old"},
 		"beta":  {ChatID: forumChat.ID, TopicID: 9, Title: "Old"},
 		"gamma": {ChatID: -1009999000003, Title: "Other"},
 	}
-	if err := config.SaveCredentials(creds); err != nil {
-		t.Fatalf("SaveCredentials: %v", err)
+	if err := config.SaveRoutes(routes); err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
 	}
 	bot.ProcessUpdate(tele.Update{Message: &tele.Message{ID: 1, Chat: forumChat, NewGroupTitle: "New"}})
 	wantRoute(t, "alpha", config.NameRoute{ChatID: forumChat.ID, Title: "New"})

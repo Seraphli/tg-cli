@@ -55,25 +55,24 @@ func ApprovePairingByCode(code string) bool {
 	pruneExpired()
 	for userID, req := range pendingRequests {
 		if req.Code == code {
-			creds, err := config.LoadCredentials()
+			err := config.UpdateCredentials(func(creds *config.Credentials) bool {
+				idSet := make(map[string]bool)
+				for _, id := range creds.PairingAllow.IDs {
+					idSet[id] = true
+				}
+				idSet[req.UserID] = true
+				idSet[req.ChatID] = true
+				newIDs := make([]string, 0, len(idSet))
+				for id := range idSet {
+					newIDs = append(newIDs, id)
+				}
+				creds.PairingAllow.IDs = newIDs
+				if creds.PairingAllow.DefaultChatID == "" {
+					creds.PairingAllow.DefaultChatID = req.ChatID
+				}
+				return true
+			})
 			if err != nil {
-				return false
-			}
-			idSet := make(map[string]bool)
-			for _, id := range creds.PairingAllow.IDs {
-				idSet[id] = true
-			}
-			idSet[req.UserID] = true
-			idSet[req.ChatID] = true
-			newIDs := make([]string, 0, len(idSet))
-			for id := range idSet {
-				newIDs = append(newIDs, id)
-			}
-			creds.PairingAllow.IDs = newIDs
-			if creds.PairingAllow.DefaultChatID == "" {
-				creds.PairingAllow.DefaultChatID = req.ChatID
-			}
-			if err := config.SaveCredentials(creds); err != nil {
 				return false
 			}
 			delete(pendingRequests, userID)

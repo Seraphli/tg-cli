@@ -17,23 +17,25 @@ import (
 )
 
 // ResolveChat finds the TG chat and topic for a tmux target.
-// Priority: name route > session ID route > default chat.
+// Priority: name route > session ID route > default chat. The "Route resolved" line is written when the session has
+// no such line stored yet or its route differs from the stored one; an unchanged route writes nothing.
 func ResolveChat(sessionState *stores.SessionStateStore, tmuxTarget string) (*tele.Chat, string, int) {
-	creds, err := config.LoadCredentials()
+	routes, err := config.LoadRoutes()
 	if err == nil && tmuxTarget != "" {
 		sid, found := sessionState.FindByTarget(tmuxTarget)
 		if found {
 			info := sessionState.FindInfoByTarget(tmuxTarget)
 			if info != nil && info.Name != "" {
-				if route, ok := creds.NameRouteMap[info.Name]; ok {
-					logger.Info(fmt.Sprintf("Route resolved: name=%s → chat=%d topic=%d (name route)", info.Name, route.ChatID, route.TopicID))
+				if route, ok := routes.NameRouteMap[info.Name]; ok {
+					logRouteOnce(sessionState, sid, fmt.Sprintf("Route resolved: name=%s → chat=%d topic=%d (name route)", info.Name, route.ChatID, route.TopicID))
 					return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
 				}
 			}
-			if route, ok := creds.NameRouteMap[sid]; ok {
-				logger.Info(fmt.Sprintf("Route resolved: sessionID=%s → chat=%d topic=%d (session route)", sid[:8], route.ChatID, route.TopicID))
+			if route, ok := routes.NameRouteMap[sid]; ok {
+				logRouteOnce(sessionState, sid, fmt.Sprintf("Route resolved: sessionID=%s → chat=%d topic=%d (session route)", sid[:8], route.ChatID, route.TopicID))
 				return &tele.Chat{ID: route.ChatID}, strconv.FormatInt(route.ChatID, 10), route.TopicID
 			}
+			sessionState.NoteRouteLine(sid, "")
 		}
 	}
 	chatIDStr := pairing.GetDefaultChatID()
@@ -42,6 +44,13 @@ func ResolveChat(sessionState *stores.SessionStateStore, tmuxTarget string) (*te
 	}
 	chatIDInt, _ := strconv.ParseInt(chatIDStr, 10, 64)
 	return &tele.Chat{ID: chatIDInt}, chatIDStr, 0
+}
+
+// logRouteOnce writes line unless it is the line last written for the session.
+func logRouteOnce(sessionState *stores.SessionStateStore, sid, line string) {
+	if sessionState.NoteRouteLine(sid, line) {
+		logger.Info(line)
+	}
 }
 
 // CleanDeadSession cleans up state for a dead tmux session.
@@ -313,7 +322,7 @@ func DoCancelPerm(
 
 // IsRouteToolNotifyOff checks if the resolved route for a tmux target has ToolNotifyOff=true.
 func IsRouteToolNotifyOff(ss *stores.SessionStateStore, tmuxTarget string) bool {
-	creds, err := config.LoadCredentials()
+	routes, err := config.LoadRoutes()
 	if err != nil {
 		return false
 	}
@@ -322,13 +331,13 @@ func IsRouteToolNotifyOff(ss *stores.SessionStateStore, tmuxTarget string) bool 
 		return false
 	}
 	if info.Name != "" {
-		if route, ok := creds.NameRouteMap[info.Name]; ok {
+		if route, ok := routes.NameRouteMap[info.Name]; ok {
 			return route.ToolNotifyOff
 		}
 	}
 	sid, found := ss.FindByTarget(tmuxTarget)
 	if found {
-		if route, ok := creds.NameRouteMap[sid]; ok {
+		if route, ok := routes.NameRouteMap[sid]; ok {
 			return route.ToolNotifyOff
 		}
 	}

@@ -1,5 +1,5 @@
 """Real-cc rig for hook-path scenarios that need a slow Telegram: python3 rig.py SCENARIO TG_CLI_BIN [CC_BIN]
-SCENARIO: clear (done line + /clear at 3 s Telegram latency), perm (turn 2's permission prompt), week, five (5 h rate limit), all (in parallel).
+SCENARIO: clear (done line + /clear at 3 s Telegram latency), perm (turn 2's permission prompt), week, five (5 h rate limit), routes (legacy credentials.json migrated at start, one Route resolved line per route change, tg-cli reload; no cc), all (in parallel).
 The bot and cc are real; Telegram and the model API are in-process fakes. One PASS/FAIL line per check, then the seconds."""
 import json, os, re, shutil, socket, subprocess, sys, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,6 +8,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 HOME = os.path.expanduser("~")
 LATENCY = 3.0
 LIMIT = {"retry-after": "3600", "x-should-retry": "false", "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-overage-status": "rejected"}
+# credentials.json of an install from before routes.json: 30 routes (the session "rig" among them, in forum topic 7), 3 forum topics, the mailbox chat
+LEGACY = {"nameRouteMap": {**{"agent%02d" % i: {"chatId": -1002000000000 - i, "title": "Group %02d" % i} for i in range(1, 30)}, "rig": {"chatId": -1001234567890, "topicId": 7, "title": "Rig group", "toolNotifyOff": True}}, "forumTopics": {"-1001234567890|rig": 7, "-1002000000003|agent03": 12, "-1002000000004|agent04": 13}, "mailboxChatId": -1003000000001}
 
 
 def sse(name, **d):
@@ -96,8 +98,8 @@ def serve(handler):
 
 
 class Rig:
-    def __init__(self, label, tgbin, ccbin, limit=None, reset=0, oauth=False, perm=False, delay=0):
-        self.label, self.results = label, []
+    def __init__(self, label, tgbin, ccbin, limit=None, reset=0, oauth=False, perm=False, delay=0, nocc=False, seed=None):
+        self.label, self.results, self.tgbin = label, [], tgbin
         self.srv = "rig%d" % os.getpid()
         self.dir = "%s/.tg-cli-test/%s" % (HOME, self.srv)
         self.cfg, self.cwd, ccc = self.dir + "/tgcfg", self.dir + "/cwd", self.dir + "/claude"
@@ -109,7 +111,9 @@ class Rig:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             self.port = s.getsockname()[1]
-        json.dump({"botToken": "123456:FAKE-RIG", "pairingAllow": {"ids": ["424242"], "defaultChatId": "424242"}, "port": self.port, "nameRouteMap": {"rig": {"chatId": -1001234567890}}}, open(self.cfg + "/credentials.json", "w"))
+        self.seed = {"botToken": "123456:FAKE-RIG", "pairingAllow": {"ids": ["424242"], "defaultChatId": "424242"}, "port": self.port, **(seed or {"nameRouteMap": {"rig": {"chatId": -1001234567890}}})}
+        json.dump(self.seed, open(self.cfg + "/credentials.json", "w"))
+        self.seed_bytes = open(self.cfg + "/credentials.json", "rb").read()
         key = "local-fake-key-0123456789abcdef"
         json.dump({"hasCompletedOnboarding": True, "hasInitOnboardingBeenShown": True, "numStartups": 100, "autoUpdates": False, "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []}, "projects": {self.cwd: {"hasTrustDialogAccepted": True}}}, open(ccc + "/.claude.json", "w"))
         hooks = json.load(open(REPO + "/cmd/config/cc.json"))["hooks"]
@@ -127,13 +131,14 @@ class Rig:
         tgurl = "http://127.0.0.1:%d" % self.tgs.server_port
         self.bot = subprocess.Popen([tgbin, "--config-dir", self.cfg, "bot", "--port", str(self.port), "--tmux-server", self.srv, "--debug"], env=dict(os.environ, TG_CLI_TELEGRAM_URL=tgurl), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.wait(lambda: self.get("/session/idle") is not None, 15)
-        pre = "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; BROWSER=none DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 ANTHROPIC_BASE_URL=http://127.0.0.1:%d CLAUDE_CONFIG_DIR=%s" % (self.api.server_port, ccc)
-        pre += "" if oauth else " ANTHROPIC_API_KEY=" + key
-        self.tmux("send-keys", "-t", self.pane_id, "-l", "%s %s --model sonnet %s--setting-sources user --no-chrome --tools \"Bash,Read\"" % (pre, ccbin, "--permission-mode default " if perm else ""))
-        time.sleep(1)
-        self.tmux("send-keys", "-t", self.pane_id, "Enter")
-        assert self.wait(lambda: "❯" in self.pane(), 30), "cc did not reach its prompt"
-        time.sleep(1.5)
+        if not nocc:
+            pre = "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL; BROWSER=none DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 ANTHROPIC_BASE_URL=http://127.0.0.1:%d CLAUDE_CONFIG_DIR=%s" % (self.api.server_port, ccc)
+            pre += "" if oauth else " ANTHROPIC_API_KEY=" + key
+            self.tmux("send-keys", "-t", self.pane_id, "-l", "%s %s --model sonnet %s--setting-sources user --no-chrome --tools \"Bash,Read\"" % (pre, ccbin, "--permission-mode default " if perm else ""))
+            time.sleep(1)
+            self.tmux("send-keys", "-t", self.pane_id, "Enter")
+            assert self.wait(lambda: "❯" in self.pane(), 30), "cc did not reach its prompt"
+            time.sleep(1.5)
 
     def tmux(self, *a):
         return subprocess.run(["tmux", "-u", "-L", self.srv, "-f", "/dev/null", *a], capture_output=True, text=True).stdout
@@ -227,11 +232,54 @@ def five(r):
     r.check("TC33 5 h window: no key reaches the pane", not re.search(r"^❯\s*1\s*$", r.pane(), re.M) and not r.sent("send", "Rate limit detected"))
 
 
+def routes(r):
+    rig = "Route resolved: name=rig → chat=%d topic=7 (name route)"
+    lines = lambda: [l for l in r.botlog().splitlines() if "Route resolved: name=rig → " in l]
+    def reload():
+        p = subprocess.run([r.tgbin, "--config-dir", r.cfg, "reload", "--port", str(r.port)], capture_output=True, text=True)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    def edit(fn):
+        d = json.load(open(r.cfg + "/routes.json"))
+        fn(d["nameRouteMap"])
+        json.dump(d, open(r.cfg + "/routes.json", "w"))
+    only = lambda keys: {k: r.seed[k] for k in keys}
+    read = lambda name: open(r.cfg + "/" + name, "rb").read() if os.path.exists(r.cfg + "/" + name) else b"null"
+    r.check("migration: the backup equals the old credentials.json byte for byte", read("credentials.json.pre-routes") == r.seed_bytes)
+    r.check("migration: routes.json holds every route, forum topic and the mailbox chat", json.loads(read("routes.json")) == only(("nameRouteMap", "forumTopics", "mailboxChatId")))
+    r.check("migration: credentials.json keeps token, pairing and port and lost the three fields", json.loads(read("credentials.json")) == only(("botToken", "pairingAllow", "port")))
+    log = r.botlog()
+    r.check("start: one migration line, one load line per file", all(log.count(s) == 1 for s in ("Bindings migrated to routes.json: routes=30 forumTopics=3 mailbox=true backup=credentials.json.pre-routes", "Bindings loaded from routes.json: routes=30 forumTopics=3 mailbox=true", "Credentials loaded from credentials.json: pairingIds=1")))
+    if False in r.results:
+        return
+    r.wait(lines, 10)
+    time.sleep(5)
+    r.check("the seeded session's first lookup writes one Route resolved line and the 1 s ticks write no more", len(lines()) == 1 and rig % -1001234567890 in lines()[0], "%d lines" % len(lines()))
+    edit(lambda m: m["rig"].update(chatId=-1009999999999))
+    time.sleep(3)
+    r.check("a hand edit of routes.json changes nothing until the reload", len(lines()) == 1)
+    code, out = reload()
+    r.check("tg-cli reload prints the counts", code == 0 and out == "Reloaded: routes=30 forumTopics=3 mailbox=true pairingIds=1", out)
+    r.check("after the reload the next lookup goes to the new chat, once", r.wait(lambda: len(lines()) == 2, 5) and rig % -1009999999999 in lines()[1])
+    time.sleep(3)
+    r.check("and no more lines follow", len(lines()) == 2)
+    removed = {}
+    edit(lambda m: removed.update(m.pop("rig")))
+    code, out = reload()
+    r.check("tg-cli reload after the removal prints the counts without the route", code == 0 and out == "Reloaded: routes=29 forumTopics=3 mailbox=true pairingIds=1", out)
+    time.sleep(3)
+    r.check("a route removed by hand falls back to the default chat and writes no line", len(lines()) == 2)
+    edit(lambda m: m.update(rig=removed))
+    code, out = reload()
+    r.check("tg-cli reload after the put-back prints the counts with the route", code == 0 and out == "Reloaded: routes=30 forumTopics=3 mailbox=true pairingIds=1", out)
+    r.check("the removed route put back writes its line again: the removal reset the session's route line", r.wait(lambda: len(lines()) == 3, 5) and rig % -1009999999999 in lines()[2])
+
+
 SCENARIOS = {
     "clear": (clear, {"delay": 6}),
     "perm": (perm, {"perm": True}),
     "week": (week, {"oauth": True, "limit": dict(LIMIT, **{"anthropic-ratelimit-unified-representative-claim": "seven_day", "anthropic-ratelimit-unified-reset": "RESET"}), "reset": 5 * 86400}),
     "five": (five, {"oauth": True, "limit": dict(LIMIT, **{"anthropic-ratelimit-unified-representative-claim": "five_hour", "anthropic-ratelimit-unified-reset": "RESET"}), "reset": 3600}),
+    "routes": (routes, {"nocc": True, "seed": LEGACY}),
 }
 
 if __name__ == "__main__":

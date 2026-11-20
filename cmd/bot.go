@@ -40,8 +40,8 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if creds, err := config.LoadCredentials(); err == nil {
-				typingTick(bs, &creds)
+			if routes, err := config.LoadRoutes(); err == nil {
+				typingTick(bs, &routes)
 			}
 		}
 	}
@@ -50,7 +50,7 @@ func startTypingLoop(ctx context.Context, bs *BotState) {
 // typingTick is one 3s tick: it reads the stored busy state of every session (written by the 1s busy loop,
 // no tmux call). A working, waiting or compacting session gets Telegram's typing action again (it lasts 5s at
 // most per the Bot API); an idle session with queued items starts flushInjectQueue.
-func typingTick(bs *BotState, creds *config.Credentials) {
+func typingTick(bs *BotState, routes *config.Routes) {
 	for _, info := range bs.SessionState.All() {
 		if state, _ := bs.HookRunning.GetBusyState(info.TmuxTarget); state == stores.BusyIdle {
 			typingLog("tick: target=%s paneRunning=false sent=false", info.TmuxTarget)
@@ -64,7 +64,7 @@ func typingTick(bs *BotState, creds *config.Credentials) {
 			continue
 		}
 		typingLog("tick: target=%s paneRunning=true sending=true", info.TmuxTarget)
-		go sendTypingForTarget(bs.Bot, info, creds, nil)
+		go sendTypingForTarget(bs.Bot, info, routes, nil)
 	}
 }
 
@@ -133,11 +133,17 @@ func runBot(cmd *cobra.Command, args []string) {
 	logPath := filepath.Join(config.GetConfigDir(), "bot.log")
 	logger.Init(logPath, debugFlag)
 	initTypingLog(config.GetConfigDir())
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load credentials: %v\n", err)
+	if err := config.MigrateRoutes(); err != nil {
+		logger.Error("Bindings migration failed, credentials.json is untouched: " + err.Error())
+		fmt.Fprintf(os.Stderr, "Bindings migration failed, credentials.json is untouched: %v\n", err)
 		os.Exit(1)
 	}
+	if err := config.Hold(); err != nil {
+		logger.Error("Failed to load credentials or routes: " + err.Error())
+		fmt.Fprintf(os.Stderr, "Failed to load credentials or routes: %v\n", err)
+		os.Exit(1)
+	}
+	creds, _ := config.LoadCredentials() // Hold has read credentials.json: memory answers, no error
 	if creds.BotToken == "" {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			fmt.Fprintln(os.Stderr, "Bot token not found. Run interactively or set botToken in ~/.tg-cli/credentials.json")
@@ -198,7 +204,6 @@ func runBot(cmd *cobra.Command, args []string) {
 	// Create BotState with all stores
 	bs := &BotState{
 		Bot:             bot,
-		Creds:           &creds,
 		Port:            port,
 		ConfigDir:       configDir,
 		Pages:           stores.NewPageCacheStore(),
@@ -274,7 +279,9 @@ func runBot(cmd *cobra.Command, args []string) {
 	handlers.Register(bs)
 	// Scan pending directory to rebuild in-memory state after restart
 	hookCB := hooks.Callbacks{
-		ResolveChat:              resolveChat,
+		ResolveChat: func(bs *BotState, t string) (*tele.Chat, string, int) {
+			return helpers.ResolveChat(bs.SessionState, t)
+		},
 		ProcessTranscriptUpdates: processTranscriptUpdates,
 		SendEventNotification:    sendEventNotification,
 		TypingLog:                typingLog,

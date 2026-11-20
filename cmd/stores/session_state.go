@@ -20,6 +20,7 @@ type SessionInfo struct {
 	TranscriptPath string
 	Name           string
 	Backend        string
+	RouteLine      string // the "Route resolved" line last written for this session; not persisted (SessionEntry and save() stay as they are)
 }
 
 // SessionEntry is the JSON-serializable form of SessionInfo.
@@ -109,6 +110,20 @@ func (s *SessionStateStore) SetBackend(sessionID, backend string) {
 		s.sessions[sessionID] = info
 	}
 	s.mu.Unlock()
+}
+
+// NoteRouteLine stores the "Route resolved" line written for the session and reports whether line is new, that is,
+// differs from the stored one. An empty line forgets the stored one (the session has no route now).
+func (s *SessionStateStore) NoteRouteLine(sessionID, line string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.sessions[sessionID]
+	if !ok || info.RouteLine == line {
+		return false
+	}
+	info.RouteLine = line
+	s.sessions[sessionID] = info
+	return line != ""
 }
 
 // Remove deletes a session entry, preserving the name for the next Add on the same pane.

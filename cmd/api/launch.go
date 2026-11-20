@@ -15,14 +15,14 @@ import (
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/markdown"
+	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
 
 func registerLaunch(mux *http.ServeMux, bs *types.BotState) {
 	bot := bs.Bot
-	creds := bs.Creds
 	mux.HandleFunc("/bot_new", func(w http.ResponseWriter, r *http.Request) {
-		chatID, err := strconv.ParseInt(creds.PairingAllow.DefaultChatID, 10, 64)
+		chatID, err := strconv.ParseInt(pairing.GetDefaultChatID(), 10, 64)
 		if err != nil {
 			http.Error(w, "no default chat configured", 400)
 			return

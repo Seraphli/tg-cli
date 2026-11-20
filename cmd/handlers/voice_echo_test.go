@@ -118,13 +118,8 @@ func TestProcessUserInput_GroupQuickReply_ReactionRecordedNoVoiceEcho(t *testing
 	}
 
 	const chatID int64 = 7002
-	creds, err := config.LoadCredentials()
-	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
-	}
-	creds.NameRouteMap = map[string]config.NameRoute{routeName: {ChatID: chatID}}
-	if err := config.SaveCredentials(creds); err != nil {
-		t.Fatalf("SaveCredentials: %v", err)
+	if err := config.SaveRoutes(config.Routes{NameRouteMap: map[string]config.NameRoute{routeName: {ChatID: chatID}}}); err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
 	}
 
 	const text = "hello group"

@@ -249,12 +249,14 @@ func TestDecideBusyAction_StateChange(t *testing.T) {
 // reads idle.
 func TestBusyTick_StatusMessageOnlyForSingleSessionGroupRoute(t *testing.T) {
 	t.Cleanup(setTestConfigDir(t, t.TempDir()))
-	creds := config.Credentials{NameRouteMap: map[string]config.NameRoute{}}
+	routes := config.Routes{NameRouteMap: map[string]config.NameRoute{}}
 	for name, chat := range map[string]int64{"grp": -1002, "shared-a": -1003, "shared-b": -1003, "mixed-a": -1004, "mixed-b": -1004} {
-		creds.NameRouteMap[name] = config.NameRoute{ChatID: chat}
+		routes.NameRouteMap[name] = config.NameRoute{ChatID: chat}
 	}
-	creds.PairingAllow.DefaultChatID = "5001"
-	if err := config.SaveCredentials(creds); err != nil {
+	if err := config.SaveRoutes(routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveCredentials(config.Credentials{PairingAllow: config.PairingAllow{DefaultChatID: "5001"}}); err != nil {
 		t.Fatal(err)
 	}
 	const idleTarget = "%6@/tmp/tg-cli-test-none"
@@ -314,9 +316,10 @@ func TestBusyTick_StatusMessageOnlyForSingleSessionGroupRoute(t *testing.T) {
 // stored state is idle by then) sends nothing more.
 func TestBusyTick_CodexErrorTurnNotifies(t *testing.T) {
 	t.Cleanup(setTestConfigDir(t, t.TempDir()))
-	creds := config.Credentials{NameRouteMap: map[string]config.NameRoute{"cx-err": {ChatID: -1005}, "cx-gone": {ChatID: -1006}}}
-	creds.PairingAllow.DefaultChatID = "5001"
-	if err := config.SaveCredentials(creds); err != nil {
+	if err := config.SaveRoutes(config.Routes{NameRouteMap: map[string]config.NameRoute{"cx-err": {ChatID: -1005}, "cx-gone": {ChatID: -1006}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveCredentials(config.Credentials{PairingAllow: config.PairingAllow{DefaultChatID: "5001"}}); err != nil {
 		t.Fatal(err)
 	}
 	orig := liveBusyState

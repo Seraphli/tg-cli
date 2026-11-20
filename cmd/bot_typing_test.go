@@ -21,7 +21,7 @@ func TestTypingTick_FollowsStoredState(t *testing.T) {
 		HookRunning:  stores.NewHookRunningStateStore(),
 		InjectQueue:  stores.NewInjectQueueStore(t.TempDir()),
 	}
-	creds := &config.Credentials{NameRouteMap: map[string]config.NameRoute{}}
+	routes := &config.Routes{NameRouteMap: map[string]config.NameRoute{}}
 	for i, c := range []struct {
 		name  string
 		chat  int64
@@ -30,10 +30,10 @@ func TestTypingTick_FollowsStoredState(t *testing.T) {
 		target := fmt.Sprintf("%%%d@/tmp/tg-cli-test-none", i+1)
 		bs.SessionState.Add("sess-"+c.name, target, "/work", "")
 		bs.SessionState.SetName("sess-"+c.name, c.name)
-		creds.NameRouteMap[c.name] = config.NameRoute{ChatID: c.chat}
+		routes.NameRouteMap[c.name] = config.NameRoute{ChatID: c.chat}
 		bs.HookRunning.SetBusyState(target, c.state, "")
 	}
-	typingTick(bs, creds)
+	typingTick(bs, routes)
 	for deadline := time.Now().Add(2 * time.Second); s.Count("sendChatAction") < 2 && time.Now().Before(deadline); {
 		time.Sleep(10 * time.Millisecond)
 	}

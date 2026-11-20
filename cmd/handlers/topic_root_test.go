@@ -45,10 +45,12 @@ func newTopicRootEnv(t *testing.T) *topicRootEnv {
 	creds := config.Credentials{
 		PairingAllow: config.PairingAllow{IDs: []string{fmt.Sprint(forumChat.ID), fmt.Sprint(plainChat.ID)}},
 		Port:         12500,
-		NameRouteMap: map[string]config.NameRoute{"troot": {ChatID: forumChat.ID, TopicID: 12}},
 	}
 	if err := config.SaveCredentials(creds); err != nil {
 		t.Fatalf("SaveCredentials: %v", err)
+	}
+	if err := config.SaveRoutes(config.Routes{NameRouteMap: map[string]config.NameRoute{"troot": {ChatID: forumChat.ID, TopicID: 12}}}); err != nil {
+		t.Fatalf("SaveRoutes: %v", err)
 	}
 	logPath := filepath.Join(t.TempDir(), "bot.log")
 	logger.Init(logPath, true) // debug=true so INFO lands in the file

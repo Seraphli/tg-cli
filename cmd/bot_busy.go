@@ -176,7 +176,7 @@ func startBusyIndicatorLoop(ctx context.Context, bs *BotState) {
 // Message FIFO so a slow disk never delays the 1s tick. A rollout that cannot be read sends nothing and writes
 // one warn line.
 func notifyCodexTurnError(bs *BotState, sid string, info stores.SessionInfo) {
-	chat, chatID, topicID := resolveChat(bs, info.TmuxTarget)
+	chat, chatID, topicID := helpers.ResolveChat(bs.SessionState, info.TmuxTarget)
 	if chat == nil {
 		return
 	}
@@ -215,7 +215,7 @@ func runBusyTick(bs *BotState) {
 			notifyCodexTurnError(bs, sid, info)
 		}
 
-		chat, _, topic := resolveChat(bs, target)
+		chat, _, topic := helpers.ResolveChat(bs.SessionState, target)
 		// The private chat (the paired user's own chat) gets no busy status message: a stored one is deleted at the
 		// first idle tick like any route with nothing running.
 		if chat == nil || strconv.FormatInt(chat.ID, 10) == privateChat {

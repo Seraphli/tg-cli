@@ -19,7 +19,6 @@ func allowChat(t *testing.T, chatID int64) {
 	creds := config.Credentials{
 		PairingAllow: config.PairingAllow{IDs: []string{strconv.FormatInt(chatID, 10)}},
 		Port:         12500,
-		NameRouteMap: map[string]config.NameRoute{},
 	}
 	if err := config.SaveCredentials(creds); err != nil {
 		t.Fatalf("SaveCredentials: %v", err)

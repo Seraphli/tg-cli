@@ -37,6 +37,7 @@ fi
 curl -s "http://127.0.0.1:$TEST_PORT/session/name?session_id=$SESSION_ID&name=$AGENT_NAME" > /dev/null 2>&1 || true
 echo "  Named session $SESSION_ID as $AGENT_NAME"
 
+LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
 # Call POST /route/bind
 echo "  Binding route: name=$AGENT_NAME → chat=$DEFAULT_CHAT_ID"
 BIND_PAYLOAD=$(jq -n --arg n "$AGENT_NAME" --argjson c "$DEFAULT_CHAT_ID" '{name: $n, chat_id: $c, topic_id: 0}')
@@ -62,7 +63,6 @@ else
 fi
 
 # Inject new prompt to trigger route resolution
-LOG_BEFORE_ROUTE=$(wc -l < "$LOG_FILE")
 pane_log "[group_routing] BEFORE 'say test routing' prompt"
 inject_prompt "Reply with exactly: route_test_ok"
 pane_log "[group_routing] AFTER routing prompt"
@@ -91,12 +91,13 @@ else
   pass "CC idle after routing prompt (turn complete via idle fallback)"
 fi
 
-# Verify "Route resolved" log line exists
-if tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep "Route resolved: name=" > /dev/null 2>&1; then
-  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -m1 "Route resolved: name=" || true)
-  pass "Route resolved log found: $ROUTE_LOG"
+# The first lookup after the bind writes the "Route resolved" line; the hooks of the turn and the 1 s busy ticks write no more
+ROUTE_LINES=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -c "Route resolved: name=$AGENT_NAME → " || true)
+if [ "$ROUTE_LINES" = "1" ]; then
+  ROUTE_LOG=$(tail -n +"$((LOG_BEFORE_ROUTE + 1))" "$LOG_FILE" | grep -m1 "Route resolved: name=$AGENT_NAME → " || true)
+  pass "Route resolved written once for the bound route: $ROUTE_LOG"
 else
-  fail "Route resolved log not found"
+  fail "Route resolved lines since the bind: $ROUTE_LINES (expected exactly 1)"
 fi
 
 # Call POST /route/unbind

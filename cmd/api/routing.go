@@ -48,17 +48,12 @@ func registerRouting(mux *http.ServeMux, bs *types.BotState) {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-		} else {
-			creds, err := config.LoadCredentials()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			creds.NameRouteMap[req.Name] = route
-			if err := config.SaveCredentials(creds); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+		} else if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			routes.NameRouteMap[req.Name] = route
+			return true
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 		logger.Info(fmt.Sprintf("Route bound via API: name=%s → chat=%d topic=%d title=%q", req.Name, route.ChatID, route.TopicID, route.Title))
 		w.Header().Set("Content-Type", "application/json")
@@ -76,13 +71,10 @@ func registerRouting(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		creds, err := config.LoadCredentials()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		delete(creds.NameRouteMap, req.Name)
-		if err := config.SaveCredentials(creds); err != nil {
+		if err := config.UpdateRoutes(func(routes *config.Routes) bool {
+			delete(routes.NameRouteMap, req.Name)
+			return true
+		}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -91,14 +83,29 @@ func registerRouting(mux *http.ServeMux, bs *types.BotState) {
 		w.Write([]byte(`{"ok":true}`))
 	})
 	mux.HandleFunc("/route/list", func(w http.ResponseWriter, r *http.Request) {
-		creds, err := config.LoadCredentials()
+		routes, err := config.LoadRoutes()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"name_routes": creds.NameRouteMap,
+			"name_routes": routes.NameRouteMap,
 		})
+	})
+	// POST /reload: the bot re-reads routes.json and credentials.json (after a hand edit). Both files must parse,
+	// otherwise nothing changes and the error text is the answer. Token and port are read at startup only.
+	mux.HandleFunc("/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		counts, err := config.Reload()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "counts": counts})
 	})
 }

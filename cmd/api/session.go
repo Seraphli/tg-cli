@@ -19,6 +19,7 @@ import (
 	"github.com/Seraphli/tg-cli/internal/injector"
 	"github.com/Seraphli/tg-cli/internal/logger"
 	"github.com/Seraphli/tg-cli/internal/notify"
+	"github.com/Seraphli/tg-cli/internal/pairing"
 	tele "gopkg.in/telebot.v3"
 )
 
@@ -507,7 +508,7 @@ func registerSession(mux *http.ServeMux, bs *types.BotState) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		chatID, err := strconv.ParseInt(bs.Creds.PairingAllow.DefaultChatID, 10, 64)
+		chatID, err := strconv.ParseInt(pairing.GetDefaultChatID(), 10, 64)
 		if err != nil {
 			http.Error(w, "no default chat configured", http.StatusBadRequest)
 			return

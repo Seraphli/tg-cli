@@ -4,14 +4,12 @@ import (
 	"sync"
 
 	"github.com/Seraphli/tg-cli/cmd/stores"
-	"github.com/Seraphli/tg-cli/internal/config"
 	tele "gopkg.in/telebot.v3"
 )
 
 // BotState holds all store instances and shared state for the bot.
 type BotState struct {
-	Bot   *tele.Bot
-	Creds *config.Credentials
+	Bot *tele.Bot
 
 	Port      int    // resolved bot HTTP port; used to render @ channel reply/end CLI instructions
 	ConfigDir string // resolved config dir; used to render @ channel reply/end CLI instructions
