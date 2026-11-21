@@ -28,39 +28,36 @@ func processTranscriptUpdates(bs *BotState, sessionID, transcriptPath string, is
 	lock := bs.SessionCounts.GetLock(sessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	// Initialize count for unknown sessions (e.g. after bot restart) to avoid sending historical content
-	if _, known := bs.SessionCounts.Counts[sessionID]; !known {
-		texts := helpers.ReadAssistantTexts(transcriptPath)
-		count := len(texts)
-		// For AskUserQuestion, backtrack by 1 so the preceding assistant message is included
-		if len(isQuestion) > 0 && isQuestion[0] && count > 0 {
-			count--
-		}
-		bs.SessionCounts.Counts[sessionID] = count
-		logger.Debug(fmt.Sprintf("Initialized session count: session=%s count=%d", sessionID, count))
-	}
-	notified := bs.SessionCounts.Counts[sessionID]
-	// Read immediately first, then retry with shorter delays
-	texts := helpers.ReadAssistantTexts(transcriptPath)
-	if len(texts) <= notified {
-		for retry := 0; retry < 5; retry++ {
-			time.Sleep(500 * time.Millisecond)
-			texts = helpers.ReadAssistantTexts(transcriptPath)
-			if len(texts) > notified {
-				break
+	var texts []string
+	offset, known := bs.SessionCounts.Offsets[sessionID]
+	// Start unknown sessions (e.g. after bot restart) without sending history
+	if !known {
+		if len(isQuestion) > 0 && isQuestion[0] {
+			// For AskUserQuestion, keep the last assistant message so it goes out with the question
+			all, end := helpers.ReadAssistantTextsFrom(transcriptPath, 0)
+			offset = end
+			if len(all) > 0 {
+				texts = all[len(all)-1:]
 			}
+		} else {
+			offset = helpers.TranscriptSize(transcriptPath)
 		}
+		logger.Debug(fmt.Sprintf("Initialized session offset: session=%s offset=%d", sessionID, offset))
 	}
-	if len(texts) <= notified {
-		return ""
+	// Read immediately first, then retry with shorter delays; every read starts at the stored offset
+	more, end := helpers.ReadAssistantTextsFrom(transcriptPath, offset)
+	texts = append(texts, more...)
+	for retry := 0; len(texts) == 0 && retry < 5; retry++ {
+		time.Sleep(500 * time.Millisecond)
+		texts, end = helpers.ReadAssistantTextsFrom(transcriptPath, offset)
 	}
+	bs.SessionCounts.Offsets[sessionID] = end
 	var newTexts []string
-	for i := notified; i < len(texts); i++ {
-		if strings.TrimSpace(texts[i]) != "" {
-			newTexts = append(newTexts, strings.TrimSpace(texts[i]))
+	for _, text := range texts {
+		if strings.TrimSpace(text) != "" {
+			newTexts = append(newTexts, strings.TrimSpace(text))
 		}
 	}
-	bs.SessionCounts.Counts[sessionID] = len(texts)
 	return strings.Join(newTexts, "\n\n")
 }
 

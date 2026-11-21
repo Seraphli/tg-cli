@@ -1,8 +1,10 @@
 package helpers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -837,8 +839,41 @@ func ReadAssistantTexts(transcriptPath string) []string {
 	if err != nil {
 		return nil
 	}
+	return assistantTexts(string(content))
+}
+
+// ReadAssistantTextsFrom reads the assistant text entries of the transcript lines that start at byte offset from and end
+// with a newline. It returns them with the offset after the last such line; a line still being written stays unread.
+func ReadAssistantTextsFrom(transcriptPath string, from int64) ([]string, int64) {
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return nil, from
+	}
+	defer f.Close()
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return nil, from
+	}
+	data, err := io.ReadAll(f)
+	end := bytes.LastIndexByte(data, '\n') + 1
+	if err != nil || end == 0 {
+		return nil, from
+	}
+	return assistantTexts(string(data[:end])), from + int64(end)
+}
+
+// TranscriptSize returns the size of the transcript file in bytes, 0 when it cannot be read.
+func TranscriptSize(transcriptPath string) int64 {
+	fi, err := os.Stat(transcriptPath)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+// assistantTexts extracts the assistant text entries from transcript JSONL content.
+func assistantTexts(content string) []string {
 	var texts []string
-	for _, line := range strings.Split(string(content), "\n") {
+	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

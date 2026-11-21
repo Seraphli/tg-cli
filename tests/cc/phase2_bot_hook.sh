@@ -74,12 +74,6 @@ else
   fail "Hook HTTP POST not found in bot log"
 fi
 
-if tail -n +"$((LOG_BEFORE_HELLO + 1))" "$LOG_FILE" | grep "UserPromptSubmit position" > /dev/null 2>&1; then
-  pass "UserPromptSubmit position recorded"
-else
-  fail "UserPromptSubmit position not found in bot log"
-fi
-
 # Lenient context window check: if statusline fired during this session,
 # verify the notification text includes a correctly formatted Context line.
 # Short E2E sessions may not trigger statusline — absence is acceptable.

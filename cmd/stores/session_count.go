@@ -2,18 +2,19 @@ package stores
 
 import "sync"
 
-// SessionCountStore manages per-session counts and per-session mutexes.
+// SessionCountStore manages per-session transcript offsets (every transcript line before the offset was sent or
+// skipped) and per-session mutexes.
 type SessionCountStore struct {
-	mu     sync.Mutex
-	Counts map[string]int
-	Locks  map[string]*sync.Mutex
+	mu      sync.Mutex
+	Offsets map[string]int64
+	Locks   map[string]*sync.Mutex
 }
 
 // NewSessionCountStore creates an empty SessionCountStore.
 func NewSessionCountStore() *SessionCountStore {
 	return &SessionCountStore{
-		Counts: make(map[string]int),
-		Locks:  make(map[string]*sync.Mutex),
+		Offsets: make(map[string]int64),
+		Locks:   make(map[string]*sync.Mutex),
 	}
 }
 
@@ -27,10 +28,10 @@ func (s *SessionCountStore) GetLock(sessionID string) *sync.Mutex {
 	return s.Locks[sessionID]
 }
 
-// Cleanup removes the count and lock for the given session ID.
+// Cleanup removes the offset and lock for the given session ID.
 func (s *SessionCountStore) Cleanup(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.Counts, sessionID)
+	delete(s.Offsets, sessionID)
 	delete(s.Locks, sessionID)
 }

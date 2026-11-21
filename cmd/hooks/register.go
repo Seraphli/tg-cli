@@ -286,13 +286,12 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					// A submit makes the session busy at once; the busy loop classifies it from the next tick.
 					bs.HookRunning.SetBusyState(p.TmuxTarget, stores.BusyWorking, "")
 				}
-				if p.SessionID != "" && p.TranscriptPath != "" {
+				// Only codex Updates read the transcript: everything written so far counts as handled
+				if p.Backend == "codex" && p.SessionID != "" && p.TranscriptPath != "" {
 					lock := bs.SessionCounts.GetLock(p.SessionID)
 					lock.Lock()
-					texts := helpers.ReadAssistantTexts(p.TranscriptPath)
-					bs.SessionCounts.Counts[p.SessionID] = len(texts)
+					bs.SessionCounts.Offsets[p.SessionID] = helpers.TranscriptSize(p.TranscriptPath)
 					lock.Unlock()
-					logger.Debug(fmt.Sprintf("UserPromptSubmit position: session=%s count=%d", p.SessionID, len(texts)))
 				}
 				if p.TmuxTarget != "" {
 					cb.TypingLog("state: event=UserPromptSubmit target=%s", p.TmuxTarget)
@@ -313,12 +312,11 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				}
 				if chat != nil {
 					body := p.LastAssistantMessage
-					// Update session count for consistency with PreToolUse
-					if p.SessionID != "" && p.TranscriptPath != "" {
+					// Only codex Updates read the transcript: the final reply goes out below, so it counts as handled
+					if p.Backend == "codex" && p.SessionID != "" && p.TranscriptPath != "" {
 						lock := bs.SessionCounts.GetLock(p.SessionID)
 						lock.Lock()
-						texts := helpers.ReadAssistantTexts(p.TranscriptPath)
-						bs.SessionCounts.Counts[p.SessionID] = len(texts)
+						bs.SessionCounts.Offsets[p.SessionID] = helpers.TranscriptSize(p.TranscriptPath)
 						lock.Unlock()
 					}
 					// Codex uses transcript-based body; CC uses streaming flush

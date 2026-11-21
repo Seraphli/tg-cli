@@ -22,10 +22,16 @@ import (
 const lateMDStopText = "Checked the deployment notes.\n\n**Site**\n- Reachable at https://example.test/app\n- Staging copy at https://example.test/staging\n\n" +
 	"Three changes:\n1. The retry limit is now 5.\n2. The timeout is 30 seconds.\n3. The log level is info.\n\nNext step: run the smoke test."
 
-// lateMDRun drives a real hooks.Register mux (real stream flush and notification code, fake Telegram) through an
-// earlier bubble ("none", "sealed" or "live"), the Stop of lateMDStopText and then the late deltas; it returns the
-// payloads of the rich messages the late deltas caused.
-func lateMDRun(t *testing.T, earlier string, lateID string, late func(post func(idx int, final bool, delta string))) []string {
+// hookRig is a real hooks.Register mux (real stream flush and notification code) with a fake Telegram and one bound session.
+type hookRig struct {
+	bs   *types.BotState
+	tg   *tgfake.Server
+	post func(event string, p map[string]interface{})
+}
+
+const rigSession = "sess-late"
+
+func newHookRig(t *testing.T, backend string) *hookRig {
 	t.Helper()
 	t.Cleanup(setTestConfigDir(t, t.TempDir()))
 	var next atomic.Int64
@@ -54,10 +60,10 @@ func lateMDRun(t *testing.T, earlier string, lateID string, late func(post func(
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	const sid, target = "sess-late", "%900"
-	bs.SessionState.Add(sid, target, "/work", "")
+	const target = "%900"
+	bs.SessionState.Add(rigSession, target, "/work", "")
 	post := func(event string, p map[string]interface{}) {
-		p["session_id"], p["tmux_target"], p["backend"] = sid, target, "cc"
+		p["session_id"], p["tmux_target"], p["backend"] = rigSession, target, backend
 		body, _ := json.Marshal(p)
 		resp, err := http.Post(srv.URL+"/hook/"+event, "application/json", bytes.NewReader(body))
 		if err != nil || resp.StatusCode != http.StatusOK {
@@ -65,6 +71,17 @@ func lateMDRun(t *testing.T, earlier string, lateID string, late func(post func(
 		}
 		resp.Body.Close()
 	}
+	return &hookRig{bs, tg, post}
+}
+
+// lateMDRun drives a real hooks.Register mux (real stream flush and notification code, fake Telegram) through an
+// earlier bubble ("none", "sealed" or "live"), the Stop of lateMDStopText and then the late deltas; it returns the
+// payloads of the rich messages the late deltas caused.
+func lateMDRun(t *testing.T, earlier string, lateID string, late func(post func(idx int, final bool, delta string))) []string {
+	t.Helper()
+	rig := newHookRig(t, "cc")
+	bs, tg, post := rig.bs, rig.tg, rig.post
+	const sid = rigSession
 	md := func(id string, idx int, final bool, delta string) {
 		post("MessageDisplay", map[string]interface{}{"message_id": id, "turn_id": "T1", "index": idx, "final": final, "delta": delta})
 	}
