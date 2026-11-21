@@ -268,7 +268,7 @@ func TestSendBelow_LifecycleRevalidation_RotatedEntry_NoStaleCommit(t *testing.T
 	// A snapshotted job that WOULD send below (planned 1 > positioned 0).
 	jobs := []flushJob{{e: e, mid: "m1", chunks: []string{"hello"}, positionedAtSnapshot: 0, willSendBelow: true}}
 	// The session resets (Rotate removes the entry) between the p1 release and the p3 commit.
-	bs.Streams.Rotate(sid)
+	bs.Streams.Rotate(sid, "next-prompt")
 	commitPositioned(ss, jobs)
 	if bs.Streams.TakeSendBelowSinceTool(sid) {
 		t.Fatal("(g) a rotated-away entry must NOT set SendBelowSinceTool (stale signal)")

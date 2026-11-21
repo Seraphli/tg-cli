@@ -300,7 +300,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				// S3b lifecycle-as-op: route Rotate through the Message FIFO (SYNC Dispatch, no lock held) so the
 				// stream-clear is totally ordered with every render op — no render-after-clear race (INV6).
 				bs.MessageQueue.Dispatch(p.SessionID, "msg:lifecycle-rotate", func() error {
-					bs.Streams.Rotate(p.SessionID) // clear previous turn's entries for new user turn (keeps ClosedTurns tombstone)
+					bs.Streams.Rotate(p.SessionID, p.PromptID) // clear previous turn's entries for new user turn (keeps ClosedTurns tombstone and the entries of this prompt)
 					return nil
 				})
 			case "Stop":

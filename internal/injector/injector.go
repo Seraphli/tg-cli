@@ -274,13 +274,26 @@ func FormatTarget(t TmuxTarget) string {
 	return t.PaneID
 }
 
+// NewSessionCmd builds the `tmux new-session` command that starts the tmux server when none runs. Inside a systemd unit
+// (INVOCATION_ID is set) the command runs through `systemd-run --user --scope`: the server and the pane scopes
+// tmux creates for it (PartOf= the server's unit) then live in their own scope instead of the unit's cgroup, so
+// stopping the unit (a bot upgrade) does not kill the panes. Outside a unit it is plain tmux.
+func NewSessionCmd(args ...string) *exec.Cmd {
+	cmd := globalTmuxCmd(append([]string{"new-session"}, args...)...)
+	systemdRun, err := exec.LookPath("systemd-run")
+	if os.Getenv("INVOCATION_ID") == "" || err != nil {
+		return cmd
+	}
+	return exec.Command(systemdRun, append([]string{"--user", "--scope", "--quiet"}, cmd.Args...)...)
+}
+
 // CreateSession creates a new tmux session with optional working directory.
 func CreateSession(name, workDir string) error {
-	args := []string{"new-session", "-d", "-s", name, "-x", "220", "-y", "50"}
+	args := []string{"-d", "-s", name, "-x", "220", "-y", "50"}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	return globalTmuxCmd(args...).Run()
+	return NewSessionCmd(args...).Run()
 }
 
 // CreateWindow creates a new window in an existing tmux session.

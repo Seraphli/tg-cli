@@ -675,7 +675,7 @@ func FetchUsageTmux() (string, error) {
 	}
 	sessionName := fmt.Sprintf("tg-cli-usage-%d", time.Now().UnixMilli())
 	configDir := config.GetConfigDir()
-	cmd := injector.GlobalTmuxCmd("new-session", "-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
+	cmd := injector.NewSessionCmd("-d", "-s", sessionName, "-c", configDir, "-x", "120", "-y", "40")
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create temp session: %w", err)
 	}

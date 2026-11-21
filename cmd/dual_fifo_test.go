@@ -266,7 +266,7 @@ func TestLifecycleFence(t *testing.T) {
 		mu.Lock()
 		events = append(events, "rotate")
 		mu.Unlock()
-		bs.Streams.Rotate(sid)
+		bs.Streams.Rotate(sid, "next-prompt")
 		close(rotated)
 		return nil
 	})

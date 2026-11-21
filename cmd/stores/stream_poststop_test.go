@@ -264,7 +264,7 @@ func TestSeam_PostStopTombstone_SurvivesRotate(t *testing.T) {
 	stopSession(s, sid, "BODY") // tombstones T0
 	// a late MD of a NEW turn T1 in the stopped handler records T1's tombstone (P6).
 	s.AppendExisting(sid, "mn", "T1", 0, "new content", false)
-	s.Rotate(sid) // new user turn — keeps ClosedTurns
+	s.Rotate(sid, "next-prompt") // new user turn — keeps ClosedTurns
 	// a straggler of the tombstoned turn T1 after Rotate (session no longer Stopped) must be dropped.
 	if h, d, post := s.AppendExisting(sid, "mn2", "T1", 0, "late straggler", true); !h || !d || post != PostStopNone {
 		t.Fatalf("post-Rotate straggler of tombstoned turn T1: want handled+dropped+None, got %v %v %v", h, d, post)

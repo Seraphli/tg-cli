@@ -5,8 +5,6 @@ import (
 	"io"
 	"os"
 	"time"
-
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
@@ -14,15 +12,10 @@ var (
 	writer    io.Writer
 )
 
-// Init initializes the logger with a lumberjack rotating file writer.
+// Init initializes the logger with a rotating file writer that always appends (see appendWriter).
 func Init(logPath string, debug bool) {
 	debugMode = debug
-	writer = &lumberjack.Logger{
-		Filename:   logPath,
-		MaxSize:    10, // MB
-		MaxBackups: 5,
-		Compress:   false,
-	}
+	writer = newAppendWriter(logPath, 10<<20, 5)
 }
 
 func SetDebugMode(enabled bool) {

@@ -447,17 +447,31 @@ func stopCopy(delta, stopBody string) bool {
 
 // Rotate clears the current turn's entries for a NEW user turn but KEEPS the ClosedTurns tombstone,
 // so a late delta from the previous (closed) turn is still dropped. Used by UserPromptSubmit.
+// Entries whose PromptID equals promptID survive (in Msgs and in Order): a UserPromptSubmit that arrives after
+// events of its own prompt (a late turn-start one after a bot restart, or a second one inside the turn) must not
+// wipe that prompt's rendered text, or the next PreToolUse waits for a text that is gone.
 // DataMu-ONLY (S3a): Rotate runs INSIDE a Message-FIFO op (INV6 lifecycle-as-op) so it is already
 // totally ordered with every render op — it must NOT take FlushMu (no Message-FIFO op holds FlushMu).
-func (s *StreamStore) Rotate(sessionID string) {
+func (s *StreamStore) Rotate(sessionID, promptID string) {
 	ss := s.lookup(sessionID)
 	if ss == nil {
 		return
 	}
 	ss.DataMu.Lock()
 	defer ss.DataMu.Unlock()
-	ss.Msgs = make(map[string]*StreamEntry)
-	ss.Order = nil
+	kept := make(map[string]*StreamEntry)
+	for mid, e := range ss.Msgs {
+		if e.PromptID == promptID {
+			kept[mid] = e
+		}
+	}
+	var order []string
+	for _, mid := range ss.Order {
+		if kept[mid] != nil {
+			order = append(order, mid)
+		}
+	}
+	ss.Msgs, ss.Order = kept, order
 	ss.Stopped = false
 	ss.StopRequested = false
 	ss.LastStopBody = ""          // new user turn — drop the previous turn's authoritative Stop body

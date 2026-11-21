@@ -291,7 +291,7 @@ func resolveSessionSelf(port int) string {
 		os.Exit(1)
 	}
 	url := buildAPIURL(sessionHost, port, "/session/list")
-	resp, err := apiRequest("GET", url, nil, sessionToken)
+	resp, err := getWithUpgradeReconnect(context.Background(), url, sessionToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot connect to bot: %v\n", err)
 		os.Exit(1)
