@@ -10,7 +10,8 @@ echo "--- Compact tool notification test ---"
 # The SINGLE production helper used by BOTH TC1/TC6 AND the offline fixtures below (not a copy). Reads a
 # bot.log SLICE on stdin; params come from env: P26_CHAT (test chat id, for TG-edit pairing scope),
 # P26_PANE (this session's %pane@socket, for PreToolUse session/turn scoping), P26_MARKERS (JSON list of
-# [name,label,value] to resolve), P26_ALLINONE (JSON list of tokens that must co-occur in ONE message).
+# [name,label,value] to resolve), P26_ALLINONE (JSON list of tokens that must co-occur in ONE message),
+# P26_READNAMES (JSON list of file names whose tool lines a compact message must carry).
 # It emits one JSON object. What it does:
 #  (a1) CONTENT reconstruction — assistant-only. Parse every single-line "Raw hook payload [MessageDisplay]"
 #       JSON, group deltas by message_id, last-write-wins per index, sort by index, join (the phase27:620-643
@@ -38,6 +39,7 @@ chat = os.environ.get("P26_CHAT", "")
 pane = os.environ.get("P26_PANE", "")
 markers = json.loads(os.environ.get("P26_MARKERS", "[]"))
 allinone = json.loads(os.environ.get("P26_ALLINONE", "[]"))
+readnames = json.loads(os.environ.get("P26_READNAMES", "[]"))
 
 lines = sys.stdin.read().split("\n")
 n = len(lines)
@@ -74,7 +76,7 @@ for ln in lines:
 md_texts = {mid: "".join(md[mid][i] for i in sorted(md[mid])) for mid in md_order}
 
 # ---- Walk records (Stream/compact/Notification bodies bounded by the next full logger prefix) ----
-stream = []; compact = []; tg = []; notif = []; pre = []
+stream = []; compact = []; tg = []; notif = []; pre = []; compact_body = {}
 
 def read_body(start):
     out = []; j = start
@@ -96,10 +98,13 @@ while i < n:
     if m:
         tg.append({"chat": m.group(1), "msg_id": m.group(2), "line": lineno})
         i += 1; continue
-    m = re.match(r'compact tool sent: session=(\S+) msg_id=(\d+) tool=(\S+) chat=(\S+) fmt=rich', rest)
+    m = re.match(r'compact tool (sent|edited): session=(\S+) msg_id=(\d+) tool=(\S+) (?:chat=(\S+)|lines=\d+) fmt=rich', rest)
     if m:
-        compact.append({"msg_id": m.group(2), "line": lineno})
-        i += 1; continue
+        body, j = read_body(i + 1)
+        compact_body[m.group(3)] = body   # the LAST logged body of this message id (the send, then each edit)
+        if m.group(1) == "sent":
+            compact.append({"msg_id": m.group(3), "line": lineno})
+        i = j; continue
     m = re.match(r'Notification sent to chat (\S+): Stop .*? body=(.*)$', rest)
     if m and m.group(1) == chat:
         body, j = read_body(i + 1)
@@ -187,6 +192,7 @@ print(json.dumps({
                 "session_id_count": len(set(p["session_id"] for p in pre_scoped))},
     "compact_sends": [{"msg_id": c["msg_id"], "line": c["line"]} for c in compact],
     "compact_count": len(compact),
+    "compact_final_names": {mid: sum(1 for nm in readnames if nm in b) for mid, b in compact_body.items()},
     "tg_edit_count": tg_count,
     "all_in_one": all_in_one(allinone),
     "markers": {m[0]: resolve(m[1], m[2]) for m in markers},
@@ -393,16 +399,17 @@ fi
 # ── TC1 FLOW assertions (FIX 1b, r9 S1/S2/S4). These run BEFORE TC1d (note3 ordering ruling) so a model
 # that did not call Read fails on the count, not with a misleading rendering-regression message. ────────
 TC1_ALLINONE=$(A="$TC1_TOK1" B="$TC1_TOK2" C="$TC1_TOK3" python3 -c "import json,os; print(json.dumps([os.environ['A'],os.environ['B'],os.environ['C']]))")
-# S4 bounded-poll: the compact send + its 2 aggregation edits go through the async Message FIFO, so poll
+TC1_READNAMES=$(A="$(basename "$TC1_CARD1")" B="$(basename "$TC1_CARD2")" C="$(basename "$TC1_CARD3")" python3 -c "import json,os; print(json.dumps([os.environ['A'],os.environ['B'],os.environ['C']]))")
+# S4 bounded-poll: the compact send + its aggregation edit(s) go through the async Message FIFO, so poll
 # until they appear (or timeout) BEFORE the exact-count asserts.
 for _i in $(seq 1 30); do
-  TC1_JSON=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | P26_CHAT="$DEFAULT_CHAT_ID" P26_PANE="$E2E_PANE" P26_ALLINONE="$TC1_ALLINONE" _p26)
+  TC1_JSON=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | P26_CHAT="$DEFAULT_CHAT_ID" P26_PANE="$E2E_PANE" P26_ALLINONE="$TC1_ALLINONE" P26_READNAMES="$TC1_READNAMES" _p26)
   _cm=$(echo "$TC1_JSON" | jq -r '.compact_sends[0].msg_id // ""')
   if [ "$(echo "$TC1_JSON" | jq -r '.compact_count')" = "1" ] \
-     && [ "$(echo "$TC1_JSON" | jq -r --arg m "$_cm" '.tg_edit_count[$m] // 0')" -ge 2 ]; then break; fi
+     && [ "$(echo "$TC1_JSON" | jq -r --arg m "$_cm" '.tg_edit_count[$m] // 0')" -ge 1 ]; then break; fi
   sleep 1
 done
-TC1_JSON=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | P26_CHAT="$DEFAULT_CHAT_ID" P26_PANE="$E2E_PANE" P26_ALLINONE="$TC1_ALLINONE" _p26)
+TC1_JSON=$(tail -n +"$((LOG_BEFORE + 1))" "$LOG_FILE" | P26_CHAT="$DEFAULT_CHAT_ID" P26_PANE="$E2E_PANE" P26_ALLINONE="$TC1_ALLINONE" P26_READNAMES="$TC1_READNAMES" _p26)
 
 # (S1) exactly 3 Read PreToolUse in ONE turn — count ONLY 'Raw hook payload [PreToolUse]' lines, scoped to
 # this session (tmux_target==E2E_PANE) and confirmed to be a single session + single prompt (turn).
@@ -426,9 +433,10 @@ TC1_CMID=$(echo "$TC1_JSON" | jq -r '.compact_sends[0].msg_id // ""')
 # (reads 2 & 3 edited the message the first read sent) — NOT 'compact tool edited', which register.go:669
 # logs unconditionally after discarding RetryEditRich's return.
 TC1_NEDIT=$(echo "$TC1_JSON" | jq -r --arg m "$TC1_CMID" '.tg_edit_count[$m] // 0')
-[ -n "$TC1_CMID" ] && [ "$TC1_NEDIT" -ge 1 ] \
-  && pass "TC1-agg: compact msg_id=$TC1_CMID received $TC1_NEDIT successful TG edit(s) (reads 2..$TC1_PTU_READ aggregated onto the first read's message)" \
-  || fail "TC1-agg: expected >=1 successful TG edit on compact msg_id=$TC1_CMID, got $TC1_NEDIT"
+TC1_FINAL=$(echo "$TC1_JSON" | jq -r --arg m "$TC1_CMID" '.compact_final_names[$m] // 0')
+[ -n "$TC1_CMID" ] && [ "$TC1_NEDIT" -ge 1 ] && [ "$TC1_FINAL" = "3" ] \
+  && pass "TC1-agg: compact msg_id=$TC1_CMID received $TC1_NEDIT successful TG edit(s) and its last body carries all $TC1_FINAL Read lines (reads 2..$TC1_PTU_READ aggregated onto the first read's message)" \
+  || fail "TC1-agg: expected >=1 successful TG edit and all 3 Read lines in the last body of compact msg_id=$TC1_CMID, got edits=$TC1_NEDIT lines=$TC1_FINAL"
 
 # (S2) RESULT BINDING: all three unique ingredient tokens appear in ONE reconstructed post-read assistant
 # message (Stop last_assistant_message fallback allowed; PostToolUse rejected as a content source).

@@ -38,6 +38,8 @@ func newHookNotifyFIFOState(t *testing.T, release <-chan struct{}) (*BotState, h
 		HookRunning:   stores.NewHookRunningStateStore(),
 		SessionEvents: stores.NewSessionEventStore(),
 		MessageQueue:  stores.NewSessionEventStore(),
+		CompactTools:  stores.NewCompactToolStore(),
+		InjectQueue:   stores.NewInjectQueueStore(t.TempDir()),
 	}
 	var mu sync.Mutex
 	var calls []notifyFIFOCall

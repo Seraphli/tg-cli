@@ -384,13 +384,20 @@ func routeInjectQueue(bs *BotState, tmuxTarget, toolUseID string) {
 	}()
 }
 
-// deliverInjectQueue merges all queued items for a target and delivers them per the chosen mode. Runs OFF
-// the Hook FIFO (a goroutine or the idle-ticker Message-FIFO dispatch). Modes:
+// deliverInjectQueue flushes the queued items for a target and delivers them per the chosen mode: a slash command
+// is injected alone, each run of other items between slash commands is merged into one injection (groupInjectItems),
+// and the groups go in queue order. Runs OFF the Hook FIFO (a goroutine or the idle-ticker Message-FIFO dispatch). Modes:
 //   - InjectModeQueuedCommand : Force inject-while-busy (existing queued-command path)
 //   - InjectModeAskQCustomReply: deliver as AskQ custom reply (Force → SafeInjectText detects AskQ, R1 wait)
 //   - InjectModeIdle          : inject WITHOUT Force (existing idle path; waits for idle)
 func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.InjectMode) {
 	if !bs.InjectQueue.HasItems(tmuxTarget) {
+		return
+	}
+	// A slash command went in earlier in this turn and the later items were held: only an idle-mode flush may
+	// take them out. A Force flush leaves the whole queue as it is (items queued later stay behind the held ones).
+	if mode != stores.InjectModeIdle && bs.InjectQueue.Held(tmuxTarget) {
+		logger.Info(fmt.Sprintf("deliverInjectQueue: held until idle, Force flush leaves the queue (target=%s, mode=%d)", tmuxTarget, mode))
 		return
 	}
 	// R10-item3: idle-mode delivery WAITS for the pane to go idle before flushing. A Stop-routed idle
@@ -410,25 +417,18 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	}
 	notifyMsgID, hasNotify := bs.InjectQueue.GetNotifyMsg(tmuxTarget)
 	injectID := bs.InjectQueue.GetInjectID(tmuxTarget)
+	endsBefore := bs.InjectQueue.TurnEnds(tmuxTarget)
 	items := bs.InjectQueue.Flush(tmuxTarget)
 	if len(items) == 0 {
 		return
 	}
-	var texts []string
-	for _, item := range items {
-		texts = append(texts, item.Text)
-	}
-	merged := strings.Join(texts, "\n")
-	logger.Info(fmt.Sprintf("flushInjectQueue: merging %d items for target=%s merged_len=%d mode=%d", len(items), tmuxTarget, len(merged), mode))
-	chat, _, _ := helpers.ResolveChat(bs.SessionState, tmuxTarget)
+	groups := groupInjectItems(items)
+	logger.Info(fmt.Sprintf("flushInjectQueue: merging %d items in %d groups for target=%s mode=%d", len(items), len(groups), tmuxTarget, mode))
+	chat, _, topicID := helpers.ResolveChat(bs.SessionState, tmuxTarget)
 	if injectID == "" {
 		injectID = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
 	}
 	logger.Info(fmt.Sprintf("flushInjectQueue: [%s] starting flush for target=%s items=%d mode=%d", injectID, tmuxTarget, len(items), mode))
-	// Fix 19: HTML-escape the merged inject text so raw '<'/'>'/'&' in user content renders
-	// correctly in the rich notification. The flush edits below use RetryEditRich (rich messages
-	// support ~32768 chars, so the full merged content is not truncated by the 4096 plain-text cap).
-	msgContent := "──────\n" + markdown.EscapeHTML(strings.Join(texts, "\n")) + "\n──────"
 	// Diagnostic: log a tmux pane snapshot immediately before/after the Enter keypress so the injected
 	// message landing (or stranding behind an AskQ popup) can be read from bot.log. Tail last 30 lines.
 	diag := func(phase, pane string) {
@@ -443,60 +443,134 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	// queued-command/AskQ modes use Force so the inject/answer lands while CC is busy. AskQ-custom-reply
 	// routes through the AskQ handshake in SafeInjectText (R1 bounded wait for the PendingWait snapshot).
 	force := mode != stores.InjectModeIdle
-	// AN3 re-queue guardrail: phase1 may re-queue (CC busy again after the idle wait, or a PermissionRequest
-	// appeared) instead of injecting. requeued tells the success branch below to log/notify accurately rather
-	// than reporting a re-queue as "Injected".
-	var requeued bool
-	p := helpers.SafeInjectTextParams{
-		Bot:              bs.Bot,
-		PendingWait:      bs.PendingWait,
-		InjectQueue:      bs.InjectQueue,
-		InjectConfirm:    bs.InjectConfirm,
-		StopCooldown:     bs.StopCooldown,
-		ReactionTracker:  bs.ReactionTracker,
-		SessionState:     bs.SessionState,
-		HookRunning:      bs.HookRunning,
-		HookSessionLocks: &bs.HookSessionLocks,
-		SessionEvents:    bs.SessionEvents,
-		PendingMsgStore:  bs.PendingMsgStore,
-		ResolveChat: func(t string) (*tele.Chat, string, int) {
-			return helpers.ResolveChat(bs.SessionState, t)
-		},
-		FormatPaneID:   notify.FormatPaneID,
-		Force:          force,
-		InjectDiag:     diag,
-		AwaitAskQReady: mode == stores.InjectModeAskQCustomReply,
-		Requeued:       &requeued,
-	}
-	err := helpers.SafeInjectText(p, tmuxTarget, merged)
-	if err != nil {
-		// Error classification with sentinels
-		if errors.Is(err, injector.ErrSubmitAfterPaste) || errors.Is(err, helpers.ErrInjectNotConfirmed) {
-			// Post-paste error — do NOT re-enqueue (text may be in pane)
-			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] post-paste error (not re-enqueueing): target=%s err=%v", injectID, tmuxTarget, err))
-		} else {
-			// Pre-paste error — safe to re-enqueue
-			logger.Error(fmt.Sprintf("flushInjectQueue: [%s] pre-paste error (re-enqueueing %d items): target=%s err=%v", injectID, len(items), tmuxTarget, err))
-			bs.InjectQueue.ReEnqueue(tmuxTarget, items)
-		}
+	pane := notify.FormatPaneID(tmuxTarget)
+	// edit rewrites the flush notification: head is its first line, shown the items it lists, k the number of
+	// items that went in, rest the mark of the others.
+	edit := func(head string, shown []stores.InjectItem, k int, rest string) {
 		if hasNotify && chat != nil {
 			editMsg := &tele.Message{ID: notifyMsgID, Chat: chat}
-			helpers.RetryEditRich(bs.Bot, editMsg, fmt.Sprintf("❌ Inject failed [%s] (%d)\n📟 %s\n%s", injectID, len(items), notify.FormatPaneID(tmuxTarget), msgContent), helpers.RichSendOpts{})
+			helpers.RetryEditRich(bs.Bot, editMsg, injectNotice(head, pane, shown, k, rest), helpers.RichSendOpts{})
 		}
-		return
 	}
-	// AN3: phase1 re-queued instead of injecting (CC busy again after the idle wait, or a PermissionRequest
-	// appeared). The re-queue already sent its own "⏳ Queued" notification — do NOT log "inject completed" or
-	// edit the notify message to "✅ Injected". Log accurately and return.
-	if requeued {
-		logger.Info(fmt.Sprintf("flushInjectQueue: [%s] deferred: CC busy again after idle wait, re-queued (not injected): target=%s", injectID, tmuxTarget))
-		return
+	partial := func(k int) string { return fmt.Sprintf("✅ Injected [%s] (%d of %d)", injectID, k, len(items)) }
+	// The groups run in queue order and the flush stops at the first problem; what went in is not touched again.
+	k := 0 // items that went in
+	for gi, g := range groups {
+		texts := make([]string, len(g))
+		for i, it := range g {
+			texts[i] = it.Text
+		}
+		text := strings.Join(texts, "\n")
+		later := items[k+len(g):]
+		// AN3 re-queue guardrail: phase1 may re-queue (CC busy again after the idle wait, or a PermissionRequest
+		// appeared) instead of injecting; it then queues the later groups behind this one (RequeueAfter).
+		// requeued tells the code below to log/notify accurately rather than reporting a re-queue as "Injected".
+		var requeued, answered bool
+		p := helpers.SafeInjectTextParams{
+			Bot:              bs.Bot,
+			PendingWait:      bs.PendingWait,
+			InjectQueue:      bs.InjectQueue,
+			InjectConfirm:    bs.InjectConfirm,
+			StopCooldown:     bs.StopCooldown,
+			ReactionTracker:  bs.ReactionTracker,
+			SessionState:     bs.SessionState,
+			HookRunning:      bs.HookRunning,
+			HookSessionLocks: &bs.HookSessionLocks,
+			SessionEvents:    bs.SessionEvents,
+			PendingMsgStore:  bs.PendingMsgStore,
+			ResolveChat: func(t string) (*tele.Chat, string, int) {
+				return helpers.ResolveChat(bs.SessionState, t)
+			},
+			FormatPaneID:   notify.FormatPaneID,
+			Force:          force,
+			InjectDiag:     diag,
+			AwaitAskQReady: mode == stores.InjectModeAskQCustomReply && gi == 0,
+			Requeued:       &requeued,
+			RequeueAfter:   later,
+			AskAnswered:    &answered,
+		}
+		if err := helpers.SafeInjectText(p, tmuxTarget, text); err != nil {
+			head := fmt.Sprintf("❌ Inject failed [%s] (%d)", injectID, len(items))
+			if k > 0 {
+				head = fmt.Sprintf("⚠️ Partly injected [%s] (%d of %d)", injectID, k, len(items))
+			}
+			// Error classification with sentinels
+			if errors.Is(err, injector.ErrSubmitAfterPaste) || errors.Is(err, helpers.ErrInjectNotConfirmed) {
+				// Post-paste error — do NOT re-enqueue this group (text may be in pane); the later groups go back
+				logger.Error(fmt.Sprintf("flushInjectQueue: [%s] post-paste error (not re-enqueueing): target=%s err=%v", injectID, tmuxTarget, err))
+				if len(later) > 0 {
+					bs.InjectQueue.ReEnqueue(tmuxTarget, later)
+				}
+			} else {
+				// Pre-paste error — safe to re-enqueue this group and the later ones
+				logger.Error(fmt.Sprintf("flushInjectQueue: [%s] pre-paste error (re-enqueueing %d items): target=%s err=%v", injectID, len(items)-k, tmuxTarget, err))
+				bs.InjectQueue.ReEnqueue(tmuxTarget, items[k:])
+			}
+			edit(head, items, k, "❌")
+			return
+		}
+		// AN3: phase1 re-queued instead of injecting. The re-queue already sent its own "⏳ Queued" notification
+		// — do NOT log "inject completed" or edit the notify message to "✅ Injected" for the whole flush.
+		if requeued {
+			logger.Info(fmt.Sprintf("flushInjectQueue: [%s] deferred: CC busy again after idle wait, re-queued (not injected): target=%s", injectID, tmuxTarget))
+			if k > 0 { // the undelivered items sit in the new "⏳ Queued" message: this one lists the delivered ones only
+				edit(partial(k), items[:k], k, "")
+			}
+			return
+		}
+		k += len(g)
+		// Claude Code hands plain prompts to the running turn at the next tool boundary but runs a queued slash
+		// command only at the turn end, so in the Force modes the later groups would reach the agent before the
+		// command: hold them (back to the queue front in order) until an idle-mode flush, and hold items queued after
+		// this flush too (the held state; not set when the turn ended during the injection). A first AskQ group that
+		// only answered the picker was not injected as an input and starts no hold.
+		if force && !answered && helpers.IsSlashText(text) {
+			bs.InjectQueue.SetHeld(tmuxTarget, endsBefore)
+			if k < len(items) {
+				bs.InjectQueue.ReEnqueue(tmuxTarget, items[k:])
+				logger.Info(fmt.Sprintf("flushInjectQueue: [%s] slash command injected, holding %d later items until idle: target=%s", injectID, len(items)-k, tmuxTarget))
+				edit(partial(k), items[:k], k, "")
+				// The held items go into the target's one "⏳ Queued" message (the one an item queued while this flush ran
+				// already has, else a new one); the idle flush that injects them edits it to "✅ Injected".
+				if chat != nil {
+					helpers.NotifyQueued(bs.Bot, bs.InjectQueue, chat, topicID, tmuxTarget, pane)
+				}
+				return
+			}
+		}
 	}
 	logger.Info(fmt.Sprintf("flushInjectQueue: [%s] inject completed: target=%s notify_msg_id=%d", injectID, tmuxTarget, notifyMsgID))
-	if hasNotify && chat != nil {
-		editMsg := &tele.Message{ID: notifyMsgID, Chat: chat}
-		helpers.RetryEditRich(bs.Bot, editMsg, fmt.Sprintf("✅ Injected [%s] (%d)\n📟 %s\n%s", injectID, len(items), notify.FormatPaneID(tmuxTarget), msgContent), helpers.RichSendOpts{})
+	edit(fmt.Sprintf("✅ Injected [%s] (%d)", injectID, len(items)), items, len(items), "")
+}
+
+// groupInjectItems splits a flush into injection groups in queue order: a slash command is a group of its own,
+// each run of other items between slash commands is one group (merged with "\n" when injected).
+func groupInjectItems(items []stores.InjectItem) [][]stores.InjectItem {
+	var groups [][]stores.InjectItem
+	for i, it := range items {
+		if i == 0 || helpers.IsSlashText(it.Text) || helpers.IsSlashText(items[i-1].Text) {
+			groups = append(groups, nil)
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], it)
 	}
+	return groups
+}
+
+// injectNotice renders a flush notification: head, the pane and the items between rules. When only part of the
+// flush went in (0 < k < len(items)) every item carries a mark: ✅ for the k that went in, rest for the others.
+func injectNotice(head, pane string, items []stores.InjectItem, k int, rest string) string {
+	lines := make([]string, len(items))
+	for i, it := range items {
+		lines[i] = markdown.EscapeHTML(it.Text)
+		if k > 0 && k < len(items) {
+			mark := rest
+			if i < k {
+				mark = "✅"
+			}
+			lines[i] = mark + " " + lines[i]
+		}
+	}
+	return head + "\n📟 " + pane + "\n──────\n" + strings.Join(lines, "\n") + "\n──────"
 }
 
 // checkSessionVersion checks a single session for CC version updates.

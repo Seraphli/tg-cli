@@ -121,6 +121,11 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						}
 					}
 				}
+				// A compaction ended: the slash command a Force flush held the later items for has run, also when its turn
+				// was interrupted (Claude Code sends no Stop then). Other slash commands are not covered.
+				if p.Source == "compact" && p.TmuxTarget != "" {
+					bs.InjectQueue.ClearHeld(p.TmuxTarget)
+				}
 				if chat == nil || p.TmuxTarget == "" {
 					return nil
 				}
@@ -128,6 +133,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.Source == "resume" && p.TranscriptPath != "" {
 					body = helpers.ReadLastAssistantText(p.TranscriptPath)
 				}
+				// A SessionStart inside a running session (after a compaction) closes the open compact tool message, its
+				// pending lines edited in first: the notice goes out below it and the next tool line starts a new message.
+				resetCompactAndScheduleDelete(bs, p.SessionID)
 				// §I3: SessionStart is the ~20-min registration blocker under a TG flood — route the send onto
 				// the Message FIFO (DispatchAsync) instead of sending inline on the Hook FIFO. The enqueue onto a
 				// fresh/empty per-session queue is instant, so registration below proceeds regardless of flood.
@@ -173,7 +181,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				}
 				if p.TmuxTarget != "" {
 					bs.HookRunning.ClearCCActivity(p.TmuxTarget)
+					// A /clear ends the session and starts the next one in this pane: no held state carries over.
+					bs.InjectQueue.ClearHeld(p.TmuxTarget)
 				}
+				// S3b: compact-cycle cleanup stays on the Hook FIFO (INV5). The compact entry is discarded before the
+				// notice below is enqueued, so its pending lines are edited in first. resetCompactAndScheduleDelete
+				// enqueues the pending edit and the Message-FIFO msg:id-delete for its mapping.
+				resetCompactAndScheduleDelete(bs, p.SessionID)
 				if chat != nil {
 					text := notify.BuildNotificationText(notify.NotificationData{
 						Event: "SessionEnd", Project: p.Project, CWD: cwdForRoute, TmuxTarget: p.TmuxTarget,
@@ -247,10 +261,8 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					}
 				}
 				bs.Pages.CleanupSession(p.SessionID)
-				// S3b: compact-cycle + tool-use state cleanup stays on the Hook FIFO (INV5). resetCompactAndScheduleDelete
-				// discards the compact entry and enqueues a Message-FIFO msg:id-delete for its mapping; CleanupSession
-				// drops any abandoned PreToolUse tool-use entry for this session.
-				resetCompactAndScheduleDelete(bs, p.SessionID)
+				// S3b: tool-use state cleanup stays on the Hook FIFO (INV5). CleanupSession drops any abandoned
+				// PreToolUse tool-use entry for this session.
 				bs.ToolUseMsgs.CleanupSession(p.SessionID)
 				bs.SessionCounts.Cleanup(p.SessionID)
 				CancelPendingWaitBySession(bs, p.SessionID, "", "", "") // cancel (resolve + push cancel) any still-pending hook waits for this session
@@ -297,6 +309,9 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					cb.TypingLog("state: event=UserPromptSubmit target=%s", p.TmuxTarget)
 					bs.InjectConfirm.NotifyUserPromptSubmit(p.TmuxTarget, p.Prompt)
 				}
+				// A user prompt closes the open compact tool message (its pending lines are edited in first): the next
+				// tool line starts a new message at the bottom of the chat instead of filling in the one above.
+				resetCompactAndScheduleDelete(bs, p.SessionID)
 				// S3b lifecycle-as-op: route Rotate through the Message FIFO (SYNC Dispatch, no lock held) so the
 				// stream-clear is totally ordered with every render op — no render-after-clear race (INV6).
 				bs.MessageQueue.Dispatch(p.SessionID, "msg:lifecycle-rotate", func() error {
@@ -309,8 +324,13 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					bs.HookRunning.ClearCCActivity(p.TmuxTarget)
 					cb.TypingLog("state: event=Stop target=%s state=idle", p.TmuxTarget)
 					bs.StopCooldown.Record(p.TmuxTarget)
+					// The turn is over: a held queue (a slash command went in, later items wait) no longer holds past it.
+					bs.InjectQueue.ClearHeld(p.TmuxTarget)
 				}
 				if chat != nil {
+					// S9a: discard the compact entry (Hook FIFO) before any message below is enqueued, so its pending
+					// lines are edited in first; the ordered map-delete follows on the Message FIFO.
+					resetCompactAndScheduleDelete(bs, p.SessionID)
 					body := p.LastAssistantMessage
 					// Only codex Updates read the transcript: the final reply goes out below, so it counts as handled
 					if p.Backend == "codex" && p.SessionID != "" && p.TranscriptPath != "" {
@@ -429,8 +449,6 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						Summary: "Task completed",
 						Detail:  body,
 					})
-					// S9a: discard the compact entry (Hook FIFO) and schedule the ordered map-delete (Message FIFO).
-					resetCompactAndScheduleDelete(bs, p.SessionID)
 					// R10-item1: only an MD-final opens the routing window; Stop is a routing SIGNAL within an
 					// already-armed window, never an independent trigger. If no window is armed, SignalEvent is a
 					// no-op (returns false) and the idle ticker is the only fallback for turns with no MD-final.
@@ -452,9 +470,12 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.TmuxTarget != "" {
 					bs.HookRunning.SetIdle(p.TmuxTarget)
 					cb.TypingLog("state: event=StopFailure target=%s state=idle", p.TmuxTarget)
+					// The turn is over (no Stop follows): the held queue no longer holds past it.
+					bs.InjectQueue.ClearHeld(p.TmuxTarget)
 				}
 				if chat != nil {
 					body := "⚠️ cc run error\n\n" + p.LastAssistantMessage
+					flushCompactPending(bs, p.SessionID)
 					bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-error-notify", func() error {
 						cb.SendEventNotification(bs, chat, chatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, body, "", hookAgentName, hookTopicID)
 						return nil
@@ -477,6 +498,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								sendOpts = append(sendOpts, &tele.SendOptions{ThreadID: hookTopicID})
 							}
 							text := fmt.Sprintf("⚠️ Rate limit detected\n📟 %s\n\nAuto-selected \"Stop and wait\"", notify.FormatPaneID(p.TmuxTarget))
+							flushCompactPending(bs, p.SessionID)
 							bs.MessageQueue.DispatchAsync(p.SessionID, "msg:rate-limit", func() error {
 								helpers.RetrySend(bs.Bot, chat, text, sendOpts...)
 								return nil
@@ -504,6 +526,8 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 				if p.TmuxTarget != "" {
 					bs.HookRunning.SetIdle(p.TmuxTarget)
 					cb.TypingLog("state: event=agent_idle target=%s state=idle", p.TmuxTarget)
+					// The run ended (interrupted or on an error) and no Stop follows: the held queue no longer holds past it.
+					bs.InjectQueue.ClearHeld(p.TmuxTarget)
 				}
 				if chat != nil {
 					switch p.StopReason {
@@ -511,6 +535,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						// §I3: route the AgentInterrupted send onto the Message FIFO instead of inline on the Hook FIFO.
 						aiChat := chat
 						aiChatID := chatID
+						flushCompactPending(bs, p.SessionID)
 						bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-interrupted-notify", func() error {
 							cb.SendEventNotification(bs, aiChat, aiChatID, p.SessionID, "AgentInterrupted", p.Project, cwdForRoute, p.TmuxTarget, "⏹ pi run interrupted", "", hookAgentName, hookTopicID)
 							return nil
@@ -521,6 +546,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						aeChat := chat
 						aeChatID := chatID
 						aeBody := errBody
+						flushCompactPending(bs, p.SessionID)
 						bs.MessageQueue.DispatchAsync(p.SessionID, "msg:agent-error-notify", func() error {
 							cb.SendEventNotification(bs, aeChat, aeChatID, p.SessionID, "AgentError", p.Project, cwdForRoute, p.TmuxTarget, aeBody, "", hookAgentName, hookTopicID)
 							return nil
@@ -575,6 +601,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							// §F #6: the codex PreToolUse Update is a blocking send reachable on the Hook FIFO —
 							// route it onto the Message FIFO. DispatchAsync (enqueued in Hook-FIFO order so codex
 							// updates stay ordered; the msg_id is not reused).
+							// New assistant text resets the compact tool message cycle (independent of the whitelist). S9a:
+							// the entry is discarded (Hook FIFO) before the Update is enqueued, so its pending lines are
+							// edited in first.
+							resetCompactAndScheduleDelete(bs, p.SessionID)
 							updChat := chat
 							updChatID := chatID
 							updBody := body
@@ -589,11 +619,6 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 						} else {
 							logger.Info(fmt.Sprintf("PreToolUse Update skipped: session=%s tool=%s reason=no_new_assistant_text", p.SessionID, p.ToolName))
 						}
-					}
-					// Reset compact tool message cycle when new assistant text arrives (independent of whitelist)
-					if body != "" {
-						// S9a: discard the compact entry (Hook FIFO) + schedule the ordered map-delete (Message FIFO).
-						resetCompactAndScheduleDelete(bs, p.SessionID)
 					}
 				} else {
 					if p.ToolName != "AskUserQuestion" {
@@ -692,7 +717,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							// A continuation that only EDITS the bubble above the tool must not split the compact group
 							// (rev 14 BLOCKER3 false split). SendBelowSinceTool is set in flushSession p3 at enqueue time,
 							// incl. the pre-tool flush at (e) above, so TAKE it AFTER cb.FlushStreamOp. (No-op in standard
-							// mode — ResetAndTakeInternalID returns 0. Serialized with the Get/Store below on the Hook FIFO
+							// mode — ResetAndTake returns 0. Serialized with the Get/Store below on the Hook FIFO
 							// worker — the off-FIFO Reset-vs-Store race stays fixed.)
 							sendBelow := bs.Streams.TakeSendBelowSinceTool(p.SessionID)
 							if sendBelow {
@@ -765,19 +790,23 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 								// Hook FIFO, store the fresh entry, then enqueue ONE Message-FIFO op that deletes the
 								// old mapping (ordered after all prior oldID ops), sends the new rich message, and Sets
 								// the new mapping. All map mutations + I/O on the Message FIFO (INV4/INV5).
-								oldID := bs.CompactTools.ResetAndTakeInternalID(p.SessionID)
+								oldID, pending := bs.CompactTools.ResetAndTake(p.SessionID)
 								newID := bs.MsgIDMap.Allocate()
 								overflowChatID := existing.ChatID
 								overflowTopicID := existing.TopicID
+								nd.Body = compactLine
+								overflowText := notify.BuildNotificationText(nd)
 								bs.CompactTools.Store(p.SessionID, &stores.CompactToolEntry{
 									InternalID: newID, ChatID: overflowChatID, TopicID: overflowTopicID,
 									Lines: []string{compactLine}, Rich: true,
+									Text: overflowText, Tool: p.ToolName, LineCount: 1, LastEdit: time.Now(),
 								})
-								nd.Body = compactLine
-								overflowText := notify.BuildNotificationText(nd)
 								session := p.SessionID
 								toolName := p.ToolName
 								bs.MessageQueue.DispatchAsync(session, "msg:compact-overflow", func() error {
+									if pending != nil {
+										EditCompact(bs, session, *pending, true) // the old message gets its pending lines first
+									}
 									if oldID != 0 {
 										bs.MsgIDMap.Delete(oldID)
 									}
@@ -797,27 +826,10 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 									return nil
 								})
 							} else {
-								// S7 edit: enqueue a Message-FIFO op carrying the entry's internal id — it resolves the
-								// TG msg id via MsgIDMap.Get and edits; a missing mapping logs + skips (NO recovery send).
-								internalID := existing.InternalID
-								editChatID := existing.ChatID
-								session := p.SessionID
-								toolName := p.ToolName
-								lineCount := len(existing.Lines)
-								bs.MessageQueue.DispatchAsync(session, "msg:compact-edit", func() error {
-									tgMsgID, ok := bs.MsgIDMap.Get(internalID)
-									if !ok {
-										logger.Info(fmt.Sprintf("compact tool edit skipped: no mapping session=%s internal_id=%d tool=%s", session, internalID, toolName))
-										return nil
-									}
-									editMsg := &tele.Message{ID: tgMsgID, Chat: &tele.Chat{ID: editChatID}}
-									helpers.RetryEditRich(bs.Bot, editMsg, fullText, helpers.RichSendOpts{
-										SkipEntityDetection: true,
-										LegacyHTML:          fullText,
-									})
-									logger.Debug(fmt.Sprintf("compact tool edited: session=%s msg_id=%d tool=%s lines=%d fmt=rich\n<<<BODY\n%s\nBODY>>>", session, tgMsgID, toolName, lineCount, helpers.FinalizeRichHTML(fullText)))
-									return nil
-								})
+								// The line only marks the message dirty with the latest full text: the stream ticker edits
+								// it at most once per compactEditWindow, and every flush point (a message below, a discard)
+								// edits it in first.
+								bs.CompactTools.SetText(p.SessionID, fullText, p.ToolName, len(existing.Lines))
 							}
 						} else {
 							compactBody := compactLine
@@ -846,6 +858,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 							bs.CompactTools.Store(p.SessionID, &stores.CompactToolEntry{
 								InternalID: internalID, ChatID: toolChat.ID, TopicID: toolTopicID,
 								Lines: []string{compactLine}, Rich: true,
+								Text: fullText, Tool: p.ToolName, LineCount: 1, LastEdit: time.Now(),
 							})
 							session := p.SessionID
 							toolName := p.ToolName
@@ -977,6 +990,7 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 					defChatID := chatID
 					defEvent := event
 					defBody := body
+					flushCompactPending(bs, p.SessionID)
 					bs.MessageQueue.DispatchAsync(p.SessionID, "msg:default-notify", func() error {
 						cb.SendEventNotification(bs, defChat, defChatID, p.SessionID, defEvent, p.Project, cwdForRoute, p.TmuxTarget, defBody, "", hookAgentName, hookTopicID)
 						return nil
@@ -991,16 +1005,60 @@ func Register(mux *http.ServeMux, bs *types.BotState, port int, cb Callbacks) {
 
 // resetCompactAndScheduleDelete discards the session's compact tool entry on the Hook FIFO (INV5) and, if it
 // had an internal message id, enqueues a Message-FIFO msg:id-delete so the mapping delete is ordered after any
-// prior ops on that id (INV4/INV5). State mutation (ResetAndTakeInternalID) stays on the Hook FIFO; only the
-// map delete runs on the Message FIFO. Phase 5 (S9a) also calls this at the other CompactTools.Reset sites.
+// prior ops on that id (INV4/INV5). State mutation (ResetAndTake) stays on the Hook FIFO; the pending edit of the
+// entry (its lines not yet on Telegram) and the map delete run, in that order, on the Message FIFO. Phase 5 (S9a)
+// also calls this at the other CompactTools.Reset sites.
 func resetCompactAndScheduleDelete(bs *types.BotState, session string) {
-	oldID := bs.CompactTools.ResetAndTakeInternalID(session)
+	oldID, pending := bs.CompactTools.ResetAndTake(session)
 	if oldID != 0 {
 		bs.MessageQueue.DispatchAsync(session, "msg:id-delete", func() error {
+			if pending != nil {
+				EditCompact(bs, session, *pending, true) // the pending lines are edited in before the mapping goes
+			}
 			bs.MsgIDMap.Delete(oldID)
 			return nil
 		})
 	}
+}
+
+// flushCompactPending enqueues the pending edit of the session's compact tool message (lines not yet on Telegram)
+// on the Message FIFO. A message that goes out below an open compact message and does not discard it calls this
+// right before it enqueues itself, so the pending lines are edited in first.
+func flushCompactPending(bs *types.BotState, session string) {
+	if pending := bs.CompactTools.TakePending(session); pending != nil {
+		bs.MessageQueue.DispatchAsync(session, "msg:compact-flush", func() error {
+			EditCompact(bs, session, *pending, true)
+			return nil
+		})
+	}
+}
+
+// EditCompact edits a compact tool message with the text of e; it runs on the Message FIFO. A ticker edit
+// (mustLand false) that gets a FloodError does not sleep: the entry is marked dirty again and edited after the
+// flood wait. An edit that must land (a message goes out below, or the entry is discarded) waits out a running
+// flood wait first and, as every other edit, sleeps and retries on a FloodError.
+func EditCompact(bs *types.BotState, session string, e stores.CompactEdit, mustLand bool) {
+	tgMsgID, ok := bs.MsgIDMap.Get(e.InternalID)
+	if !ok {
+		logger.Info(fmt.Sprintf("compact tool edit skipped: no mapping session=%s internal_id=%d tool=%s", session, e.InternalID, e.Tool))
+		return
+	}
+	time.Sleep(e.Wait)
+	if !bs.CompactTools.Claim(e) {
+		logger.Info(fmt.Sprintf("compact tool edit dropped: a newer edit already ran session=%s internal_id=%d lines=%d", session, e.InternalID, e.Lines))
+		return
+	}
+	editMsg := &tele.Message{ID: tgMsgID, Chat: &tele.Chat{ID: e.ChatID}}
+	_, err := helpers.RetryEditRich(bs.Bot, editMsg, e.Text, helpers.RichSendOpts{SkipEntityDetection: true, LegacyHTML: e.Text, NoFloodRetry: !mustLand})
+	if wait, flooded := helpers.FloodWait(err); flooded {
+		if bs.CompactTools.Retry(session, e.InternalID, time.Now().Add(wait)) {
+			return
+		}
+		e.Wait = wait
+		EditCompact(bs, session, e, true) // the message was discarded meanwhile: this edit is its last chance
+		return
+	}
+	logger.Debug(fmt.Sprintf("compact tool edited: session=%s msg_id=%d tool=%s lines=%d fmt=rich\n<<<BODY\n%s\nBODY>>>", session, tgMsgID, e.Tool, e.Lines, helpers.FinalizeRichHTML(e.Text)))
 }
 
 // handleMessageDisplay handles the MessageDisplay fast-path: appends delta to the stream store and returns

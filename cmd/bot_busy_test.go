@@ -332,6 +332,8 @@ func TestBusyTick_CodexErrorTurnNotifies(t *testing.T) {
 		HookRunning:  stores.NewHookRunningStateStore(),
 		BusyStatus:   stores.NewBusyStatusStore(t.TempDir()),
 		MessageQueue: stores.NewSessionEventStore(),
+		InjectQueue:  stores.NewInjectQueueStore(t.TempDir()),
+		CompactTools: stores.NewCompactToolStore(),
 	}
 	rollouts := map[string]string{"cx-err": "../tests/fixtures/codex-rollout/error-turn.jsonl", "cx-gone": filepath.Join(t.TempDir(), "gone.jsonl")}
 	for i, name := range []string{"cx-err", "cx-gone"} {

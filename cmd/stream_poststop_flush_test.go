@@ -16,7 +16,7 @@ func TestPostStop_UnarmedEntryNotRendered(t *testing.T) {
 	var bodies []string
 	bot, closeFn := newFakeStopBot(t, &bodies)
 	defer closeFn()
-	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "s-unarmed"
 
 	// Prime + Stop (renders/seals the Stop bubble).
@@ -54,7 +54,7 @@ func TestPostStop_ABRelabel_PlaceholderNotTarget(t *testing.T) {
 	var bodies []string
 	bot, closeFn := newFakeStopBot(t, &bodies)
 	defer closeFn()
-	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "s-ab"
 
 	// Genuine bubble A completes; Stop installs the authoritative text (== A) and marks Stopped.

@@ -229,6 +229,13 @@ type SafeInjectTextParams struct {
 	// pending) instead of injecting/answering. Lets a caller (deliverInjectQueue) log/notify accurately
 	// rather than reporting a re-queue as "Injected". Nil for callers that do not care.
 	Requeued *bool
+	// RequeueAfter lists items phase1 appends behind this text when it re-queues the text (CC busy or a
+	// PermissionRequest pending): the later groups of a flush stay behind it in order, in the same "⏳ Queued"
+	// notification, with nothing arriving in between. Ignored when the text is injected or answers a picker.
+	RequeueAfter []stores.InjectItem
+	// AskAnswered, when non-nil, is set to true when the text answered a pending AskUserQuestion instead of
+	// being injected (deliverInjectQueue starts no hold after such a group).
+	AskAnswered *bool
 }
 
 // injectResult carries the outcome of safeInjectPhase1 to safeInjectPhase2.
@@ -243,23 +250,28 @@ type injectResult struct {
 	submitted     bool // f29 C: codex_slash — the phase1 transaction pressed Enter (composer confirmed)
 }
 
-// isLocalSlash reports whether text is a LOCAL slash-command — a built-in that its backend intercepts BEFORE
-// prompt() (so NO UserPromptSubmit is emitted), which is the scope of the inject-confirmation transaction;
-// every other case keeps the existing UPS/capture path. Both codex and pi intercept their built-ins this
-// way, so the same text grammar admits both. Source-faithful to the codex 0.144.x slash grammar (codex-rs
-// tui/src/bottom_pane/prompt_args.rs parse_slash_name + tui/src/slash_input.rs
+// IsSlashText is the backend-free text rule of a slash command. Source-faithful to the codex 0.144.x slash
+// grammar (codex-rs tui/src/bottom_pane/prompt_args.rs parse_slash_name + tui/src/slash_input.rs
 // validate_submission/inline_command) — pi's interactive-mode.js uses the same `if (text === "/x")` shape:
 // the input must LITERALLY start with "/" (space-led input is ordinary text — no trimming), the first
 // whitespace-delimited token must name a non-empty command (a bare "/" is None), and the name itself may not
 // contain "/" — which excludes multi-slash file paths like /tmp/x.jpg. Root-path single-slash image paths
 // (/image.jpg) still pass this text predicate and are excluded at the gate by localSlashGate's AltSnippet
-// image bypass.
-func isLocalSlash(backend, text string) bool {
-	if (backend != "codex" && backend != "pi") || !strings.HasPrefix(text, "/") {
+// image bypass. deliverInjectQueue uses it for every backend: a slash command is injected alone.
+func IsSlashText(text string) bool {
+	if !strings.HasPrefix(text, "/") {
 		return false
 	}
 	token := strings.Fields(text)[0]
 	return len(token) > 1 && !strings.Contains(token[1:], "/")
+}
+
+// isLocalSlash reports whether text is a LOCAL slash-command — a built-in that its backend intercepts BEFORE
+// prompt() (so NO UserPromptSubmit is emitted), which is the scope of the inject-confirmation transaction;
+// every other case keeps the existing UPS/capture path. Both codex and pi intercept their built-ins this
+// way, so the same text grammar (IsSlashText) admits both.
+func isLocalSlash(backend, text string) bool {
+	return (backend == "codex" || backend == "pi") && IsSlashText(text)
 }
 
 // localSlashGate decides whether the local-slash inject-confirmation transaction runs for an inject. Image
@@ -339,6 +351,22 @@ func piComposerHasText(pane, snippet string) bool {
 // must never be treated as present.
 func piCaptureConfirms(pane, snippet, altSnippet string) bool {
 	return piComposerHasText(pane, snippet) || (altSnippet != "" && piComposerHasText(pane, altSnippet))
+}
+
+// NotifyQueued shows what waits in the target's inject queue in the target's one "⏳ Queued" message: it edits
+// that message when the target has one, else it sends one and stores its id. Fix 19: rich notification
+// (RetrySendRich/RetryEditRich) so long queued content is not truncated by the 4096 plain-text cap; the user text
+// is HTML-escaped for correct rich rendering.
+func NotifyQueued(bot *tele.Bot, iq *stores.InjectQueueStore, chat *tele.Chat, topicID int, tmuxTarget, pane string) {
+	texts := iq.GetTexts(tmuxTarget)
+	notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", iq.GetInjectID(tmuxTarget), len(texts), pane, markdown.EscapeHTML(truncateQueueTexts(texts, 3500)))
+	if msgID, ok := iq.GetNotifyMsg(tmuxTarget); ok {
+		RetryEditRich(bot, &tele.Message{ID: msgID, Chat: chat}, notifyText, RichSendOpts{})
+		return
+	}
+	if sent, _ := RetrySendRich(bot, chat, notifyText, RichSendOpts{TopicID: topicID}); sent != nil {
+		iq.SetNotifyMsg(tmuxTarget, sent.ID)
+	}
 }
 
 // SafeInjectText checks for pending AskUserQuestion/PermissionRequest on the target pane.
@@ -439,23 +467,13 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 			}
 		}
 		p.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+		for _, it := range p.RequeueAfter {
+			p.InjectQueue.Enqueue(tmuxTarget, it)
+		}
 		count := p.InjectQueue.ItemCount(tmuxTarget)
 		logger.Info(fmt.Sprintf("safeInjectText: CC busy, queued for target=%s count=%d text=%s", tmuxTarget, count, strings.ReplaceAll(text, "\n", "\\n")))
 		if chat != nil {
-			allTexts := p.InjectQueue.GetTexts(tmuxTarget)
-			queueID := p.InjectQueue.GetInjectID(tmuxTarget)
-			// Fix 19: rich notification (RetrySendRich/RetryEditRich) so long queued content is not
-			// truncated by the 4096 plain-text cap; HTML-escape the user text for correct rich rendering.
-			notifyText := fmt.Sprintf("⏳ Queued [%s] (%d)\n📟 %s\n──────\n%s\n──────", queueID, count, p.FormatPaneID(tmuxTarget), markdown.EscapeHTML(truncateQueueTexts(allTexts, 3500)))
-			if existingMsgID, ok := p.InjectQueue.GetNotifyMsg(tmuxTarget); ok {
-				editMsg := &tele.Message{ID: existingMsgID, Chat: chat}
-				RetryEditRich(p.Bot, editMsg, notifyText, RichSendOpts{})
-			} else {
-				sent, _ := RetrySendRich(p.Bot, chat, notifyText, RichSendOpts{TopicID: topicID})
-				if sent != nil {
-					p.InjectQueue.SetNotifyMsg(tmuxTarget, sent.ID)
-				}
-			}
+			NotifyQueued(p.Bot, p.InjectQueue, chat, topicID, tmuxTarget, p.FormatPaneID(tmuxTarget))
 		}
 		if sessionMu != nil {
 			sessionMu.Unlock()
@@ -485,6 +503,9 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 				Output: ccOutput,
 			})
 			if won {
+				if p.AskAnswered != nil {
+					*p.AskAnswered = true
+				}
 				if sessionMu != nil {
 					sessionMu.Unlock()
 				}
@@ -533,6 +554,9 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 			}
 		}
 		p.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+		for _, it := range p.RequeueAfter {
+			p.InjectQueue.Enqueue(tmuxTarget, it)
+		}
 		count := p.InjectQueue.ItemCount(tmuxTarget)
 		logger.Info(fmt.Sprintf("safeInjectText: PermissionRequest pending, queued for target=%s count=%d text=%s", tmuxTarget, count, text))
 		if chat != nil {

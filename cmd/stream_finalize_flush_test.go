@@ -32,7 +32,7 @@ func TestStopFlush_RendersAuthoritativeFullText(t *testing.T) {
 	}
 	// The dual-FIFO stop flush enqueues its render op onto the Message FIFO and touches MsgIDMap on the
 	// op path, so both must be initialized or flushSession nil-panics (S3/S14 setup fix).
-	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "sess-trunc"
 
 	// A partial MD stream: one delta, NOT final (incomplete) — the truncation scenario.
@@ -94,7 +94,7 @@ func runStopTerminal(bs *BotState, sessionID, body string) {
 func TestStopTerminal_NoGrace(t *testing.T) {
 	newBS := func(bot *tele.Bot) *BotState {
 		return &types.BotState{Bot: bot, Streams: stores.NewStreamStore(),
-			MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(),
+			MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore(),
 			SessionState: stores.NewSessionStateStore(t.TempDir())}
 	}
 	// isStopped reads the session's terminal Stopped flag under DataMu (no public accessor exists; the field

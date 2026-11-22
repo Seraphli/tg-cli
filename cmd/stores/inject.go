@@ -26,6 +26,8 @@ type InjectQueueStore struct {
 	queues     map[string][]InjectItem
 	notifyMsgs map[string]int
 	injectIDs  map[string]string
+	held       map[string]bool // targets whose later items were held after a slash command (SetHeld); in memory only
+	turnEnds   map[string]int  // per target: turn ends seen (ClearHeld); in memory only
 	configDir  string
 }
 
@@ -35,6 +37,8 @@ func NewInjectQueueStore(configDir string) *InjectQueueStore {
 		queues:     make(map[string][]InjectItem),
 		notifyMsgs: make(map[string]int),
 		injectIDs:  make(map[string]string),
+		held:       make(map[string]bool),
+		turnEnds:   make(map[string]int),
 		configDir:  configDir,
 	}
 }
@@ -50,6 +54,41 @@ func (iq *InjectQueueStore) Enqueue(tmuxTarget string, item InjectItem) {
 		iq.injectIDs[tmuxTarget] = fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFF)
 	}
 	iq.saveLocked()
+}
+
+// SetHeld marks the target as held: a slash command was injected in a Force mode, so no Force-mode flush may
+// inject later items (the put-back items of that flush, or items queued afterwards) until an idle-mode flush
+// runs. Flush clears the mark; so does the end of the turn (ClearHeld). endsBefore is the TurnEnds value the flush
+// read before it injected: when a turn ended meanwhile (a Stop that lands during the injection), the slash command
+// belongs to a turn that is over and nothing is held.
+func (iq *InjectQueueStore) SetHeld(tmuxTarget string, endsBefore int) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	if iq.turnEnds[tmuxTarget] == endsBefore {
+		iq.held[tmuxTarget] = true
+	}
+}
+
+// ClearHeld ends the held state of the target (the turn ended, or the session ended) and counts the end.
+func (iq *InjectQueueStore) ClearHeld(tmuxTarget string) {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	delete(iq.held, tmuxTarget)
+	iq.turnEnds[tmuxTarget]++
+}
+
+// TurnEnds returns how many turn ends (ClearHeld calls) the target has seen.
+func (iq *InjectQueueStore) TurnEnds(tmuxTarget string) int {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	return iq.turnEnds[tmuxTarget]
+}
+
+// Held reports whether the target is held (see SetHeld).
+func (iq *InjectQueueStore) Held(tmuxTarget string) bool {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	return iq.held[tmuxTarget]
 }
 
 // GetInjectID returns the inject ID for the given tmux target.
@@ -78,6 +117,7 @@ func (iq *InjectQueueStore) Flush(tmuxTarget string) []InjectItem {
 	delete(iq.queues, tmuxTarget)
 	delete(iq.notifyMsgs, tmuxTarget)
 	delete(iq.injectIDs, tmuxTarget)
+	delete(iq.held, tmuxTarget)
 	iq.saveLocked()
 	return items
 }
@@ -115,6 +155,7 @@ func (iq *InjectQueueStore) PurgeMatching(tmuxTarget string, markers ...string) 
 		delete(iq.queues, tmuxTarget)
 		delete(iq.injectIDs, tmuxTarget)
 		delete(iq.notifyMsgs, tmuxTarget)
+		delete(iq.held, tmuxTarget)
 	} else {
 		iq.queues[tmuxTarget] = kept
 	}
@@ -136,6 +177,7 @@ func (iq *InjectQueueStore) HasItems(tmuxTarget string) bool {
 // actually dropped.
 func (iq *InjectQueueStore) ClearTarget(tmuxTarget string) int {
 	iq.mu.Lock()
+	delete(iq.held, tmuxTarget)
 	items := iq.queues[tmuxTarget]
 	_, hadNotify := iq.notifyMsgs[tmuxTarget]
 	_, hadID := iq.injectIDs[tmuxTarget]

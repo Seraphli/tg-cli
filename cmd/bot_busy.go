@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/hooks"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
 	"github.com/Seraphli/tg-cli/internal/injector"
@@ -186,6 +187,12 @@ func notifyCodexTurnError(bs *BotState, sid string, info stores.SessionInfo) {
 			logger.Warn(fmt.Sprintf("codex run error check: session %s: %v", sid, err))
 		}
 		if msg != "" {
+			// The turn ended on an error and no Stop follows: the held queue no longer holds past it, and the pending
+			// lines of an open compact tool message are edited in before the notice goes out below it.
+			bs.InjectQueue.ClearHeld(info.TmuxTarget)
+			if pending := bs.CompactTools.TakePending(sid); pending != nil {
+				hooks.EditCompact(bs, sid, *pending, true)
+			}
 			sendEventNotification(bs, chat, chatID, sid, "AgentError", filepath.Base(info.CWD), info.CWD, info.TmuxTarget, "⚠️ codex run error\n\n"+msg, "", info.Name, topicID)
 		}
 		return nil

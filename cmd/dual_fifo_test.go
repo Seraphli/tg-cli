@@ -121,7 +121,7 @@ func TestSnapshotOrdering(t *testing.T) {
 		t.Fatalf("NewBot: %v", err)
 	}
 	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(),
-		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "sess-snap"
 	// First flush: one entry "alpha" — its render op is enqueued first.
 	bs.Streams.AppendDelta(sid, stores.StreamMeta{MessageID: "m1", ChatID: 1}, 0, "alpha body", true)
@@ -175,7 +175,7 @@ func TestTickerSealedStopRelabel(t *testing.T) {
 		t.Fatalf("NewBot: %v", err)
 	}
 	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(),
-		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "sess-relabel"
 	// A COMPLETE MD stream (final=true) so the normal flush seals it (💬, not relabeled).
 	bs.Streams.AppendDelta(sid, stores.StreamMeta{MessageID: "m1", ChatID: 1}, 0, "assistant text complete", true)
@@ -246,7 +246,7 @@ func TestLifecycleFence(t *testing.T) {
 		t.Fatalf("NewBot: %v", err)
 	}
 	bs := &types.BotState{Bot: bot, Streams: stores.NewStreamStore(),
-		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+		MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 	sid := "sess-fence"
 	bs.Streams.AppendDelta(sid, stores.StreamMeta{MessageID: "m1", ChatID: 1}, 0, "text before rotate", true)
 	// Enqueue the SLOW render op first (async), then the lifecycle-rotate op — same Message FIFO, so rotate
@@ -294,7 +294,7 @@ func TestLifecycleFence(t *testing.T) {
 }
 
 // TestStateOwnershipUnderStalledMessageFIFO (S14i): the Hook-FIFO-owned state mutations (ClearReactions /
-// ToolUseMsgs.CleanupSession / resetCompactAndScheduleDelete's ResetAndTakeInternalID) run to completion even
+// ToolUseMsgs.CleanupSession / resetCompactAndScheduleDelete's ResetAndTake) run to completion even
 // when the Message FIFO is stalled (parked on a blocked send op) — state ownership is on the Hook FIFO, not the
 // Message FIFO (INV4/INV5). Assert the state mutations complete while the Message FIFO is full/stalled.
 func TestStateOwnershipUnderStalledMessageFIFO(t *testing.T) {
@@ -315,10 +315,10 @@ func TestStateOwnershipUnderStalledMessageFIFO(t *testing.T) {
 	bs.CompactTools.Store(sid, &stores.CompactToolEntry{InternalID: bs.MsgIDMap.Allocate(), ChatID: 1})
 	bs.ToolUseMsgs.Store("tu1", &stores.ToolUseMsgEntry{InternalID: bs.MsgIDMap.Allocate(), SessionID: sid})
 	// These state mutations are Hook-FIFO / store-level — they must complete despite the stalled Message FIFO.
-	// ResetAndTakeInternalID discards the compact entry (returns its id); CleanupSession drops the tool entry.
-	oldID := bs.CompactTools.ResetAndTakeInternalID(sid)
+	// ResetAndTake discards the compact entry (returns its id); CleanupSession drops the tool entry.
+	oldID, _ := bs.CompactTools.ResetAndTake(sid)
 	if oldID == 0 {
-		t.Fatal("ResetAndTakeInternalID must return the discarded internal id")
+		t.Fatal("ResetAndTake must return the discarded internal id")
 	}
 	if _, ok := bs.CompactTools.Get(sid); ok {
 		t.Fatal("compact entry must be discarded even though the Message FIFO is stalled")

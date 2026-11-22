@@ -24,7 +24,7 @@ func newSendBelowBS(t *testing.T) *BotState {
 	old := config.ConfigDir
 	config.ConfigDir = t.TempDir()
 	t.Cleanup(func() { config.ConfigDir = old })
-	return &types.BotState{Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap()}
+	return &types.BotState{Streams: stores.NewStreamStore(), MessageQueue: stores.NewSessionEventStore(), MsgIDMap: stores.NewMsgIDMap(), CompactTools: stores.NewCompactToolStore()}
 }
 
 // gateWorker parks the session's Message-FIFO worker on a never-closed channel so every subsequently-enqueued

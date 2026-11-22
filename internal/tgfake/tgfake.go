@@ -4,6 +4,7 @@ package tgfake
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 )
 
 // Reply is one scripted answer. Err set means a Telegram error: HTTP status 400 and the
-// body {"ok":false,"error_code":400,"description":Err}; otherwise {"ok":true,"result":Result}.
+// body {"ok":false,"error_code":400,"description":Err}; RetryAfter set means a flood wait: HTTP status 429 with
+// retry_after (telebot turns it into tele.FloodError); otherwise {"ok":true,"result":Result}.
 type Reply struct {
-	Result interface{}
-	Err    string
+	Result     interface{}
+	Err        string
+	RetryAfter int
 }
 
 // Call is one recorded request: the Bot API method and its decoded JSON body.
@@ -58,6 +61,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		reply = f(params)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if reply.RetryAfter > 0 {
+		w.WriteHeader(http.StatusTooManyRequests)
+		out, _ := json.Marshal(map[string]interface{}{"ok": false, "error_code": http.StatusTooManyRequests,
+			"description": fmt.Sprintf("Too Many Requests: retry after %d", reply.RetryAfter), "parameters": map[string]interface{}{"retry_after": reply.RetryAfter}})
+		w.Write(out)
+		return
+	}
 	if reply.Err != "" {
 		w.WriteHeader(http.StatusBadRequest)
 		out, _ := json.Marshal(map[string]interface{}{"ok": false, "error_code": http.StatusBadRequest, "description": reply.Err})

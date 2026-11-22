@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Seraphli/tg-cli/cmd/helpers"
+	"github.com/Seraphli/tg-cli/cmd/hooks"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/cmd/types"
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -231,10 +232,22 @@ func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDi
 		j.legacyChunks = helpers.SplitBody(markdown.RenderTelegramHTML(j.text), budget)
 		j.willSendBelow = len(j.chunks) > j.positionedAtSnapshot
 	}
+	// A new message goes out below: the compact tool message above gets its pending lines first. The edit is taken
+	// here (the hook that follows may discard the entry) and runs at the start of the render op, before the send.
+	var compactPending *stores.CompactEdit
+	for _, j := range jobs {
+		if j.willSendBelow {
+			compactPending = bs.CompactTools.TakePending(sessionID)
+			break
+		}
+	}
 	// The render op: takes DataMu ONLY (never FlushMu), revalidates each entry (ss.Closed / ss.Msgs[mid]==e),
 	// renders the FROZEN plan via renderStreamChunks (TG I/O), and sets Sealed/Relabeled under DataMu.
 	// TG I/O runs OUTSIDE DataMu; Msgs/SentText are Message-FIFO-only (INV4).
 	renderOp := func() error {
+		if compactPending != nil {
+			hooks.EditCompact(bs, sessionID, *compactPending, true)
+		}
 		for _, j := range jobs {
 			ss.DataMu.Lock()
 			if ss.Closed || ss.Msgs[j.mid] != j.e {
@@ -275,6 +288,9 @@ func flushSession(bs *BotState, sessionID string, stop, force bool, mode flushDi
 				}
 			}
 			ss.DataMu.Unlock()
+			if compactPending != nil {
+				bs.CompactTools.Retry(sessionID, compactPending.InternalID, time.Now())
+			}
 			return false
 		}
 	default: // flushAsync
@@ -381,7 +397,11 @@ func flushStreamOp(bs *types.BotState, sessionID string) {
 	flushSession(bs, sessionID, false, false, flushAsync)
 }
 
-// startStreamLoop is the background worker that throttle-flushes dirty sessions.
+// compactEditWindow is the shortest time between two edits of one compact tool message: lines that arrive in
+// between are collected and go out together in one edit.
+const compactEditWindow = 5 * time.Second
+
+// startStreamLoop is the background worker that throttle-flushes dirty sessions and edits dirty compact tool messages.
 func startStreamLoop(ctx context.Context, bs *BotState) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -402,6 +422,12 @@ func startStreamLoop(ctx context.Context, bs *BotState) {
 				// the render — a full session queue no longer stalls other sessions (MAJOR 3). Boundary flushes
 				// keep the blocking Dispatch/DispatchAsync paths.
 				flushSession(bs, sid, false, false, flushTry)
+			}
+			for sid, e := range bs.CompactTools.TakeDue(compactEditWindow) {
+				// A compact tool message is edited at most once per window; a full queue marks it dirty again.
+				if !bs.MessageQueue.TryDispatchAsync(sid, "msg:compact-edit", func() error { hooks.EditCompact(bs, sid, e, false); return nil }) {
+					bs.CompactTools.Retry(sid, e.InternalID, time.Now())
+				}
 			}
 			bs.Streams.SweepEnded(60 * time.Second)           // drop ended-session tombstones older than TTL
 			bs.Streams.SweepPostToolArrived(30 * time.Second) // drop never-consumed PostToolUse (B2) signals

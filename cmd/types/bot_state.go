@@ -47,4 +47,5 @@ type BotState struct {
 	UnbindMenuItems       sync.Map
 	BindMenuItems         sync.Map
 	SettingsMenuMsgs      sync.Map
+	CronRunning           sync.Map // cron job id -> struct{}: the job's run has not returned (checkAndRunCronJobs)
 }

@@ -181,6 +181,9 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 				// §F #8: executeSendPendingMessage runs ON the Hook FIFO (send:pending job), so the codex Update
 				// blocking send must go onto the Message FIFO. DispatchAsync in Hook-FIFO order (the msg_id is
 				// not reused). The compact reset + log stay on the Hook FIFO (state ordering).
+				// S9a: discard the compact entry (Hook FIFO) before the Update is enqueued, so its pending lines are
+				// edited in first; the ordered map-delete follows on the Message FIFO.
+				resetCompactAndScheduleDelete(bs, p.SessionID)
 				updChat := chat
 				updChatID := chatID
 				updBody := updateBody
@@ -188,8 +191,6 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 					cb.SendEventNotification(bs, updChat, updChatID, p.SessionID, "PreToolUse", p.Project, cwdForRoute, p.TmuxTarget, updBody, "", agentName, topicID)
 					return nil
 				})
-				// S9a: discard the compact entry (Hook FIFO) + schedule the ordered map-delete (Message FIFO).
-				resetCompactAndScheduleDelete(bs, p.SessionID)
 				logger.Info(fmt.Sprintf("PreToolUse Update sent for pending request %s (chat=%d)", entry.UUID, chatIDInt))
 			}
 		} else {
@@ -282,6 +283,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 		// detection ON (C3).
 		var sent *tele.Message
 		var err error
+		flushCompactPending(bs, p.SessionID)
 		bs.MessageQueue.Dispatch(p.SessionID, "msg:ask-send", func() error {
 			sent, err = helpers.RetrySendRich(bs.Bot, chat, text, helpers.RichSendOpts{
 				TopicID:    topicID,
@@ -422,6 +424,7 @@ func executeSendPendingMessage(bs *types.BotState, cb Callbacks, entry *stores.P
 	// detection so file paths/@words/flags are not turned into spurious links (C3).
 	var sent *tele.Message
 	var err error
+	flushCompactPending(bs, p.SessionID)
 	bs.MessageQueue.Dispatch(p.SessionID, "msg:perm-send", func() error {
 		sent, err = helpers.RetrySendRich(bs.Bot, chat, text, helpers.RichSendOpts{
 			TopicID:             topicID,

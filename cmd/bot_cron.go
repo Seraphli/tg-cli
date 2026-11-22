@@ -28,17 +28,26 @@ func startCronLoop(ctx context.Context, bs *BotState) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			checkAndRunCronJobs(bs)
+			checkAndRunCronJobs(bs, time.Now())
 		}
 	}
 }
 
-func checkAndRunCronJobs(bs *BotState) {
-	now := time.Now()
+// checkAndRunCronJobs starts every due job that has no run in flight. A job whose previous run has not
+// returned (for example an inject waiting behind the session's hook queue) is skipped for this tick: no
+// goroutine, no LastRun update.
+func checkAndRunCronJobs(bs *BotState, now time.Time) {
 	for _, job := range bs.CronJobs.All() {
-		if shouldRunCronJob(job, now) {
-			go executeCronJob(job, bs, now)
+		if !shouldRunCronJob(job, now) {
+			continue
 		}
+		if _, running := bs.CronRunning.LoadOrStore(job.ID, struct{}{}); running {
+			continue
+		}
+		go func() {
+			defer bs.CronRunning.Delete(job.ID)
+			executeCronJob(job, bs, now)
+		}()
 	}
 }
 

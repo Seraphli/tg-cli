@@ -37,6 +37,9 @@ type RichSendOpts struct {
 	// CCMessageID is the CC assistant-message UUID for a stream send/edit; recorded as messages.cc_message_id
 	// so hook_events can be joined to the TG message. Empty for non-assistant sends.
 	CCMessageID string
+	// NoFloodRetry makes RetryEditRich return the FloodError instead of sleeping the flood wait and retrying the
+	// same text (the compact tool edit: its entry stays dirty and is edited again after the wait, FloodWait).
+	NoFloodRetry bool
 }
 
 // rawEnvelope is the JSON envelope returned by bot.Raw for methods returning a Message.
@@ -161,6 +164,15 @@ func capFloodSleep(d time.Duration) time.Duration {
 		return maxFloodSleep
 	}
 	return d
+}
+
+// FloodWait returns the wait of a FloodError (its RetryAfter capped at maxFloodSleep) and whether err is one.
+func FloodWait(err error) (time.Duration, bool) {
+	var floodErr tele.FloodError
+	if !errors.As(err, &floodErr) {
+		return 0, false
+	}
+	return capFloodSleep(time.Duration(floodErr.RetryAfter) * time.Second), true
 }
 
 // networkRetryBackoff returns the exponential backoff (1,2,4,8,16s) for the given 1-based attempt,
@@ -430,6 +442,9 @@ func RetryEditRich(b *tele.Bot, msg tele.Editable, html string, o RichSendOpts) 
 			// the total retry loop).
 			wait := capFloodSleep(time.Duration(floodErr.RetryAfter) * time.Second)
 			logger.Info(floodLogMsg("editMessageText(rich)", fmt.Sprint(chatID), fmt.Sprint(msgID), wait, attempt))
+			if o.NoFloodRetry {
+				return nil, floodErr
+			}
 			time.Sleep(wait)
 			continue
 		}

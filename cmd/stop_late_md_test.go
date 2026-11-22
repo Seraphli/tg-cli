@@ -27,6 +27,7 @@ type hookRig struct {
 	bs   *types.BotState
 	tg   *tgfake.Server
 	post func(event string, p map[string]interface{})
+	url  string
 }
 
 const rigSession = "sess-late"
@@ -71,7 +72,7 @@ func newHookRig(t *testing.T, backend string) *hookRig {
 		}
 		resp.Body.Close()
 	}
-	return &hookRig{bs, tg, post}
+	return &hookRig{bs, tg, post, srv.URL}
 }
 
 // lateMDRun drives a real hooks.Register mux (real stream flush and notification code, fake Telegram) through an
