@@ -97,6 +97,9 @@ Interactive setup for whisper.cpp model download and language configuration.
 | `/bot_perm_bypass` | Switch to bypass permission mode |
 | `/bot_perm_default` | Switch to default permission mode |
 | `/resume` | List and resume previous Claude Code sessions |
+| `/rewind` | Go back to an earlier message (Claude Code, codex, pi) |
+| `/t`, `/stop` | Interrupt the agent (Escape only while busy; a pending dialog is dismissed) |
+| `/bot_escape` | Send a raw Escape to the pane (any state) |
 
 ### Replying to Notifications
 

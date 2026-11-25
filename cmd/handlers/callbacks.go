@@ -57,9 +57,12 @@ func ParseMergeItems(text string) []string {
 	return items
 }
 
-// CollapseEntry collapses a collapsible PageEntry; returns the text to display (header first line).
+// CollapseEntry collapses a collapsible PageEntry; returns the text to display: the stored collapsed text of a pane capture (CollapsedText, its last lines), else the header first line.
 func CollapseEntry(entry *stores.PageEntry) string {
 	entry.Collapsed = true
+	if entry.CollapsedText != "" {
+		return entry.CollapsedText
+	}
 	return strings.SplitN(entry.Header, "\n", 2)[0]
 }
 
@@ -237,7 +240,7 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		var text string
 		var kb *tele.ReplyMarkup
 		if c.Data() == "c" {
-			// Collapse: show only the first line of the header (the link line)
+			// Collapse: a pane capture shows its last lines (CollapsedText), any other entry the first line of the header (the link line)
 			text = CollapseEntry(entry)
 			kb = &tele.ReplyMarkup{}
 			kb.Inline(CaptureExtraRow(entry.Header == CaptureHeader, false))
@@ -1282,4 +1285,5 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		}()
 		return c.Respond()
 	})
+	registerRewindCallbacks(bs)
 }

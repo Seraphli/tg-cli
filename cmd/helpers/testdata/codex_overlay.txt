@@ -1,0 +1,4 @@
+› Ask Codex to do anything
+
+  claude-sonnet-5-5 default · ~/work
+  Browsing transcript · ↑↓/jk scroll · ←→/hl prompts · ctrl+t details · ↵ rewind · esc back

@@ -328,6 +328,8 @@ func Register(bs *types.BotState) {
 	for tgName, cmd := range customCmds {
 		ccCommandMap[tgName] = cmd.CCName
 	}
+	// /rewind is handled by the bot (rewind.go), not forwarded to the pane as text
+	delete(ccCommandMap, "rewind")
 
 	// Register CC command handlers
 	for tgName, ccName := range ccCommandMap {
@@ -475,35 +477,9 @@ func Register(bs *types.BotState) {
 
 	bot.Handle("/resume", func(c tele.Context) error {
 		payload := strings.TrimSpace(c.Message().Payload)
-		// Resolve target: reply-to or group
-		var target injector.TmuxTarget
-		var tmuxStr string
-		if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
-			t, err := resolveReplyTargetFromReply(bs, c.Message().ReplyTo)
-			if err != nil {
-				if err.Error() == "no target found" {
-					return c.Reply("❌ No tmux session info found in the original message.")
-				}
-				return c.Reply("❌ tmux session not found. The Claude Code session may have ended.")
-			}
-			target = t
-			tmuxStr = injector.FormatTarget(t)
-		} else if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
-			ts, t, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
-			if err != nil {
-				if err.Error() == "no targets bound" {
-					return c.Reply("💡 Please reply to a notification message to target a session.")
-				}
-				if err.Error() == "multiple sessions bound" {
-					return c.Reply("❌ Multiple sessions bound to this group. Reply to a specific notification.")
-				}
-				return c.Reply("❌ tmux session not found.")
-			}
-			target = t
-			tmuxStr = ts
-			logger.Debug(fmt.Sprintf("/resume: resolved tmuxStr=%s", tmuxStr))
-		} else {
-			return c.Reply("💡 Please reply to a notification message to target a session.")
+		tmuxStr, target, msg := resolveSessionTarget(bs, c)
+		if msg != "" {
+			return c.Reply(msg)
 		}
 		// With payload: inject /resume <payload> directly
 		if payload != "" {
@@ -564,6 +540,8 @@ func Register(bs *types.BotState) {
 		}
 		return nil
 	})
+
+	bot.Handle("/rewind", func(c tele.Context) error { return handleRewindCommand(bs, c) })
 
 	bot.Handle("/start", func(c tele.Context) error {
 		kb := &tele.ReplyMarkup{}
@@ -1024,4 +1002,34 @@ func Register(bs *types.BotState) {
 
 	RegisterMessageHandlers(bs)
 	RegisterCallbackHandlers(bs)
+}
+
+// resolveSessionTarget resolves the target of a command like /resume: the notification replied to, else the
+// session bound to the group. msg is the reply text when it cannot be resolved.
+func resolveSessionTarget(bs *types.BotState, c tele.Context) (tmuxStr string, target injector.TmuxTarget, msg string) {
+	if c.Message().ReplyTo != nil && !isTopicRootReply(c.Message()) {
+		t, err := resolveReplyTargetFromReply(bs, c.Message().ReplyTo)
+		if err != nil {
+			if err.Error() == "no target found" {
+				return "", injector.TmuxTarget{}, "❌ No tmux session info found in the original message."
+			}
+			return "", injector.TmuxTarget{}, "❌ tmux session not found. The Claude Code session may have ended."
+		}
+		return injector.FormatTarget(t), t, ""
+	}
+	if c.Chat().Type == "group" || c.Chat().Type == "supergroup" {
+		ts, t, err := resolveGroupTarget(bs, c.Chat().ID, c.Message().ThreadID)
+		if err != nil {
+			if err.Error() == "no targets bound" {
+				return "", injector.TmuxTarget{}, "💡 Please reply to a notification message to target a session."
+			}
+			if err.Error() == "multiple sessions bound" {
+				return "", injector.TmuxTarget{}, "❌ Multiple sessions bound to this group. Reply to a specific notification."
+			}
+			return "", injector.TmuxTarget{}, "❌ tmux session not found."
+		}
+		logger.Debug(fmt.Sprintf("resolveSessionTarget: resolved tmuxStr=%s", ts))
+		return ts, t, ""
+	}
+	return "", injector.TmuxTarget{}, "💡 Please reply to a notification message to target a session."
 }

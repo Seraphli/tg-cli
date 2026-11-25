@@ -33,7 +33,7 @@ var CCBuiltinCommands = map[string]string{
 	"permissions":    "View/update permissions",
 	"plan":           "Enter plan mode",
 	"rename":         "Rename current session",
-	"rewind":         "Rewind conversation",
+	"rewind":         "Go back to an earlier message (Claude Code, codex, pi)",
 	"stats":          "Show usage stats",
 	"status":         "Show status",
 	"statusline":     "Configure status line",
@@ -74,6 +74,7 @@ type PageEntry struct {
 	Header         string // non-empty = collapsible message; stores the header prefix (@ forward, pane capture, etc.)
 	Collapsed      bool   // current collapse state
 	CurrentPage    int    // last viewed page (1-based); used to restore on expand
+	CollapsedText  string // pane capture: the text shown while collapsed (header and last lines, HTML-escaped); "" = the first line of Header
 }
 
 // PageCacheStore stores paginated message entries indexed by Telegram message ID.

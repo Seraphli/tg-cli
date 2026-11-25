@@ -1,0 +1,20 @@
+
+● alpha
+
+✻ Crunched for 1s · done 9:54 PM
+
+❯ Create a file named note.txt containing hello, using the Write tool. Then reply with exactly: beta
+
+● Write(note.txt)
+  ⎿  Wrote 1 line to note.txt
+      1 hello
+
+● beta
+
+✻ Cooked for 2s · done 9:54 PM
+                                                                                                                                                                             ctrl+g to edit in VS Code
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Reply with exactly: gamma
+  This is the second line of the prompt.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle)

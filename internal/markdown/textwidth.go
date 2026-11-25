@@ -28,3 +28,14 @@ func displayWidth(s string) int {
 	}
 	return w
 }
+
+// TruncateWidth cuts s to at most maxCols display columns (CJK = 2, others = 1); cut reports whether anything was removed.
+func TruncateWidth(s string, maxCols int) (out string, cut bool) {
+	w := 0
+	for i, r := range s {
+		if w += runeWidth(r); w > maxCols {
+			return s[:i], true
+		}
+	}
+	return s, false
+}

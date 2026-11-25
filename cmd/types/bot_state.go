@@ -46,6 +46,7 @@ type BotState struct {
 	VersionNotified       sync.Map
 	UnbindMenuItems       sync.Map
 	BindMenuItems         sync.Map
+	RewindMenus           sync.Map // rewindKey{chat id, message id} -> *rewindMenu (cmd/handlers/rewind.go)
 	SettingsMenuMsgs      sync.Map
 	CronRunning           sync.Map // cron job id -> struct{}: the job's run has not returned (checkAndRunCronJobs)
 }

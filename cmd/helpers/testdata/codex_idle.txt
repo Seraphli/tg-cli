@@ -1,0 +1,4 @@
+› Ask Codex to do anything
+
+  claude-sonnet-5-5 default · ~/work
+  ? for shortcuts                                                                                                                                                             ⚠ 2 warnings · f2 to view

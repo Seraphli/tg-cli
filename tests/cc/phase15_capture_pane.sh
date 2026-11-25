@@ -115,13 +115,13 @@ echo "$COLLAPSE_RESP" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 ok = (d.get('collapsed') == True and
-      d.get('text','').strip() == '📺 Pane Capture')
+      d.get('text','').strip() == '📺 Pane Capture · last 12 lines\nhello-capture-single')
 sys.exit(0 if ok else 1)
 "
 _rc=$?
 set -eo pipefail
 if [ "$_rc" -eq 0 ]; then
-  pass "TC15-2-4: collapse → collapsed=true, text=='📺 Pane Capture'"
+  pass "TC15-2-4: collapse → collapsed=true, text=='📺 Pane Capture · last 12 lines' and the capture's last lines"
 else
   fail "TC15-2-4: collapse wrong (collapsed=$(echo "$COLLAPSE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('collapsed','?'))") text=$(echo "$COLLAPSE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(repr(d.get('text','?')))"))"
 fi

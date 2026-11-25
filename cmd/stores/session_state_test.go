@@ -39,6 +39,17 @@ func TestFindByTargetShortQueryMatchesFullStored(t *testing.T) {
 	}
 }
 
+// TC-S1: scenario of a codex rewind: a new rollout file under the same session id must replace the stored transcript path.
+func TestSessionAddReplacesTranscriptPath(t *testing.T) {
+	s := NewSessionStateStore(t.TempDir())
+	s.Add("s1", "%1@/tmp/tmux-1000/default", "/work", "/a/rollout-1.jsonl")
+	s.Add("s1", "%1@/tmp/tmux-1000/default", "/work", "/a/rollout-1_2.jsonl")
+	info := s.FindInfoByTarget("%1@/tmp/tmux-1000/default")
+	if info == nil || info.TranscriptPath != "/a/rollout-1_2.jsonl" {
+		t.Fatalf("TranscriptPath after second Add: got %+v, want /a/rollout-1_2.jsonl", info)
+	}
+}
+
 // TC3: a full-format query with no matching socket returns not-found.
 func TestFindByTargetFullQueryNoMatch(t *testing.T) {
 	s := NewSessionStateStore(t.TempDir())

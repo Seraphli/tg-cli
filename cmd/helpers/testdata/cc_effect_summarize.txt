@@ -1,0 +1,142 @@
+=== F45 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ❯ 1. Restore conversation
+    2. Summarize from here
+    3. Summarize up to here
+    4. Never mind
+=== F46 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  *  Summarizing…
+=== F47 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ✢  Summarizing…
+=== F48 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ·  Summarizing…
+=== F49 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ✶  Summarizing…
+=== F50 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ✻  Summarizing…
+=== F51 ===
+● Summarized conversation
+    ⎿  Summarized 10 messages from this point
+       (ctrl+o to expand history)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Rewind
+
+  Confirm you want to restore to the point before you sent this message:
+
+  │ Reply with exactly: alpha
+  │ (26s ago)
+
+  The conversation will be forked.
+  The code will be unchanged.
+
+  ✽  Summarizing…
+=== F52 ===
+
+
+✻ Conversation compacted (ctrl+o for history)
+
+
+● Summarized conversation
+    ⎿  Summarized 1 messages up to this point
+       (ctrl+o to expand history)
+
+❯ Reply with exactly: alpha
+
+● alpha
+
+✻ Brewed for 1s · done 11:14 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents                                                                                                       Conversation summarized (ctrl+o for history)

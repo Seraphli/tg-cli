@@ -1,0 +1,63 @@
+=== F1 ===
+
+● alpha
+
+✻ Crunched for 0s · done 5:00 PM
+
+● Summarized conversation
+    ⎿  Summarized 8 messages from this point
+       (ctrl+o to expand history)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ Conversation summarized (ctrl+o for history) ▔
+   Rewind
+
+   Confirm you want to restore to the point before you sent this message:
+
+   │ Reply with exactly: alpha
+   │ (25s ago)
+
+   The conversation will be forked.
+   The code will be unchanged.
+
+   ✢  Summarizing…
+=== F2 ===
+
+
+✻ Crunched for 0s · done 5:00 PM
+
+❯ Reply with exactly: alpha
+
+● alpha
+
+✻ Crunched for 0s · done 5:00 PM
+
+● Summarized conversation
+    ⎿  Summarized 8 messages from this point
+       (ctrl+o to expand history)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ compaction blocked by PreCompact hook ▔
+   Rewind
+
+   Failed to summarize:
+   Compaction blocked by PreCompact hook: [hook]
+
+   Esc to cancel
+=== F3 ===
+
+
+● alpha
+
+✻ Crunched for 0s · done 5:00 PM
+
+❯ Reply with exactly: alpha
+
+● alpha
+
+✻ Crunched for 0s · done 5:00 PM
+
+● Summarized conversation
+    ⎿  Summarized 8 messages from this point
+       (ctrl+o to expand history)
+                                                                                                                                                                 compaction blocked by PreCompact hook
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents

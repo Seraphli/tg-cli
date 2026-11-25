@@ -58,28 +58,35 @@ func isRuleLine(t string) bool {
 	return n >= 40
 }
 
-// ccBusyFromViewport is the pure classifier: box-finding + the first glyph line above the box (see the
-// rules above). The countdown is set only for the waiting state.
-func ccBusyFromViewport(viewport string, ccActive bool) (stores.BusyState, string) {
-	lines := strings.Split(viewport, "\n")
-	// (1) Box-finding: the BOTTOM-MOST region between two rule lines whose FIRST enclosed line (trimmed)
-	// starts with ❯ (empty OR carrying a wrapped/numbered draft; NO ❯\d+. exclusion). Anchor = top rule.
+// ccInputBox returns the index of the top rule and of the bottom rule of the BOTTOM-MOST input box: the region
+// between two rule lines whose first enclosed line starts with ❯. Both are -1 without a box.
+func ccInputBox(lines []string) (anchor, bottom int) {
 	var ruleIdx []int
 	for i, ln := range lines {
 		if isRuleLine(strings.TrimSpace(ln)) {
 			ruleIdx = append(ruleIdx, i)
 		}
 	}
-	anchor := -1
+	anchor, bottom = -1, -1
 	for k := 0; k+1 < len(ruleIdx); k++ {
 		a, b := ruleIdx[k], ruleIdx[k+1]
 		if b <= a+1 {
 			continue // no enclosed line
 		}
 		if strings.HasPrefix(strings.TrimSpace(lines[a+1]), "❯") {
-			anchor = a // keep last -> bottom-most
+			anchor, bottom = a, b // keep last -> bottom-most
 		}
 	}
+	return anchor, bottom
+}
+
+// ccBusyFromViewport is the pure classifier: box-finding + the first glyph line above the box (see the
+// rules above). The countdown is set only for the waiting state.
+func ccBusyFromViewport(viewport string, ccActive bool) (stores.BusyState, string) {
+	lines := strings.Split(viewport, "\n")
+	// (1) Box-finding: the BOTTOM-MOST region between two rule lines whose FIRST enclosed line (trimmed)
+	// starts with ❯ (empty OR carrying a wrapped/numbered draft; NO ❯\d+. exclusion). Anchor = top rule.
+	anchor, _ := ccInputBox(lines)
 	// (2) The first glyph line above the anchor decides; nothing above it is looked at. No box (a dialog)
 	// means no decision from the pane.
 	for i := anchor - 1; i >= 0; i-- {

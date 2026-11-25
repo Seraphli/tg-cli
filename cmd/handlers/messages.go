@@ -928,12 +928,12 @@ func RegisterMessageHandlers(bs *types.BotState) {
 					}
 					if c.Message().Text == "/bot_capture" || strings.HasPrefix(c.Message().Text, "/bot_capture@") ||
 						c.Message().Text == "/p" || strings.HasPrefix(c.Message().Text, "/p@") {
-						return handleCaptureCommand(bs, c, target)
+						return handleCaptureCommand(bs, c, target, false)
 					}
 					if isRestartCommand(c.Message().Text) {
 						return handleRestartCommand(bs, c, target)
 					}
-					return handleEscapeCommand(c, target)
+					return handleEscapeFamily(bs, c, target)
 				}
 			}
 		} else {
@@ -950,7 +950,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
-				return handleCaptureCommand(bs, c, target)
+				return handleCaptureCommand(bs, c, target, false)
 			}
 			if c.Message().Text == "/bot_escape" || strings.HasPrefix(c.Message().Text, "/bot_escape@") ||
 				c.Message().Text == "/stop" || strings.HasPrefix(c.Message().Text, "/stop@") ||
@@ -959,7 +959,7 @@ func RegisterMessageHandlers(bs *types.BotState) {
 				if err != nil {
 					return c.Reply("❌ No tmux session info found.")
 				}
-				return handleEscapeCommand(c, target)
+				return handleEscapeFamily(bs, c, target)
 			}
 			if isRestartCommand(c.Message().Text) {
 				target, err := resolveReplyTarget(bs, c.Message().ReplyTo)

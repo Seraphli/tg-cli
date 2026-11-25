@@ -24,6 +24,16 @@ func getInjectLock(target TmuxTarget) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// WithInjectLock runs fn while holding the per-target injection mutex, so no InjectText*, QueuedInject or cron inject
+// reaches the pane until fn returns. Inside fn use only SendKeys, PasteLocked and the capture functions: the
+// InjectText* functions take the same mutex and would deadlock.
+func WithInjectLock(target TmuxTarget, fn func() error) error {
+	mu := getInjectLock(target)
+	mu.Lock()
+	defer mu.Unlock()
+	return fn()
+}
+
 const maxSetBufferSize = 16000
 
 // setBuffer sets a tmux buffer by name. For text exceeding maxSetBufferSize bytes,
@@ -186,6 +196,12 @@ func InjectTextAppend(target TmuxTarget, text string, submit ...bool) error {
 	mu := getInjectLock(target)
 	mu.Lock()
 	defer mu.Unlock()
+	return PasteLocked(target, text, len(submit) == 0 || submit[0])
+}
+
+// PasteLocked pastes text with bracketed paste (the input is not cleared first) and presses Enter when submit is set.
+// The caller holds the injection mutex (InjectTextAppend, WithInjectLock).
+func PasteLocked(target TmuxTarget, text string, submit bool) error {
 	text = NormalizeText(text)
 	if text == "" {
 		return fmt.Errorf("empty text after normalization")
@@ -198,7 +214,7 @@ func InjectTextAppend(target TmuxTarget, text string, submit ...bool) error {
 		return fmt.Errorf("paste-buffer failed: %w", err)
 	}
 	time.Sleep(1000 * time.Millisecond)
-	if len(submit) == 0 || submit[0] {
+	if submit {
 		if err := tmuxCmd(target, "send-keys", "-t", target.PaneID, "C-m").Run(); err != nil {
 			return fmt.Errorf("submit failed: %w", err)
 		}
@@ -361,6 +377,16 @@ var captureViewportCmd = func(ctx context.Context, target TmuxTarget) *exec.Cmd 
 // cancellation/timeout.
 func CaptureViewport(ctx context.Context, target TmuxTarget) (string, error) {
 	out, err := captureViewportCmd(ctx, target).Output()
+	if err != nil {
+		return "", fmt.Errorf("capture-pane failed: %w", err)
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// CaptureViewportANSI captures the visible viewport with escape sequences (capture-pane -e); reverse video (SGR 7),
+// which codex uses for the selected prompt, is visible only this way.
+func CaptureViewportANSI(target TmuxTarget) (string, error) {
+	out, err := tmuxCmd(target, "capture-pane", "-t", target.PaneID, "-p", "-e").Output()
 	if err != nil {
 		return "", fmt.Errorf("capture-pane failed: %w", err)
 	}

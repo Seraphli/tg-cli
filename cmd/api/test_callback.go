@@ -223,7 +223,7 @@ func RegisterTestEndpoints(mux *http.ServeMux, bs *types.BotState) {
 				return
 			}
 		}
-		sent, err := handlers.SendCaptureReply(bs.Bot, chat, topicID, bs.Pages, content)
+		sent, err := handlers.SendCaptureReply(bs.Bot, chat, topicID, bs.Pages, content, false)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("send failed: %v", err), http.StatusInternalServerError)
 			return

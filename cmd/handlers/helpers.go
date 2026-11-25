@@ -25,6 +25,11 @@ import (
 // CaptureHeader is the standard header prefix for pane capture messages.
 const CaptureHeader = "📺 Pane Capture\n"
 
+// captureTailLines is the number of pane lines the collapsed view of a pane capture shows; CaptureCollapsedHeader is the header of that view (the expanded view has CaptureHeader).
+const captureTailLines = 12
+
+var CaptureCollapsedHeader = fmt.Sprintf("📺 Pane Capture · last %d lines\n", captureTailLines)
+
 // safeInjectText is a convenience wrapper that builds SafeInjectTextParams from BotState.
 func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
 	p := helpers.SafeInjectTextParams{
@@ -171,7 +176,9 @@ func inTopic(topicID int, opts ...interface{}) []interface{} {
 // that made SplitBody loop forever on large captures (the /p hang); escaping strips the raw '<'/'>'
 // so SplitBody sees no tags. The stored chunks are already escaped; collapsibleBody renders capture
 // (Rich) entries as-is (no <pre>).
-func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, topicID int, pages *stores.PageCacheStore, content string) (*tele.Message, error) {
+//
+// collapsed true sends the collapsed view (CaptureCollapsedHeader and the last captureTailLines lines of the capture, HTML-escaped, with the buttons "📖 Expand" and "🗑 Delete"), false the expanded view (CaptureHeader, the last page and its page keyboard). The rewind sends collapsed; /p, /bot_capture and /test/capture_message send expanded. The collapsed text is stored in the PageEntry (CollapsedText), so that Collapse shows the same lines.
+func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, topicID int, pages *stores.PageCacheStore, content string, collapsed bool) (*tele.Message, error) {
 	content = helpers.ShortenSeparators(content)
 	header := CaptureHeader
 	cfg, _ := config.LoadAppConfig()
@@ -184,32 +191,36 @@ func SendCaptureReply(bot *tele.Bot, chat *tele.Chat, topicID int, pages *stores
 		maxBody = 500
 	}
 	chunks := helpers.SplitBody(markdown.EscapeHTML(content), maxBody)
-	if len(chunks) == 1 {
-		kb := &tele.ReplyMarkup{}
-		kb.Inline(CaptureExtraRow(true, true))
-		text := header + chunks[0]
-		sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{TopicID: topicID, Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
-		if err != nil {
-			return nil, err
-		}
-		pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, Rich: true, CurrentPage: 1})
-		logger.Info(fmt.Sprintf("Capture reply sent: chat=%s msg_id=%d chunks=%d", chat.Recipient(), sent.ID, len(chunks)))
-		return sent, nil
-	}
 	lastPage := len(chunks)
-	kb := helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{CaptureExtraRow(true, true)})
-	text := header + chunks[lastPage-1]
+	entry := &stores.PageEntry{Chunks: chunks, Header: header, Rich: true, CurrentPage: lastPage, Collapsed: collapsed,
+		CollapsedText: CaptureCollapsedHeader + markdown.EscapeHTML(captureTail(content))}
+	text, kb := header+chunks[lastPage-1], &tele.ReplyMarkup{}
+	switch {
+	case collapsed:
+		text = entry.CollapsedText
+		kb.Inline(CaptureExtraRow(true, false))
+	case lastPage == 1:
+		kb.Inline(CaptureExtraRow(true, true))
+	default:
+		kb = helpers.BuildPageKeyboardWithExtra(lastPage, len(chunks), []tele.Row{CaptureExtraRow(true, true)})
+	}
 	sent, err := helpers.RetrySendRich(bot, chat, text, helpers.RichSendOpts{TopicID: topicID, Markup: kb, SkipEntityDetection: true, LegacyHTML: text})
 	if err != nil {
 		return nil, err
 	}
-	pages.Store(sent.ID, "", &stores.PageEntry{Chunks: chunks, Header: header, Rich: true, CurrentPage: lastPage})
-	logger.Info(fmt.Sprintf("Capture reply sent: chat=%s msg_id=%d chunks=%d", chat.Recipient(), sent.ID, len(chunks)))
+	pages.Store(sent.ID, "", entry)
+	logger.Info(fmt.Sprintf("Capture reply sent: chat=%s msg_id=%d chunks=%d collapsed=%v", chat.Recipient(), sent.ID, len(chunks), collapsed))
 	return sent, nil
 }
 
-// handleCaptureCommand handles /bot_capture.
-func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
+// captureTail is the last captureTailLines lines of a pane capture with the trailing blank lines dropped: the body of the collapsed view.
+func captureTail(content string) string {
+	lines := strings.Split(strings.TrimRight(content, " \t\r\n"), "\n")
+	return strings.Join(lines[max(len(lines)-captureTailLines, 0):], "\n")
+}
+
+// handleCaptureCommand handles /bot_capture and /p (collapsed false: the expanded view) and posts the pane after a failed /rewind list (collapsed true).
+func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget, collapsed bool) error {
 	logger.Debug(fmt.Sprintf("handleCaptureCommand: target=%v", target))
 	content, err := injector.CapturePane(target)
 	if err != nil {
@@ -219,16 +230,36 @@ func handleCaptureCommand(bs *types.BotState, c tele.Context, target injector.Tm
 	if content == "" {
 		return c.Reply("(empty pane)")
 	}
-	_, err = SendCaptureReply(c.Bot(), c.Chat(), topicOf(c.Message()), bs.Pages, content)
+	_, err = SendCaptureReply(c.Bot(), c.Chat(), topicOf(c.Message()), bs.Pages, content, collapsed)
 	return err
 }
 
-// handleEscapeCommand handles /bot_escape.
+// handleEscapeCommand handles /bot_escape: one raw Escape in every state.
 func handleEscapeCommand(c tele.Context, target injector.TmuxTarget) error {
 	if err := injector.SendKeys(target, "Escape"); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Escape failed: %v", err))
 	}
 	return c.Reply("⏹ Escape sent")
+}
+
+// handleInterruptCommand handles /t and /stop: Escape only while the agent is busy or a dialog is pending.
+func handleInterruptCommand(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
+	sent, err := helpers.InterruptIfBusy(bs.Bot, bs.PendingWait, bs.PendingMsgStore, bs.HookRunning, extractTarget, target)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("❌ Escape failed: %v", err))
+	}
+	if !sent {
+		return c.Reply("💤 Agent is idle, nothing sent. /bot_escape sends a raw Escape.")
+	}
+	return c.Reply("⏹ Escape sent")
+}
+
+// handleEscapeFamily routes /bot_escape (raw Escape) and /t, /stop (busy-only).
+func handleEscapeFamily(bs *types.BotState, c tele.Context, target injector.TmuxTarget) error {
+	if text := c.Message().Text; text == "/bot_escape" || strings.HasPrefix(text, "/bot_escape@") {
+		return handleEscapeCommand(c, target)
+	}
+	return handleInterruptCommand(bs, c, target)
 }
 
 // checkAllSessionVersions checks all active sessions for version updates.

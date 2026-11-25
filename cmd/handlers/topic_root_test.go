@@ -212,15 +212,17 @@ func TestTopicRoot_RealReplyKeepsReplyPath(t *testing.T) {
 	}
 }
 
-// TestTopicRoot_Commands: the commands with a separate reply branch (an OnText command such as /stop, /resume,
-// /bot_bind, /bot_unbind, /bot_name), typed in the bound topic, take their no-reply branch: each gives its
-// no-reply answer, not the reply path's "No tmux session info" error.
+// TestTopicRoot_Commands: the commands with a separate reply branch (an OnText command such as /stop, /bot_escape,
+// /resume, /bot_bind, /bot_unbind, /bot_name), typed in the bound topic, take their no-reply branch: each gives its
+// no-reply answer, not the reply path's "No tmux session info" error. /stop sends Escape only while the agent is
+// busy (the test pane is idle, so it answers "idle"); /bot_escape is the raw Escape and always sends it.
 func TestTopicRoot_Commands(t *testing.T) {
 	cases := []struct {
 		text   string
 		prefix string
 	}{
-		{"/stop", "⏹ Escape sent"},
+		{"/stop", "💤 Agent is idle, nothing sent."},
+		{"/bot_escape", "⏹ Escape sent"},
 		{"/resume", "📂 No previous sessions found for this project."},
 		{"/bot_bind", "Select a session to bind to this chat:"},
 		{"/bot_unbind", "Select a route to unbind:"},

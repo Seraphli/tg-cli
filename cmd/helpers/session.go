@@ -280,6 +280,29 @@ func CancelAskBySnapshot(bot *tele.Bot, pendingWait *stores.PendingWaitStore, pe
 	})
 }
 
+// InterruptIfBusy is the busy-only interrupt of /t and /stop. It reports whether it sent an Escape. A pane that no
+// longer exists is an error. An unresolved permission or AskUserQuestion dialog on the target counts as busy and is
+// dismissed through CancelPermBySnapshot or CancelAskBySnapshot (Escape, entry resolved, buttons frozen); otherwise
+// the live pane decides (LiveBusyState) and an idle pane gets nothing.
+func InterruptIfBusy(bot *tele.Bot, pendingWait *stores.PendingWaitStore, pendingMsgStore *stores.PendingMsgStore, hookRunning *stores.HookRunningStateStore, extractTarget func(string) string, target injector.TmuxTarget) (bool, error) {
+	if !injector.SessionExists(target) {
+		return false, fmt.Errorf("tmux pane %s no longer exists", target.PaneID)
+	}
+	tmuxTarget := injector.FormatTarget(target)
+	if snap, ok := pendingWait.FindByTmuxTarget(tmuxTarget); ok {
+		if snap.ToolName == "AskUserQuestion" {
+			CancelAskBySnapshot(bot, pendingWait, pendingMsgStore, extractTarget, *snap)
+		} else {
+			CancelPermBySnapshot(bot, pendingWait, pendingMsgStore, extractTarget, *snap)
+		}
+		return true, nil
+	}
+	if state, _ := LiveBusyState(hookRunning, tmuxTarget); state == stores.BusyIdle {
+		return false, nil
+	}
+	return true, injector.SendKeys(target, "Escape")
+}
+
 // DoCancelPerm cancels a PermissionRequest via TG-button path (real msgID from callback).
 // Uses FindByMsgIDSnapshot — safe because msgID is real Telegram callback ID.
 // EditFunc uses PendingMsgStore-provided msgID and chatID parameters.

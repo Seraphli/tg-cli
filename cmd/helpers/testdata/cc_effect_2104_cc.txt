@@ -1,0 +1,20 @@
+
+✻ Cooked for 3s · done 9:04 PM
+
+❯ Reply with exactly: gamma
+  This is the second line of the prompt.
+
+● gamma
+
+✻ Baked for 1s · done 9:04 PM
+
+❯ Reply with exactly: delta. Enter to continue · Esc to cancel · Confirm you want to restore to the point before you sent this message: · Restore the code and/or conversation to the point before
+
+● delta
+
+✻ Baked for 1s · done 9:04 PM
+                                                                                                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents

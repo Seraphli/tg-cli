@@ -78,7 +78,7 @@ func (s *SessionStateStore) Add(sessionID, tmuxTarget, cwd, transcriptPath strin
 		if existing.ProjectDir == "" && transcriptPath != "" {
 			existing.ProjectDir = filepath.Dir(transcriptPath)
 		}
-		if existing.TranscriptPath == "" && transcriptPath != "" {
+		if transcriptPath != "" {
 			existing.TranscriptPath = transcriptPath
 		}
 		// Preserve name from existing entry
