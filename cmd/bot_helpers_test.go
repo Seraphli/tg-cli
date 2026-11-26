@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Seraphli/tg-cli/cmd/handlers"
 	"github.com/Seraphli/tg-cli/cmd/helpers"
 	"github.com/Seraphli/tg-cli/cmd/stores"
 	"github.com/Seraphli/tg-cli/internal/config"
@@ -65,26 +66,26 @@ func TestScanCustomCommandsFrontmatter(t *testing.T) {
 		expected    string
 	}{
 		{
-			name: "frontmatter with description",
-			content: "---\ndescription: My test description\n---\nBody content here\n",
+			name:        "frontmatter with description",
+			content:     "---\ndescription: My test description\n---\nBody content here\n",
 			defaultDesc: "default",
 			expected:    "My test description",
 		},
 		{
-			name: "frontmatter without description field",
-			content: "---\ntitle: Something\nauthor: me\n---\nBody\n",
+			name:        "frontmatter without description field",
+			content:     "---\ntitle: Something\nauthor: me\n---\nBody\n",
 			defaultDesc: "default",
 			expected:    "default",
 		},
 		{
-			name: "heading first line no frontmatter",
-			content: "# My Heading\nSome body text\n",
+			name:        "heading first line no frontmatter",
+			content:     "# My Heading\nSome body text\n",
 			defaultDesc: "default",
 			expected:    "My Heading",
 		},
 		{
-			name: "plain first line no frontmatter",
-			content: "Just a plain line\nMore content\n",
+			name:        "plain first line no frontmatter",
+			content:     "Just a plain line\nMore content\n",
 			defaultDesc: "default",
 			expected:    "Just a plain line",
 		},
@@ -229,5 +230,85 @@ func TestDeliverInjectQueue_SlashCommandInjectedAlone(t *testing.T) {
 	edited = callBodies(rig.tg, "editMessageText")
 	if len(edited) != 3 || !strings.Contains(edited[2], "✅ Injected") || !strings.Contains(edited[2], "(3)") || strings.Contains(edited[2], "⏳") {
 		t.Fatalf("the Queued message was edited to %q, want \"✅ Injected (3)\" with no ⏳", edited)
+	}
+}
+
+// TestDeliverInjectQueue_MediaItemWaitsForIdle: while the agent works the user sends a text and then a picture message
+// (two files and a caption). A Force flush (a tool boundary of the same turn) injects the text but never the picture
+// message, however often it runs: the paths and the caption stay ONE queued item, listed in one "⏳ Queued" message that
+// no Force flush touches again; the idle flush pastes the item as ONE message and edits that message to "✅ Injected".
+func TestDeliverInjectQueue_MediaItemWaitsForIdle(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	const media = "📎 /tmp/a.jpg /tmp/b.jpg\nwhat is wrong here"
+	rig := newHookRig(t, "cc")
+	bs := rig.bs
+	bs.ReactionTracker = stores.NewReactionTrackerStore()
+	// A private tmux server. Its pane records every byte the injector sends (ESC shown as ^[, Ctrl-U as ^U) and shows them
+	// after a "❯ " prompt that comes back after every Enter, so the pane scan of SafeInjectText confirms the first paste of
+	// each injection like a real prompt.
+	orig, server := injector.ServerName, fmt.Sprintf("tgcli-test-media-%d", os.Getpid())
+	injector.ServerName = server
+	t.Cleanup(func() {
+		socket, _ := exec.Command("tmux", "-L", server, "display-message", "-p", "#{socket_path}").Output()
+		exec.Command("tmux", "-L", server, "kill-server").Run()
+		os.Remove(strings.TrimSpace(string(socket))) // kill-server leaves the socket file behind
+		injector.ServerName = orig
+	})
+	rec := filepath.Join(t.TempDir(), "rec")
+	recorder := fmt.Sprintf(`printf '\033[?2004h'; stty -icanon -echo; cat -v | tee %s | perl -e '$|=1; print "❯ "; while (sysread(STDIN, $c, 1)) { print $c; print "❯ " if $c eq "\n" }'`, rec)
+	if err := injector.NewSessionCmd("-d", "-s", "rec", "-x", "80", "-y", "24", recorder).Run(); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, 3*time.Second, func() bool { _, err := os.Stat(rec); return err == nil })
+	panes, err := injector.ListPanes("rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := panes[0]
+	bs.SessionState.Add("sess-media", target, "/work", "")
+	if err := config.SaveRoutes(config.Routes{NameRouteMap: map[string]config.NameRoute{"sess-media": {ChatID: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	bs.HookRunning.SetBusyState(target, stores.BusyWorking, "")
+	if err := handlers.InjectMessage(bs, target, "text A", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := handlers.InjectMessage(bs, target, "what is wrong here", []string{"/tmp/a.jpg", "/tmp/b.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+	pasted := func() string { got, _ := os.ReadFile(rec); return string(got) }
+	paste := func(text string) string { return "^[[200~" + text + "^[[201~" }
+	if pasted() != "" || bs.InjectQueue.ItemCount(target) != 2 {
+		t.Fatalf("the busy agent got %q and the queue holds %d items, want nothing pasted and both messages queued", pasted(), bs.InjectQueue.ItemCount(target))
+	}
+	textA := "^U" + paste("text A") + "\n"
+	check := func(after string) {
+		t.Helper()
+		if got := pasted(); got != textA {
+			t.Fatalf("after %s the pane received %q, want only the text %q", after, got, textA)
+		}
+		if queue := bs.InjectQueue.GetTexts(target); !slices.Equal(queue, []string{media}) || !bs.InjectQueue.HeadHasPaths(target) {
+			t.Fatalf("after %s the queue is %q, want the picture message as ONE item", after, queue)
+		}
+		if sent, edited := len(callBodies(rig.tg, "sendRichMessage")), len(callBodies(rig.tg, "editMessageText")); sent != 2 || edited != 2 {
+			t.Fatalf("after %s Telegram got %d messages and %d edits, want the first Queued message edited to the delivered text and one new Queued message for the picture message", after, sent, edited)
+		}
+	}
+	deliverInjectQueue(bs, target, "", stores.InjectModeQueuedCommand)
+	check("the first Force flush")
+	deliverInjectQueue(bs, target, "", stores.InjectModeQueuedCommand)
+	check("the second Force flush")
+	bs.HookRunning.SetBusyState(target, stores.BusyIdle, "")
+	deliverInjectQueue(bs, target, "", stores.InjectModeIdle)
+	want := textA + "^U" + paste("/tmp/a.jpg") + paste(" /tmp/b.jpg") + paste("\nwhat is wrong here") + "\n"
+	waitUntil(t, 3*time.Second, func() bool { return len(pasted()) >= len(want) })
+	if got := pasted(); got != want {
+		t.Fatalf("after the idle flush the pane received %q, want %q", got, want)
+	}
+	edited := callBodies(rig.tg, "editMessageText")
+	if bs.InjectQueue.HasItems(target) || len(edited) != 3 || !strings.Contains(edited[2], "✅ Injected") || !strings.Contains(edited[2], "📎 /tmp/a.jpg /tmp/b.jpg") {
+		t.Fatalf("the queue has items: %v, the edits are %q, want an empty queue and the last edit \"✅ Injected\" with the files", bs.InjectQueue.HasItems(target), edited)
 	}
 }

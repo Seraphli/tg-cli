@@ -1286,4 +1286,5 @@ func RegisterCallbackHandlers(bs *types.BotState) {
 		return c.Respond()
 	})
 	registerRewindCallbacks(bs)
+	registerMediaCallbacks(bs)
 }

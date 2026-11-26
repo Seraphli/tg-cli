@@ -47,13 +47,13 @@ type PendingWaitEntry struct {
 	TmuxTarget         string
 	Payload            json.RawMessage // original enriched payload
 	Ch                 chan WaitEvent  // buffered cap 1; the live connect handler reads it
-	Terminal           *WaitEvent     // set if a terminal arrives with no live reader (delivered on next connect)
-	Generation         int            // bumped on each (re)connect
-	LiveGen            int            // generation of the currently-live handler (0 = none)
-	Live               bool           // a connect handler is actively reading Ch right now
-	Resolved           bool           // a terminal was produced; freeze done; awaiting delivery+removal
-	ResolvedAt         int64          // unix secs when Resolved set (for the undelivered-terminal sweep)
-	seq                int            // insertion-order counter for FIFO among collisions
+	Terminal           *WaitEvent      // set if a terminal arrives with no live reader (delivered on next connect)
+	Generation         int             // bumped on each (re)connect
+	LiveGen            int             // generation of the currently-live handler (0 = none)
+	Live               bool            // a connect handler is actively reading Ch right now
+	Resolved           bool            // a terminal was produced; freeze done; awaiting delivery+removal
+	ResolvedAt         int64           // unix secs when Resolved set (for the undelivered-terminal sweep)
+	seq                int             // insertion-order counter for FIFO among collisions
 	Questions          []QuestionMeta  // AskUserQuestion prompts for this entry
 	MsgText            string          // original TG message text
 	PermSuggestions    json.RawMessage // raw permission suggestions JSON

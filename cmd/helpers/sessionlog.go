@@ -149,8 +149,8 @@ func ReadFirstHumanPrompt(path string) string {
 			continue
 		}
 		var entry struct {
-			Type   string `json:"type"`
-			IsMeta bool   `json:"isMeta"`
+			Type    string `json:"type"`
+			IsMeta  bool   `json:"isMeta"`
 			Message struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`

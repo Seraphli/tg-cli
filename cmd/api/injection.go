@@ -69,7 +69,11 @@ func registerInjection(mux *http.ServeMux, bs *types.BotState) {
 		}
 		tmuxStr := injector.FormatTarget(target)
 		logger.Info(fmt.Sprintf("Inject message API: target=%s text=%s image=%s", tmuxStr, req.Text, req.ImagePath))
-		if err := handlers.InjectMessage(bs, tmuxStr, req.Text, req.ImagePath); err != nil {
+		var paths []string
+		if req.ImagePath != "" {
+			paths = []string{req.ImagePath}
+		}
+		if err := handlers.InjectMessage(bs, tmuxStr, req.Text, paths); err != nil {
 			logger.Error(fmt.Sprintf("Inject message API failed: %v", err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

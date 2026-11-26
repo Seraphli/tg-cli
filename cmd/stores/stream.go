@@ -43,8 +43,8 @@ type StreamEntry struct {
 	Interrupted       bool
 	InterruptRendered bool
 	Rich              bool // true = message was first sent as rich (Bot API 10.1); all edits must match
-	Dirty      bool
-	LastFlush  time.Time
+	Dirty             bool
+	LastFlush         time.Time
 	// PositionedChunks is how many chunks have been placed/queued for this bubble so far (the enqueue-time
 	// high-water-mark, f25). flushSession reads it at snapshot (p1) and commits planned=len(chunks) at a
 	// SUCCESSFUL enqueue (p3) under DataMu — NOT at render completion — so a second snapshot under Message-FIFO

@@ -21,21 +21,21 @@ var CronCmd = &cobra.Command{
 }
 
 var (
-	cronMode      string
-	cronSchedule  string
-	cronPrompt    string
-	cronAgent     string
-	cronCWD       string
-	cronOnce      bool
-	cronPort      int
-	cronJobID     string
-	cronSelf      bool
-	cronName      string
-	cronMaxTurns  int
-	cronHost      string
-	cronToken     string
-	cronNoHeader  bool
-	cronFresh     bool
+	cronMode     string
+	cronSchedule string
+	cronPrompt   string
+	cronAgent    string
+	cronCWD      string
+	cronOnce     bool
+	cronPort     int
+	cronJobID    string
+	cronSelf     bool
+	cronName     string
+	cronMaxTurns int
+	cronHost     string
+	cronToken    string
+	cronNoHeader bool
+	cronFresh    bool
 )
 
 var cronAddCmd = &cobra.Command{

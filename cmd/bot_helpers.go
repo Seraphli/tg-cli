@@ -394,10 +394,11 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	if !bs.InjectQueue.HasItems(tmuxTarget) {
 		return
 	}
-	// A slash command went in earlier in this turn and the later items were held: only an idle-mode flush may
-	// take them out. A Force flush leaves the whole queue as it is (items queued later stay behind the held ones).
-	if mode != stores.InjectModeIdle && bs.InjectQueue.Held(tmuxTarget) {
-		logger.Info(fmt.Sprintf("deliverInjectQueue: held until idle, Force flush leaves the queue (target=%s, mode=%d)", tmuxTarget, mode))
+	// A slash command went in earlier in this turn and the later items were held, or the first item is a media item
+	// (a picture/file message is pasted only by an idle-mode flush): only an idle-mode flush may take the items out. A
+	// Force flush leaves the whole queue as it is (items queued later stay behind them).
+	if mode != stores.InjectModeIdle && (bs.InjectQueue.Held(tmuxTarget) || bs.InjectQueue.HeadHasPaths(tmuxTarget)) {
+		logger.Info(fmt.Sprintf("deliverInjectQueue: held until idle or media item first, Force flush leaves the queue (target=%s, mode=%d)", tmuxTarget, mode))
 		return
 	}
 	// R10-item3: idle-mode delivery WAITS for the pane to go idle before flushing. A Stop-routed idle
@@ -455,7 +456,23 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	partial := func(k int) string { return fmt.Sprintf("✅ Injected [%s] (%d of %d)", injectID, k, len(items)) }
 	// The groups run in queue order and the flush stops at the first problem; what went in is not touched again.
 	k := 0 // items that went in
+	// holdRest puts the items that did not go in back at the queue front, in order, and lists them in the target's one
+	// "⏳ Queued" message (the one an item queued while this flush ran already has, else a new one); the idle flush that
+	// injects them edits it to "✅ Injected".
+	holdRest := func() {
+		bs.InjectQueue.ReEnqueue(tmuxTarget, items[k:])
+		edit(partial(k), items[:k], k, "")
+		if chat != nil {
+			helpers.NotifyQueued(bs.Bot, bs.InjectQueue, chat, topicID, tmuxTarget, pane)
+		}
+	}
 	for gi, g := range groups {
+		// A media item is pasted only by an idle-mode flush: a Force flush stops in front of it, the item and everything
+		// behind it go back to the queue in order. (The first group cannot be one: the head check above returned before Flush.)
+		if force && len(g[0].Paths) > 0 {
+			holdRest()
+			return
+		}
 		texts := make([]string, len(g))
 		for i, it := range g {
 			texts[i] = it.Text
@@ -489,7 +506,13 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 			RequeueAfter:   later,
 			AskAnswered:    &answered,
 		}
-		if err := helpers.SafeInjectText(p, tmuxTarget, text); err != nil {
+		var err error
+		if len(g[0].Paths) > 0 {
+			err = helpers.InjectPaths(p, tmuxTarget, g[0].Paths, text)
+		} else {
+			err = helpers.SafeInjectText(p, tmuxTarget, text)
+		}
+		if err != nil {
 			head := fmt.Sprintf("❌ Inject failed [%s] (%d)", injectID, len(items))
 			if k > 0 {
 				head = fmt.Sprintf("⚠️ Partly injected [%s] (%d of %d)", injectID, k, len(items))
@@ -527,14 +550,8 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 		if force && !answered && helpers.IsSlashText(text) {
 			bs.InjectQueue.SetHeld(tmuxTarget, endsBefore)
 			if k < len(items) {
-				bs.InjectQueue.ReEnqueue(tmuxTarget, items[k:])
 				logger.Info(fmt.Sprintf("flushInjectQueue: [%s] slash command injected, holding %d later items until idle: target=%s", injectID, len(items)-k, tmuxTarget))
-				edit(partial(k), items[:k], k, "")
-				// The held items go into the target's one "⏳ Queued" message (the one an item queued while this flush ran
-				// already has, else a new one); the idle flush that injects them edits it to "✅ Injected".
-				if chat != nil {
-					helpers.NotifyQueued(bs.Bot, bs.InjectQueue, chat, topicID, tmuxTarget, pane)
-				}
+				holdRest()
 				return
 			}
 		}
@@ -543,12 +560,12 @@ func deliverInjectQueue(bs *BotState, tmuxTarget, toolUseID string, mode stores.
 	edit(fmt.Sprintf("✅ Injected [%s] (%d)", injectID, len(items)), items, len(items), "")
 }
 
-// groupInjectItems splits a flush into injection groups in queue order: a slash command is a group of its own,
-// each run of other items between slash commands is one group (merged with "\n" when injected).
+// groupInjectItems splits a flush into injection groups in queue order: a slash command and a media item (one with
+// Paths) are each a group of their own, each run of other items between them is one group (merged with "\n" when injected).
 func groupInjectItems(items []stores.InjectItem) [][]stores.InjectItem {
 	var groups [][]stores.InjectItem
 	for i, it := range items {
-		if i == 0 || helpers.IsSlashText(it.Text) || helpers.IsSlashText(items[i-1].Text) {
+		if i == 0 || helpers.IsSlashText(it.Text) || helpers.IsSlashText(items[i-1].Text) || len(it.Paths) > 0 || len(items[i-1].Paths) > 0 {
 			groups = append(groups, nil)
 		}
 		groups[len(groups)-1] = append(groups[len(groups)-1], it)
@@ -561,7 +578,7 @@ func groupInjectItems(items []stores.InjectItem) [][]stores.InjectItem {
 func injectNotice(head, pane string, items []stores.InjectItem, k int, rest string) string {
 	lines := make([]string, len(items))
 	for i, it := range items {
-		lines[i] = markdown.EscapeHTML(it.Text)
+		lines[i] = markdown.EscapeHTML(it.Display())
 		if k > 0 && k < len(items) {
 			mark := rest
 			if i < k {

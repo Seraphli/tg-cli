@@ -17,11 +17,13 @@ import (
 
 // Reply is one scripted answer. Err set means a Telegram error: HTTP status 400 and the
 // body {"ok":false,"error_code":400,"description":Err}; RetryAfter set means a flood wait: HTTP status 429 with
-// retry_after (telebot turns it into tele.FloodError); otherwise {"ok":true,"result":Result}.
+// retry_after (telebot turns it into tele.FloodError); Drop set means a broken network: the connection is closed without
+// an answer, so the client reads EOF; otherwise {"ok":true,"result":Result}.
 type Reply struct {
 	Result     interface{}
 	Err        string
 	RetryAfter int
+	Drop       bool
 }
 
 // Call is one recorded request: the Bot API method and its decoded JSON body.
@@ -59,6 +61,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	reply := defaultReply(method)
 	if f != nil {
 		reply = f(params)
+	}
+	if reply.Drop {
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close()
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if reply.RetryAfter > 0 {

@@ -122,12 +122,12 @@ func isTelegram400(err error) bool {
 // errors (4xx) that telebot wraps as a plain fmt error rather than a typed *tele.Error.
 var nonRetryableCodeSuffixes = []string{"(400)", "(401)", "(403)", "(404)", "(409)", "(413)"}
 
-// isNonRetryable reports whether err is a business error that will never succeed on retry — a
+// IsNonRetryable reports whether err is a business error that will never succeed on retry — a
 // Telegram 4xx (other than 429 rate limit, which is retryable). Everything else (5xx, transport
 // failures like connection refused/timeout, and undecodable gateway bodies) is treated as a
 // transient network error and retried. Fix 21: network errors must retry indefinitely; only genuine
 // business errors fail fast.
-func isNonRetryable(err error) bool {
+func IsNonRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -376,7 +376,7 @@ func RetrySendRich(b *tele.Bot, chat tele.Recipient, html string, o RichSendOpts
 			return sendReserved(b, chat, legacyHTML, reservedID, false, legacyOpts...)
 		}
 		// Fix 21: business errors (4xx) fail immediately; network/transient errors retry indefinitely.
-		if isNonRetryable(err) {
+		if IsNonRetryable(err) {
 			logger.Error(fmt.Sprintf("sendRichMessage failed (non-retryable): %v", err))
 			return nil, err
 		}
@@ -458,7 +458,7 @@ func RetryEditRich(b *tele.Bot, msg tele.Editable, html string, o RichSendOpts) 
 			return RetryEdit(b, msg, legacyHTML, tele.ModeHTML)
 		}
 		// Fix 21: business errors (4xx) fail immediately; network/transient errors retry indefinitely.
-		if isNonRetryable(err) {
+		if IsNonRetryable(err) {
 			logger.Error(fmt.Sprintf("editMessageText(rich) failed (non-retryable): %v", err))
 			return nil, err
 		}
@@ -560,7 +560,7 @@ func sendReserved(b *tele.Bot, to tele.Recipient, what interface{}, reservedID i
 			}
 		}
 		// Fix 21: business errors (4xx) fail immediately; network/transient errors retry indefinitely.
-		if isNonRetryable(err) {
+		if IsNonRetryable(err) {
 			logger.Error(fmt.Sprintf("Send failed (non-retryable): %v", err))
 			return nil, err
 		}
@@ -613,7 +613,7 @@ func RetryEdit(b *tele.Bot, msg tele.Editable, what interface{}, opts ...interfa
 			continue
 		}
 		// Fix 21: business errors (4xx) fail immediately; network/transient errors retry indefinitely.
-		if isNonRetryable(err) {
+		if IsNonRetryable(err) {
 			logger.Error(fmt.Sprintf("Edit failed (non-retryable): %v", err))
 			return nil, err
 		}

@@ -61,7 +61,7 @@ func TestSplitBodyEmptyTagNoPanic(t *testing.T) {
 // produced malformed HTML like "</cod</code>" that Telegram rejected (400).
 func TestSplitBodyNoSplitInsideTag(t *testing.T) {
 	body := "<code>" + strings.Repeat("X", 12) + "</code>" // 25 runes
-	chunks := SplitBody(body, 23)                           // hard split lands at "...<code>XXXXXXXXXXXX</cod"
+	chunks := SplitBody(body, 23)                          // hard split lands at "...<code>XXXXXXXXXXXX</cod"
 	if len(chunks) < 2 {
 		t.Fatalf("expected the body to be split into >=2 chunks, got %d: %q", len(chunks), chunks)
 	}

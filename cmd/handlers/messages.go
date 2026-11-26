@@ -364,11 +364,11 @@ func downloadTGFile(bot *tele.Bot, fileID, fileName string) (string, error) {
 	os.MkdirAll(dir, 0755)
 	file, err := bot.FileByID(fileID)
 	if err != nil {
-		return "", fmt.Errorf("file lookup failed: %w", err)
+		return "", err
 	}
 	destPath := filepath.Join(dir, fileName)
 	if err := bot.Download(&file, destPath); err != nil {
-		return "", fmt.Errorf("download failed: %w", err)
+		return "", err
 	}
 	logger.Info(fmt.Sprintf("File downloaded: %s -> %s", fileID, destPath))
 	return destPath, nil
@@ -458,46 +458,12 @@ func resolveReplyTarget(bs *types.BotState, replyTo *tele.Message) (injector.Tmu
 	return target, nil
 }
 
-// InjectMessage handles image + text injection to a target tmux pane.
-func InjectMessage(bs *types.BotState, tmuxTarget string, text string, imagePath string) error {
-	if imagePath != "" && text == "" {
-		return safeInjectImageText(bs, tmuxTarget, imagePath)
+// InjectMessage injects text, and the files at paths when there are any, into a target tmux pane as one message.
+func InjectMessage(bs *types.BotState, tmuxTarget string, text string, paths []string) error {
+	if len(paths) == 0 {
+		return safeInjectText(bs, tmuxTarget, text)
 	}
-	if imagePath != "" {
-		if err := safeInjectImageText(bs, tmuxTarget, imagePath, false); err != nil {
-			return fmt.Errorf("image inject failed: %w", err)
-		}
-		time.Sleep(500 * time.Millisecond)
-		target, parseErr := injector.ParseTarget(tmuxTarget)
-		if parseErr != nil {
-			return fmt.Errorf("parse target: %w", parseErr)
-		}
-		return injector.InjectTextAppend(target, "\n"+text)
-	}
-	return safeInjectText(bs, tmuxTarget, text)
-}
-
-// safeInjectImageText wraps SafeInjectText for image paths, using "[Image" as alt snippet.
-func safeInjectImageText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
-	p := helpers.SafeInjectTextParams{
-		Bot:              bs.Bot,
-		PendingWait:      bs.PendingWait,
-		InjectQueue:      bs.InjectQueue,
-		InjectConfirm:    bs.InjectConfirm,
-		StopCooldown:     bs.StopCooldown,
-		ReactionTracker:  bs.ReactionTracker,
-		SessionState:     bs.SessionState,
-		HookRunning:      bs.HookRunning,
-		HookSessionLocks: &bs.HookSessionLocks,
-		SessionEvents:    bs.SessionEvents,
-		PendingMsgStore:  bs.PendingMsgStore,
-		ResolveChat: func(target string) (*tele.Chat, string, int) {
-			return helpers.ResolveChat(bs.SessionState, target)
-		},
-		FormatPaneID: notify.FormatPaneID,
-		AltSnippet:   "[Image",
-	}
-	return helpers.SafeInjectText(p, tmuxTarget, text, submit...)
+	return helpers.InjectPaths(injectParams(bs), tmuxTarget, paths, text)
 }
 
 // processUserInput handles shared logic for OnText and OnVoice after routing.
@@ -527,10 +493,6 @@ func isRestartCommand(text string) bool {
 }
 
 func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text string, isVoice bool, voicePrefix string, imagePath ...string) error {
-	imgPath := ""
-	if len(imagePath) > 0 {
-		imgPath = imagePath[0]
-	}
 	// Strip the @botname suffix Telegram appends to a slash-command in groups, so the literal command
 	// (e.g. /reload — now un-intercepted and owned by the backend's own hot reload) reaches the pane.
 	if bot != nil && bot.Me != nil {
@@ -638,7 +600,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 			}
 		}
 		sendFeedback(tmuxStr)
-		if err := InjectMessage(bs, tmuxStr, injectionText, imgPath); err != nil {
+		if err := InjectMessage(bs, tmuxStr, injectionText, imagePath); err != nil {
 			return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 		}
 		logger.Info(fmt.Sprintf("Group quick reply: target=%s voice=%v text=%s", tmuxStr, isVoice, text))
@@ -706,7 +668,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 						}
 					}
 					sendFeedback(tmuxStr)
-					InjectMessage(bs, tmuxStr, injectionText, imgPath)
+					InjectMessage(bs, tmuxStr, injectionText, imagePath)
 					logger.Info(fmt.Sprintf("Permission cancelled via reply + inject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, tmuxStr, isVoice, text))
 				}
 			}
@@ -717,7 +679,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 				return c.Reply("❌ tmux session not found.")
 			}
 			sendFeedback(snap.TmuxTarget)
-			if err := InjectMessage(bs, snap.TmuxTarget, injectionText, imgPath); err != nil {
+			if err := InjectMessage(bs, snap.TmuxTarget, injectionText, imagePath); err != nil {
 				logger.Error(fmt.Sprintf("AskUserQuestion safeInject failed: %v", err))
 			}
 			logger.Info(fmt.Sprintf("AskUserQuestion reply via safeInject: msg_id=%d target=%s voice=%v text=%s", replyTo.ID, snap.TmuxTarget, isVoice, text))
@@ -739,7 +701,7 @@ func processUserInput(bs *types.BotState, c tele.Context, bot *tele.Bot, text st
 		}
 		injectionText = withQuote(injectionText, replyTo.Text, uploadsDir, label)
 	}
-	if err := InjectMessage(bs, injector.FormatTarget(target), injectionText, imgPath); err != nil {
+	if err := InjectMessage(bs, injector.FormatTarget(target), injectionText, imagePath); err != nil {
 		return c.Reply(fmt.Sprintf("❌ Injection failed: %v", err))
 	}
 	logger.Info(fmt.Sprintf("Injected reply to %s voice=%v text=%s", injector.FormatTarget(target), isVoice, text))
@@ -1012,13 +974,11 @@ func RegisterMessageHandlers(bs *types.BotState) {
 		if (c.Chat().Type == "group" || c.Chat().Type == "supergroup") && isAudioDocument(doc) {
 			return handleAudioTranscription(bs, c, bot, doc.FileID, audioExt(doc.FileName, doc.MIME), voicePrefix, "", nil)
 		}
-		localPath, err := downloadTGFile(bot, doc.FileID, doc.FileName)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Document download failed: %v", err))
-			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
+		fileName := doc.FileName
+		if c.Message().AlbumID != "" {
+			fileName = fmt.Sprintf("%d_%s", c.Message().ID, doc.FileName)
 		}
-		caption := c.Message().Caption
-		return processUserInput(bs, c, bot, caption, false, voicePrefix, localPath)
+		return collectMedia(bs, mediaItem{ctx: c, fileID: doc.FileID, fileName: fileName, label: doc.FileName})
 	})
 
 	bot.Handle(tele.OnPhoto, func(c tele.Context) error {
@@ -1028,13 +988,6 @@ func RegisterMessageHandlers(bs *types.BotState) {
 			return c.Reply("Not paired. Use /bot_pair first.")
 		}
 		photo := c.Message().Photo
-		fileName := fmt.Sprintf("photo_%d.jpg", time.Now().UnixNano())
-		localPath, err := downloadTGFile(bot, photo.FileID, fileName)
-		if err != nil {
-			logger.Error(fmt.Sprintf("Photo download failed: %v", err))
-			return c.Reply(fmt.Sprintf("❌ Download failed: %v", err))
-		}
-		caption := c.Message().Caption
-		return processUserInput(bs, c, bot, caption, false, voicePrefix, localPath)
+		return collectMedia(bs, mediaItem{ctx: c, fileID: photo.FileID, fileName: fmt.Sprintf("photo_%d.jpg", time.Now().UnixNano())})
 	})
 }

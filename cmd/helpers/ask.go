@@ -236,6 +236,19 @@ type SafeInjectTextParams struct {
 	// AskAnswered, when non-nil, is set to true when the text answered a pending AskUserQuestion instead of
 	// being injected (deliverInjectQueue starts no hold after such a group).
 	AskAnswered *bool
+	// Media, when non-nil, is the picture/file message whose first path is the text being injected: when phase1 re-queues
+	// (CC busy or a PermissionRequest pending) it queues this whole item (paths and text) instead of the path alone. Set by InjectPaths.
+	Media *stores.InjectItem
+}
+
+// queueItem is what phase1 puts in the inject queue when it re-queues text: the whole media item when p.Media is set, else the text.
+func (p SafeInjectTextParams) queueItem(text string, chatID int64, topicID int) stores.InjectItem {
+	if p.Media == nil {
+		return stores.InjectItem{Text: text, ChatID: chatID, TopicID: topicID}
+	}
+	item := *p.Media
+	item.ChatID, item.TopicID = chatID, topicID
+	return item
 }
 
 // injectResult carries the outcome of safeInjectPhase1 to safeInjectPhase2.
@@ -405,6 +418,36 @@ func SafeInjectText(p SafeInjectTextParams, tmuxTarget string, text string, subm
 	return nil
 }
 
+// InjectPaths injects the files at paths (not empty) and text as ONE input message: Ctrl-U, a paste of the first path,
+// a paste of " "+path for every further path (cc and codex glue two pasted non-image paths without a separator, so the
+// leading space), a paste of "\n"+text, then Enter once (right after the last path when there is no text). When the
+// session is busy or a PermissionRequest is pending nothing is pasted: SafeInjectText queues the whole message as one
+// media item (p.Media) and sets *p.Requeued.
+func InjectPaths(p SafeInjectTextParams, tmuxTarget string, paths []string, text string) error {
+	if p.Requeued == nil {
+		p.Requeued = new(bool)
+	}
+	p.Media = &stores.InjectItem{Paths: paths, Text: text}
+	p.AltSnippet = "[Image"
+	if err := SafeInjectText(p, tmuxTarget, paths[0], len(paths) == 1 && text == ""); err != nil || *p.Requeued {
+		return err
+	}
+	target, err := injector.ParseTarget(tmuxTarget)
+	if err != nil {
+		return fmt.Errorf("parse target: %w", err)
+	}
+	for i, path := range paths[1:] {
+		if err := injector.InjectTextAppend(target, " "+path, text == "" && i == len(paths)-2); err != nil {
+			return err
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	time.Sleep(500 * time.Millisecond)
+	return injector.InjectTextAppend(target, "\n"+text)
+}
+
 // truncateQueueTexts joins queued texts and truncates to maxRunes if needed.
 // Appends a truncation marker showing item count when truncated.
 func truncateQueueTexts(texts []string, maxRunes int) string {
@@ -466,7 +509,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 				chatIDInt = chatIDInt*10 + int64(c-'0')
 			}
 		}
-		p.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+		p.InjectQueue.Enqueue(tmuxTarget, p.queueItem(text, chatIDInt, topicID))
 		for _, it := range p.RequeueAfter {
 			p.InjectQueue.Enqueue(tmuxTarget, it)
 		}
@@ -553,7 +596,7 @@ func safeInjectPhase1(p SafeInjectTextParams, tmuxTarget string, text string, su
 				chatIDInt = chatIDInt*10 + int64(c-'0')
 			}
 		}
-		p.InjectQueue.Enqueue(tmuxTarget, stores.InjectItem{Text: text, ChatID: chatIDInt, TopicID: topicID})
+		p.InjectQueue.Enqueue(tmuxTarget, p.queueItem(text, chatIDInt, topicID))
 		for _, it := range p.RequeueAfter {
 			p.InjectQueue.Enqueue(tmuxTarget, it)
 		}

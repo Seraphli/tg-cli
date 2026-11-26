@@ -30,9 +30,9 @@ const captureTailLines = 12
 
 var CaptureCollapsedHeader = fmt.Sprintf("📺 Pane Capture · last %d lines\n", captureTailLines)
 
-// safeInjectText is a convenience wrapper that builds SafeInjectTextParams from BotState.
-func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
-	p := helpers.SafeInjectTextParams{
+// injectParams builds the SafeInjectTextParams of the bot's stores.
+func injectParams(bs *types.BotState) helpers.SafeInjectTextParams {
+	return helpers.SafeInjectTextParams{
 		Bot:              bs.Bot,
 		PendingWait:      bs.PendingWait,
 		InjectQueue:      bs.InjectQueue,
@@ -49,7 +49,11 @@ func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit .
 		},
 		FormatPaneID: notify.FormatPaneID,
 	}
-	return helpers.SafeInjectText(p, tmuxTarget, text, submit...)
+}
+
+// safeInjectText is a convenience wrapper that injects text with the SafeInjectTextParams of the bot.
+func safeInjectText(bs *types.BotState, tmuxTarget string, text string, submit ...bool) error {
+	return helpers.SafeInjectText(injectParams(bs), tmuxTarget, text, submit...)
 }
 
 // extractTarget returns the raw tmux target string from a TG message text (strips emoji prefix).

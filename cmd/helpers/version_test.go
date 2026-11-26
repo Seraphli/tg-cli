@@ -561,8 +561,8 @@ func TestNormalizePiToolName(t *testing.T) {
 	cases := map[string]string{
 		"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit",
 		"grep": "Grep", "find": "Glob",
-		"ls":     "ls",     // UNCHANGED — no CC analogue
-		"Bash":   "Bash",   // already canonical -> untouched
+		"ls":      "ls",      // UNCHANGED — no CC analogue
+		"Bash":    "Bash",    // already canonical -> untouched
 		"unknown": "unknown", // pass-through
 	}
 	for in, want := range cases {

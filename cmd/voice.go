@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 var VoiceCmd = &cobra.Command{
 	Use:   "voice",
 	Short: "Set up voice transcription (ffmpeg + whisper.cpp)",
@@ -282,7 +281,6 @@ func runVoice(cmd *cobra.Command, args []string) {
 	}
 }
 
-
 // runVoiceSherpa handles setup for the sherpa-onnx SenseVoice engine.
 func runVoiceSherpa(scanner *bufio.Scanner, ffmpegPath string) {
 	// Step 1: Ensure sherpa-onnx-offline binary
@@ -431,4 +429,3 @@ func expandHome(path string) string {
 	}
 	return path
 }
-

@@ -32,7 +32,7 @@ func TestFinalizeRichHTML(t *testing.T) {
 }
 
 // Fix 21: network/transient errors must retry indefinitely; only Telegram 4xx business errors (other
-// than 429) fail fast. isNonRetryable is the discriminator used by all four retry functions.
+// than 429) fail fast. IsNonRetryable is the discriminator used by all four retry functions.
 func TestIsNonRetryable(t *testing.T) {
 	cases := []struct {
 		name string
@@ -55,8 +55,8 @@ func TestIsNonRetryable(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isNonRetryable(c.err); got != c.want {
-				t.Errorf("isNonRetryable(%v) = %v, want %v", c.err, got, c.want)
+			if got := IsNonRetryable(c.err); got != c.want {
+				t.Errorf("IsNonRetryable(%v) = %v, want %v", c.err, got, c.want)
 			}
 		})
 	}

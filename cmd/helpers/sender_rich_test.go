@@ -466,6 +466,7 @@ func TestRetrySendRich_CallbackDataEncoding(t *testing.T) {
 //   - rich=true  → the edit is an editMessageText carrying rich_message (post-upgrade rich message)
 //   - rich=false → the edit is an editMessageText with parse_mode=HTML and NO rich_message
 //     (a pre-upgrade legacy message stays legacy when edited by the post-upgrade binary)
+//
 // A single message's format is thus preserved across an upgrade regardless of the running binary.
 func TestRetryFreezeEditAuto_MixedEra(t *testing.T) {
 	markup := &tele.ReplyMarkup{InlineKeyboard: [][]tele.InlineButton{{{Text: "OK", Data: "ok"}}}}

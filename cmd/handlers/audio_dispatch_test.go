@@ -117,6 +117,9 @@ func TestAudioRouting_DispatchMatrix(t *testing.T) {
 	})
 
 	t.Run("private non-audio Document -> downloadAudio NOT called (inject path)", func(t *testing.T) {
+		origBackoff := downloadBackoff
+		t.Cleanup(func() { downloadBackoff = origBackoff })
+		downloadBackoff = nil // the fake's getFile answer cannot be decoded, which counts as a network error: no retry waits here
 		bot, _ := newRoutedBotState(t)
 		got := mockDownload(t)
 		chat := &tele.Chat{ID: 105, Type: tele.ChatPrivate}

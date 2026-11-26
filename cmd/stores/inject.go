@@ -12,12 +12,27 @@ import (
 	"github.com/Seraphli/tg-cli/internal/logger"
 )
 
-// InjectItem represents a queued text to inject when CC becomes idle.
+// InjectItem represents a queued message to inject when CC becomes idle: a text, or (Paths set) a media item, the
+// files of one picture/file message with its caption, which only an idle-mode flush pastes.
 type InjectItem struct {
 	Text       string    `json:"text"`
+	Paths      []string  `json:"paths,omitempty"`
 	ChatID     int64     `json:"chat_id"`
 	TopicID    int       `json:"topic_id"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
+}
+
+// Display is how the item reads in the "⏳ Queued" and "✅ Injected" messages: its text, and for a media item the
+// line "📎 <paths joined by a space>" in front of the text.
+func (it InjectItem) Display() string {
+	if len(it.Paths) == 0 {
+		return it.Text
+	}
+	line := "📎 " + strings.Join(it.Paths, " ")
+	if it.Text == "" {
+		return line
+	}
+	return line + "\n" + it.Text
 }
 
 // InjectQueueStore manages per-target inject queues for when CC is busy.
@@ -170,6 +185,14 @@ func (iq *InjectQueueStore) HasItems(tmuxTarget string) bool {
 	return len(iq.queues[tmuxTarget]) > 0
 }
 
+// HeadHasPaths reports whether the first queued item of the target is a media item.
+func (iq *InjectQueueStore) HeadHasPaths(tmuxTarget string) bool {
+	iq.mu.Lock()
+	defer iq.mu.Unlock()
+	q := iq.queues[tmuxTarget]
+	return len(q) > 0 && len(q[0].Paths) > 0
+}
+
 // ClearTarget drops the inject queue AND the notify/inject-id metadata for a tmux target whose pane is
 // confirmed dead. Deletes all three maps even when the queue is empty (a metadata-only leftover must not
 // survive a target death). Returns the number of QUEUED ITEMS dropped (0 when only metadata was cleared).
@@ -262,14 +285,14 @@ func (iq *InjectQueueStore) QueueStatus() map[string]int {
 	return result
 }
 
-// GetTexts returns the text of all queued items for the given tmux target.
+// GetTexts returns the display text (InjectItem.Display) of all queued items for the given tmux target.
 func (iq *InjectQueueStore) GetTexts(tmuxTarget string) []string {
 	iq.mu.Lock()
 	defer iq.mu.Unlock()
 	items := iq.queues[tmuxTarget]
 	texts := make([]string, len(items))
 	for i, item := range items {
-		texts[i] = item.Text
+		texts[i] = item.Display()
 	}
 	return texts
 }
